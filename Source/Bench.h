@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Engine/AudioEngine.h"
+#include "Engine/Autosave.h"
 #include "Engine/HopAligner.h"
 #include "Plugins/PluginManager.h"
 #include "Update/Updater.h"
@@ -608,6 +609,52 @@ inline int runSelfTest()
         {
             std::cout << "  SKIP  latency groups (Smooth Operator Pro not installed)" << std::endl;
         }
+    }
+
+    // autosave: written only when the document changed, restorable, removed on a clean quit
+    {
+        const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("StageRackAutosaveTest");
+        dir.deleteRecursively();
+        dir.createDirectory();
+        Autosave::setDirectoryForTests (dir);
+
+        AudioEngine e;
+        auto* pm = new PluginManager();          // leaked on purpose: its destructor saves files
+        Session s (e, *pm);
+        s.newSession();
+        Autosave a (s);
+
+        check (! Autosave::previousRunCrashed(), "autosave: no marker before start");
+        a.start();
+        a.tick();
+        check (Autosave::previousRunCrashed() && ! Autosave::getAutosaveFile().exists(),
+               "autosave: marker written, nothing autosaved for an unchanged session");
+        check (! a.saveIfChanged(), "autosave: unchanged session not written");
+
+        e.getRack (0).gainDb = -7.5f;
+        e.getRack (0).name = "Lead vox";
+        check (a.saveIfChanged() && Autosave::getAutosaveFile().existsAsFile(), "autosave: change written");
+        check (! a.saveIfChanged(), "autosave: same state not written twice");
+
+        auto rec = Autosave::readRecovered();
+        AudioEngine e2;
+        Session s2 (e2, *pm);
+        if (rec.root.isValid())
+            s2.loadFromTree (rec.root, rec.sourceFile, true);
+        check (rec.root.isValid() && e2.getNumRacks() == 1 && std::abs (e2.getRack (0).gainDb.load() + 7.5f) < 1.0e-4f
+                 && e2.getRack (0).name == "Lead vox" && s2.isDirty() && s2.getFile() == juce::File(),
+               "autosave: recovered session has the change and is marked unsaved");
+
+        const auto saved = dir.getChildFile ("Show.stagerack");
+        s.saveTo (saved);
+        a.tick();
+        check (! Autosave::getAutosaveFile().exists(), "autosave: removed after saving the session");
+
+        a.cleanExit();
+        check (! Autosave::previousRunCrashed() && ! Autosave::getAutosaveFile().exists(), "autosave: clean quit removes marker and autosave");
+
+        Autosave::setDirectoryForTests ({});
+        dir.deleteRecursively();
     }
 
     std::cout << (failures == 0 ? "ALL PASSED" : juce::String (failures) + " FAILED") << std::endl;

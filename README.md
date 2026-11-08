@@ -141,6 +141,7 @@ Con DVS l'apertura del device può richiedere ~20 s (attesa dentro `coreaudiod`)
 - Spostamento dei plugin tra slot con drag & drop; bypass dal LED.
 - Routing di ogni rack: ingresso stereo o mono, uscita su qualsiasi coppia di canali; meter in/out. Non c'è master fader: ogni rack ha il suo gain (le sessioni vecchie col master vengono caricate a 0 dB).
 - All'avvio riapre automaticamente l'ultima sessione (`.stagerack`).
+- **Autosalvataggio e recupero dopo un crash**: ogni 15 s, se la sessione è cambiata, StageRack ne scrive una copia completa (rack, scene, stato dei plugin) in `~/Library/Application Support/StageRack/Autosave.stagerack`. Non scrive mentre i plugin si stanno caricando, durante un re-spread o se non è cambiato niente; il file della sessione non viene mai toccato. Se l'app si chiude per un crash, al riavvio propone **Restore** (la sessione torna com'era, segnata come non salvata) oppure **Open last saved** (l'autosalvataggio resta da parte come `Autosave (not restored).stagerack`). Il dialogo compare prima di caricare i plugin. Dopo un'uscita normale o un salvataggio l'autosalvataggio viene cancellato.
 - Menu del rack: pulsante **•••** oppure tasto destro in qualsiasi punto del rack.
 - Scorciatoie: ⌘S salva, ⌘⇧S memorizza la scena, ⌘O apri, ⌘N nuova sessione, ⌘R nuovo rack.
 

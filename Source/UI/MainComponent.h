@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../Engine/Autosave.h"
 #include "../Engine/Session.h"
 #include "Theme.h"
 #include "EditController.h"
@@ -49,6 +50,9 @@ private:
     PluginManager pluginManager;
     AudioEngine engine;
     std::unique_ptr<Session> session;
+    std::unique_ptr<Autosave> autosave;
+    void openLastSession();
+    void offerRecovery (Autosave::Recovered);
     std::unique_ptr<EditController> edit;
 
     std::unique_ptr<TopBar> topBar;

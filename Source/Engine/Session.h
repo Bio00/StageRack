@@ -82,6 +82,15 @@ public:
     void newSession();
     bool saveTo (const juce::File&);
     void loadFrom (const juce::File&);
+    /** The whole document (racks, plugin states, scenes), as saved in a .stagerack file. */
+    juce::ValueTree toTree() const;
+    /** Loads a document tree; `file` becomes the session's file (may be none). */
+    void loadFromTree (const juce::ValueTree& root, const juce::File& file, bool markAsChanged);
+    static bool isSessionTree (const juce::ValueTree&);
+    /** Plugins of a loaded session still being created (their state isn't in toTree() yet). */
+    int getPendingLoads() const noexcept            { return *pendingLoads; }
+    /** Changes whenever the document is replaced or saved (new, open, save). */
+    int getDocumentGeneration() const noexcept      { return documentGeneration; }
     juce::File getFile() const                      { return file; }
     bool isDirty() const noexcept                   { return dirty; }
     void markDirty();
@@ -99,6 +108,8 @@ private:
     juce::File file;
     bool dirty = false;
     std::shared_ptr<int> loadGeneration = std::make_shared<int> (0);
+    std::shared_ptr<int> pendingLoads = std::make_shared<int> (0);
+    int documentGeneration = 0;
 
     class LiveRespreader;
     std::unique_ptr<LiveRespreader> respreader;

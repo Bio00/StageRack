@@ -77,12 +77,20 @@ MainComponent::MainComponent()
     rackContainer.addAndMakeVisible (addRackButton);
 
     // Reopen the last session: after a crash or reboot at a gig you're back in one click.
-    const juce::File last (settings.getValue ("lastSession"));
+    // If the previous run crashed with unsaved changes, offer the autosave first (before
+    // creating any plugin: loading the session twice would be slow).
+    autosave = std::make_unique<Autosave> (*session);
 
-    if (last.existsAsFile())
-        session->loadFrom (last);
-    else
+    if (auto rec = Autosave::previousRunCrashed() ? Autosave::readRecovered() : Autosave::Recovered {}; rec.root.isValid())
+    {
         session->newSession();
+        offerRecovery (std::move (rec));
+    }
+    else
+    {
+        openLastSession();
+        autosave->start();
+    }
 
     setVerticalLayout (settings.getBoolValue ("verticalLayout", false));
     setScenesCollapsed (settings.getBoolValue ("scenesCollapsed", false));
@@ -110,6 +118,7 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();
+    autosave->cleanExit();   // the user already answered "save changes?"
    #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu (nullptr);
    #endif
@@ -372,6 +381,47 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
 }
 
 //==============================================================================
+void MainComponent::openLastSession()
+{
+    const juce::File last (pluginManager.getSettings().getValue ("lastSession"));
+
+    if (last.existsAsFile())
+        session->loadFrom (last);
+    else
+        session->newSession();
+}
+
+void MainComponent::offerRecovery (Autosave::Recovered rec)
+{
+    const auto when = rec.savedAt.toString (rec.savedAt.toString (true, false) != juce::Time::getCurrentTime().toString (true, false),
+                                            true, false, true);
+    const auto name = rec.sourceFile.existsAsFile() ? "\"" + rec.sourceFile.getFileName() + "\"" : juce::String ("the untitled session");
+
+    juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::WarningIcon, "StageRack did not quit normally",
+        "Changes to " + name + " were saved automatically at " + when + " but not saved to the session file.\n\n"
+        "Restore them?",
+        "Restore", "Open last saved", this,
+        juce::ModalCallbackFunction::create ([safe = juce::Component::SafePointer<MainComponent> (this), rec] (int result)
+        {
+            if (safe == nullptr)
+                return;
+
+            if (result == 1)
+            {
+                safe->session->loadFromTree (rec.root, rec.sourceFile.existsAsFile() ? rec.sourceFile : juce::File(), true);
+            }
+            else
+            {
+                // keep it aside, in case it was the wrong button
+                const auto f = Autosave::getAutosaveFile();
+                f.moveFileTo (f.getSiblingFile ("Autosave (not restored).stagerack"));
+                safe->openLastSession();
+            }
+
+            safe->autosave->start();
+        }));
+}
+
 void MainComponent::newSession()
 {
     PluginWindow::closeAll();

@@ -462,6 +462,7 @@ void Session::newSession()
     engine.masterGainDb = 0.0f;
     engine.addRack();
     dirty = false;
+    ++documentGeneration;
     notify();
 }
 
@@ -562,10 +563,15 @@ void Session::loadPluginFromTree (Rack& r, int slot, const juce::ValueTree& pt)
     const auto rackId = r.getId();
     const auto generation = *loadGeneration;
     std::weak_ptr<int> weakGen = loadGeneration;
+    std::weak_ptr<int> weakPending = pendingLoads;
+    ++*pendingLoads;
 
     plugins.createPlugin (*known, r.getSampleRate(), r.getBlockSize(),
-        [this, weakGen, generation, rackId, slot, bypass, state, paramsChosen, shownParams, slotSize, viewMode] (std::unique_ptr<juce::AudioPluginInstance> p, const juce::String&)
+        [this, weakGen, weakPending, generation, rackId, slot, bypass, state, paramsChosen, shownParams, slotSize, viewMode] (std::unique_ptr<juce::AudioPluginInstance> p, const juce::String&)
         {
+            if (auto pending = weakPending.lock())
+                --*pending;
+
             auto gen = weakGen.lock();
             auto* rack = engine.findRack (rackId);
 
@@ -747,7 +753,7 @@ void Session::setConsecutiveOutputs (const juce::Array<int>& rackIds, bool stere
     markDirty();
 }
 
-bool Session::saveTo (const juce::File& f)
+juce::ValueTree Session::toTree() const
 {
     juce::ValueTree root (idRoot);
     root.setProperty ("version", 1, nullptr)
@@ -769,14 +775,19 @@ bool Session::saveTo (const juce::File& f)
         scenesTree.appendChild (st, nullptr);
     }
     root.appendChild (scenesTree, nullptr);
+    return root;
+}
 
-    auto xml = root.createXml();
+bool Session::saveTo (const juce::File& f)
+{
+    auto xml = toTree().createXml();
 
     if (xml == nullptr || ! xml->writeTo (f))
         return false;
 
     file = f;
     dirty = false;
+    ++documentGeneration;
     notify();
     return true;
 }
@@ -792,10 +803,19 @@ void Session::loadFrom (const juce::File& f)
         return;
     }
 
+    loadFromTree (juce::ValueTree::fromXml (*xml), f, false);
+}
+
+bool Session::isSessionTree (const juce::ValueTree& root)
+{
+    return root.hasType (idRoot);
+}
+
+void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bool markAsChanged)
+{
     newSession();
     engine.removeRack (engine.getRack (0));
 
-    const auto root = juce::ValueTree::fromXml (*xml);
     engine.masterGainDb = 0.0f;   // no master fader any more: old sessions play at unity
     ++*loadGeneration;
 
@@ -819,7 +839,8 @@ void Session::loadFrom (const juce::File& f)
 
     currentScene = juce::jmin ((int) root["currentScene"], getNumScenes() - 1);
     file = f;
-    dirty = false;
+    dirty = markAsChanged;
+    ++documentGeneration;
     notify();
 }
 

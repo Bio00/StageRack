@@ -47,6 +47,7 @@ target_sources(StageRack PRIVATE
     Source/Engine/Rack.cpp
     Source/Engine/AudioEngine.cpp
     Source/Engine/Session.cpp
+    Source/Engine/Autosave.cpp
     Source/Engine/HopAligner.cpp
     Source/Engine/CoreWakeAssist.cpp
     Source/Plugins/PluginManager.cpp
