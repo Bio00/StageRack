@@ -1,4 +1,5 @@
 #include "PluginManagerWindow.h"
+#include "../Update/Updater.h"
 #include "Theme.h"
 
 namespace stagerack
@@ -179,7 +180,8 @@ class SettingsContent final : public juce::Component,
                               private juce::Timer
 {
 public:
-    SettingsContent (AudioEngine& e, PluginManager& pm, Session& se, std::function<void (bool)> themeChanged)
+    SettingsContent (AudioEngine& e, PluginManager& pm, Session& se, std::function<void (bool)> themeChanged,
+                     std::function<void()> checkUpdatesFn)
         : engine (e), plugins (pm), session (se), onThemeChanged (std::move (themeChanged)),
           devices (e.getDeviceManager(), 0, 64, 0, 64, true, false, true, false)
     {
@@ -198,6 +200,22 @@ public:
             if (onThemeChanged) onThemeChanged (lightTheme.getToggleState());
         };
         addAndMakeVisible (lightTheme);
+
+        autoUpdate.setButtonText ("Check for updates at startup");
+        autoUpdate.setTooltip ("Looks for a newer StageRack on GitHub when the app starts and asks before downloading anything.");
+        autoUpdate.setToggleState (plugins.getSettings().getBoolValue (update::Controller::settingCheck, true), juce::dontSendNotification);
+        autoUpdate.onClick = [this] { plugins.getSettings().setValue (update::Controller::settingCheck, autoUpdate.getToggleState()); };
+        addAndMakeVisible (autoUpdate);
+
+        onCheckUpdates = std::move (checkUpdatesFn);
+        checkUpdates.setButtonText ("Check now");
+        checkUpdates.onClick = [this] { if (onCheckUpdates) onCheckUpdates(); };
+        addAndMakeVisible (checkUpdates);
+
+        versionLabel.setText ("StageRack " + update::currentVersion(), juce::dontSendNotification);
+        versionLabel.setFont (theme::font (11.0f));
+        versionLabel.setJustificationType (juce::Justification::centredRight);
+        addAndMakeVisible (versionLabel);
 
         const auto recommended = WorkerPool::getRecommendedWorkerCount();
         threads.addItem ("Auto (" + juce::String (recommended + 1) + (WorkerPool::hasPerformanceLevels() ? " threads on P-cores)" : " threads)"), 1);
@@ -289,13 +307,14 @@ public:
         addAndMakeVisible (midiInfo);
 
         lookAndFeelChanged();
-        setSize (640, 876);
+        setSize (640, 910);
     }
 
     void lookAndFeelChanged() override
     {
         title.setColour (juce::Label::textColourId, theme::accent);
         midiInfo.setColour (juce::Label::textColourId, theme::textDim);
+        versionLabel.setColour (juce::Label::textColourId, theme::textDim);
     }
 
     void paint (juce::Graphics& g) override { g.fillAll (theme::bg); }
@@ -303,7 +322,7 @@ public:
     void resized() override
     {
         auto r = getLocalBounds().reduced (12);
-        auto bottom = r.removeFromBottom (258);
+        auto bottom = r.removeFromBottom (292);
         devices.setBounds (r);
 
         title.setBounds (bottom.removeFromTop (24));
@@ -316,6 +335,7 @@ public:
         auto r3 = row(); prevLabel.setBounds (r3.removeFromLeft (160)); prevCC.setBounds (r3.removeFromLeft (140));
         midiInfo.setBounds (row());
         lightTheme.setBounds (row().removeFromLeft (300));
+        auto ru = row(); autoUpdate.setBounds (ru.removeFromLeft (260)); checkUpdates.setBounds (ru.removeFromLeft (100)); versionLabel.setBounds (ru);
     }
 
 private:
@@ -324,8 +344,10 @@ private:
     juce::AudioDeviceSelectorComponent devices;
     juce::Label title, threadsLabel, nextLabel, prevLabel, midiInfo;
     std::function<void (bool)> onThemeChanged;
-    juce::ToggleButton spread, lightTheme;
-    juce::TextButton respread;
+    juce::ToggleButton spread, lightTheme, autoUpdate;
+    juce::TextButton respread, checkUpdates;
+    juce::Label versionLabel;
+    std::function<void()> onCheckUpdates;
     juce::ComboBox spin;
     juce::Label spinLabel;
 
@@ -341,11 +363,12 @@ private:
     juce::Slider nextCC, prevCC;
 };
 
-SettingsWindow::SettingsWindow (AudioEngine& e, PluginManager& pm, Session& se, std::function<void (bool)> onThemeChanged)
+SettingsWindow::SettingsWindow (AudioEngine& e, PluginManager& pm, Session& se, std::function<void (bool)> onThemeChanged,
+                                std::function<void()> onCheckUpdates)
     : juce::DocumentWindow ("Settings", theme::bg, juce::DocumentWindow::closeButton)
 {
     setUsingNativeTitleBar (true);
-    setContentOwned (new SettingsContent (e, pm, se, std::move (onThemeChanged)), true);
+    setContentOwned (new SettingsContent (e, pm, se, std::move (onThemeChanged), std::move (onCheckUpdates)), true);
     centreWithSize (getWidth(), getHeight());
 }
 

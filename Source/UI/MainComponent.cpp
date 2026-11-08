@@ -4,6 +4,7 @@
 #include "RackComponent.h"
 #include "PluginWindow.h"
 #include "PluginManagerWindow.h"
+#include "../Update/Updater.h"
 
 namespace stagerack
 {
@@ -52,7 +53,8 @@ MainComponent::MainComponent()
     topBar->onSettings = [this]
     {
         if (settingsWindow == nullptr)
-            settingsWindow = std::make_unique<SettingsWindow> (engine, pluginManager, *session, [this] (bool light) { setLightTheme (light); });
+            settingsWindow = std::make_unique<SettingsWindow> (engine, pluginManager, *session, [this] (bool light) { setLightTheme (light); },
+                                                               [this] { updater->checkNow(); });
         settingsWindow->setVisible (true);
         settingsWindow->toFront (true);
     };
@@ -87,11 +89,31 @@ MainComponent::MainComponent()
     setWantsKeyboardFocus (true);
     setSize (1440, 820);
     startTimerHz (30);
+
+    updater = std::make_unique<update::Controller> (settings, [] (std::function<void()> launchInstaller)
+    {
+        // the installer starts only once the app really quits (after "save changes?")
+        update::setPendingInstall (std::move (launchInstaller));
+        juce::JUCEApplication::getInstance()->systemRequestedQuit();
+    });
+
+   #if JUCE_MAC
+    juce::PopupMenu extra;
+    extra.addItem ("Check for Updates...", [this] { updater->checkNow(); });
+    juce::MenuBarModel::setMacMainMenu (&appMenu, &extra);
+   #endif
+
+    // not for the command-line test modes (they never build the main window anyway)
+    updater->checkAtStartup();
 }
 
 MainComponent::~MainComponent()
 {
     stopTimer();
+   #if JUCE_MAC
+    juce::MenuBarModel::setMacMainMenu (nullptr);
+   #endif
+    updater = nullptr;
     PluginWindow::closeAll();
     pluginWindow = nullptr;
     settingsWindow = nullptr;

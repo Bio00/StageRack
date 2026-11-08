@@ -3,6 +3,7 @@
 #include "Engine/AudioEngine.h"
 #include "Engine/HopAligner.h"
 #include "Plugins/PluginManager.h"
+#include "Update/Updater.h"
 #include <chrono>
 #include <thread>
 
@@ -526,6 +527,22 @@ inline int runSelfTest()
                  && std::abs (out.getSample (0, bs - 1)) < 1.0e-6f,
                "mono output on channel 3 only (" + juce::String (out.getSample (2, bs - 1), 3) + ")");
         e.audioDeviceStopped();
+    }
+
+    // 0: updater version order (semver: release > beta.2 > beta.1 > beta > alpha)
+    {
+        using update::compareVersions;
+        const bool ok = compareVersions ("v0.2.0-beta", "0.1.0-beta") > 0
+                     && compareVersions ("0.2.0", "0.2.0-beta") > 0
+                     && compareVersions ("0.2.0-beta.2", "0.2.0-beta.1") > 0
+                     && compareVersions ("0.2.0-beta.10", "0.2.0-beta.9") > 0
+                     && compareVersions ("0.2.0-beta.1", "0.2.0-beta") > 0
+                     && compareVersions ("0.2.0-beta", "0.2.0-alpha") > 0
+                     && compareVersions ("0.10.0", "0.9.9") > 0
+                     && compareVersions ("1.0", "1.0.0") == 0
+                     && compareVersions ("v0.1.0-beta", "0.1.0-beta") == 0
+                     && compareVersions ("0.1.0-beta", "0.1.0") < 0;
+        check (ok, "updater version order (0.10.0 > 0.9.9, 0.2.0 > 0.2.0-beta.2 > beta.1 > beta > alpha)");
     }
 
     // 5b: device with disabled channels: the callback gets only the enabled ones, packed.

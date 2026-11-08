@@ -17,6 +17,8 @@ cmake --build build                      # Ninja, Release; riconfigura: cmake -S
 open build/StageRack_artefacts/Release/StageRack.app
 EXE=build/StageRack_artefacts/Release/StageRack.app/Contents/MacOS/StageRack
 scripts/package.sh                       # dist/StageRack.app firmata ad-hoc + zip per altri Mac
+scripts/release.sh [note.md]             # package + test + tag v<versione> + release GitHub (serve gh login)
+$EXE --check-update [--download] [--fake-version 0.0.9]   # updater: cosa vede su GitHub / scarica e verifica
 arch -x86_64 $EXE --selftest             # prova la slice Intel via Rosetta
 $EXE --selftest                          # catena, latenza zero, cicli, compensazione, mono out, gruppi di latenza
 $EXE --bench-device VST3 "/Library/Audio/Plug-Ins/VST3/Defeedback.vst3" <racks> <buffer> Altoparlanti --multicore-only [--per-rack N] [--noalign] [--nowake|--wake-always] [--timeline] [--trace]
@@ -26,7 +28,7 @@ $EXE --bench VST3 <plugin> <racks> <buffer> [asyncBlock safetyMs perRack] [--asy
 ```
 - `--bench-device` = CoreAudio reale (workgroup vero), uscita muta, rumore in ingresso: **è l'unico benchmark affidabile** (quello offline era pessimista: niente workgroup/CLPC).
 - Dati app: `~/Library/Application Support/StageRack/` (`StageRack.settings` XML con `lastSession`, `verticalLayout`, `audioDevice`, `hopAlign`, `wakeAssist`...; `plugins.xml`). Sessione di test: `~/Documents/StageRack-Test.stagerack`.
-- Bundle id `com.bio.stagerack`. Repo git pubblico https://github.com/Bio00/StageRack (beta 0.1.0, tag `v0.1.0-beta`, release con lo zip; autore = noreply GitHub, mai la Gmail); JUCE e CLAP sono **submodule** in `libs/` (JUCE è AGPLv3/commerciale: va ricordato quando si distribuisce).
+- Bundle id `com.bio.stagerack`. Repo git pubblico https://github.com/Bio00/StageRack (beta 0.2.0 in sviluppo; pubblicata v0.1.0-beta con lo zip; autore = noreply GitHub, mai la Gmail); JUCE e CLAP sono **submodule** in `libs/` (JUCE è AGPLv3/commerciale: va ricordato quando si distribuisce).
 - `$EXE --edit-selftest` = test delle modifiche con ⌥ sui RackComponent veri (finestra fuori schermo, `ModifierKeys::currentModifiers` + MouseEvent sintetici, AUDelay); esce con `_Exit` (non salva plugins.xml).
 
 ## Architettura (Source/)
@@ -37,6 +39,7 @@ $EXE --bench VST3 <plugin> <racks> <buffer> [asyncBlock safetyMs perRack] [--asy
 - `Engine/CoreWakeAssist` — 1 thread spinner (QoS default −15) armato ~2 ms prima di un hop, solo se prima c'è una pausa >0.8 ms.
 - `Engine/Session` — scene (snapshot stati plugin+mix), save/load `.stagerack` (XML), `rackToTree/pluginToTree/createRackFromTree/loadPluginFromTree`, copia/move plugin, duplica rack, I/O consecutivi.
 - `Plugins/PluginManager` — cache latenze (`latency.xml`, chiave `createIdentifierString`, registrata dagli slot al caricamento + probe `--probe-latency` in processi figli), formati JUCE + **CLAP host scritto da noi** (`CLAPPluginFormat.mm`, JUCE non ospita CLAP); scansione **out-of-process** (`--scan-plugin`, figlio esce con `_Exit`, l'XML vale anche se crasha all'uscita). VST2 solo con `-DSTAGERACK_VST2_SDK_PATH`.
+- `Update/Updater` — aggiornamenti dalle release GitHub di Bio00/StageRack (pre-release incluse): `fetchLatest` (API releases, asset .zip con "macOS"), `compareVersions` (semver), `download`, `unpackAndVerify` (ditto, bundle id, versione = CFBundleShortVersionString, codesign), `launchInstaller` (script in `~/Library/Caches/StageRack/Update`: aspetta il PID, swap con backup, osascript admin se serve, `open`). `Controller` in MainComponent: controllo 3 s dopo l'avvio (setting `checkUpdates`, `skippedUpdate`), menu app "Check for Updates..." e AUDIO/DSP "Check now"; l'installer parte in `shutdown()` via `setPendingInstall` (annullato se l'utente annulla l'uscita). Versione = `STAGERACK_VERSION` da CMake (`project VERSION` + `STAGERACK_VERSION_LABEL`), deve coincidere col tag.
 - `UI/` — `MainComponent` (layout H/V, scorciatoie, `setLightTheme`), `RackComponent.cpp` (ParamRow, SlotComponent con viste 0 parametri/1 mini/2 meter, rack), `PluginBrowser` (sidebar categoria/produttore stile Pro Tools, pallino latenza; `categoryOf` deduce la categoria dal nome perché gli AU dicono solo "Effect"), `PluginMeters.mm` (meter dei plugin: AU letti con `AudioUnitGetParameter` perché il valore JUCE è in cache e non si aggiorna; VST3 via IEditController dall'IComponent; filtro "junk" per i Waves), `EditController` (selezione, clipboard, comandi), `TopBar`, `SceneListComponent`, `PluginWindow`, `PluginManagerWindow` (+Settings), `PluginThumbnail.mm` (mini-view editor negli slot: aggiunta da un'altra sessione, verificarne lo stato), `Theme.h` (colori = variabili `inline`, `theme::setLight()` + `LookAndFeel::applyColours()`; i componenti che fanno `setColour` con colori del tema lo rifanno in `lookAndFeelChanged()`).
 
 ## Funzioni presenti
@@ -54,6 +57,9 @@ Rack H/V con dimensione per-rack (bordo trascinabile, ⌘=/⌘-, layout compatto
 7. Risultati attuali (scheda reale, 10 s): 1-12 De-Feedback a 16 e 32 campioni → **0 callback oltre budget**; picchi ~0.2 ms @16, ~0.25-0.5 ms @32. Element (kushview) ha lo stesso modello (worker nel workgroup) e nulla di specifico per questi plugin.
 
 ## Trappole già incontrate
+- `juce::File::replaceWithText` scrive **CRLF** di default: per script bash passare `lineEndings = "\n"` (l'installer falliva in silenzio, il log si chiamava `install.log\r`).
+- La sandbox di Bash di Claude non legge `~/Library/Caches/...` (ENOENT anche se `ls` lo mostra): usare dangerouslyDisableSandbox per leggere il log dell'updater.
+- "Pro Tools Audio Bridge" può restare minuti dentro coreaudiod all'apertura dopo un kill brusco di StageRack: non è un bug nostro.
 - Il callback CoreAudio di JUCE riceve **solo i canali attivi, compattati**; i rack usano i numeri di canale del device → `AudioEngine::setChannelMaps` (in `audioDeviceAboutToStart`) rimappa device→buffer. Bug trovato nel debug pre-beta (con canali disattivati nel setup, IN/OUT leggevano/scrivevano il canale sbagliato); test in `--selftest`.
 - Build ASan/UBSan (Debug, arm64) per il debug: tutti i test + handover De-Feedback + app GUI puliti alla beta 0.1.0.
 - `static const std::pair<..., std::initializer_list<...>> x[] = {...}`: la lista copiata nella pair resta pendente → crash (successo in `categoryOf`). Usare `std::vector`.

@@ -7,7 +7,16 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 # Universal binary: runs natively on Apple Silicon and Intel Macs.
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Target architectures")
 
-project(StageRack VERSION 0.1.0 LANGUAGES C CXX OBJC OBJCXX)
+project(StageRack VERSION 0.2.0 LANGUAGES C CXX OBJC OBJCXX)
+
+# Pre-release label ("beta", "" for a final release). The full version ("0.2.0-beta") must match
+# the GitHub release tag ("v0.2.0-beta"): the built-in updater compares them.
+set(STAGERACK_VERSION_LABEL "beta")
+if(STAGERACK_VERSION_LABEL)
+    set(STAGERACK_FULL_VERSION "${PROJECT_VERSION}-${STAGERACK_VERSION_LABEL}")
+else()
+    set(STAGERACK_FULL_VERSION "${PROJECT_VERSION}")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -51,7 +60,8 @@ target_sources(StageRack PRIVATE
     Source/UI/PluginThumbnail.mm
     Source/UI/PluginMeters.mm
     Source/UI/PluginBrowser.cpp
-    Source/UI/PluginManagerWindow.cpp)
+    Source/UI/PluginManagerWindow.cpp
+    Source/Update/Updater.cpp)
 
 target_include_directories(StageRack PRIVATE Source libs/clap/include
     libs/JUCE/modules/juce_audio_processors_headless/format_types/VST3_SDK)   # VST3 interfaces only (meter flags)
@@ -77,7 +87,8 @@ target_compile_definitions(StageRack PRIVATE
     JUCE_PLUGINHOST_LV2=1
     JUCE_PLUGINHOST_VST=${STAGERACK_HOST_VST}
     JUCE_DISPLAY_SPLASH_SCREEN=0
-    DONT_SET_USING_JUCE_NAMESPACE=1)
+    DONT_SET_USING_JUCE_NAMESPACE=1
+    STAGERACK_VERSION="${STAGERACK_FULL_VERSION}")
 
 # CPU tuning only for the arm64 slice (every Apple Silicon Mac is >= M1).
 # The x86_64 slice keeps the default baseline so it runs on every Intel Mac with macOS 11+.

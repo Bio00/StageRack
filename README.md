@@ -1,6 +1,6 @@
 # StageRack
 
-> **Beta 0.1.0** — prima versione pubblica di prova. Usala in prova prima di portarla su un palco vero.
+> **Beta 0.2.0** — prima versione pubblica di prova. Usala in prova prima di portarla su un palco vero.
 
 Host di plugin per l'audio dal vivo, per macOS 11 (Big Sur) o successivo, su **tutti i Mac**: app universale, nativa sia su Apple Silicon (M1…M4) sia su Intel. L'impostazione è quella di Waves SuperRack Performer (rack, scene, interfaccia scura), con alcune idee prese da LiveProfessor.
 
@@ -143,6 +143,19 @@ Con DVS l'apertura del device può richiedere ~20 s (attesa dentro `coreaudiod`)
 - All'avvio riapre automaticamente l'ultima sessione (`.stagerack`).
 - Menu del rack: pulsante **•••** oppure tasto destro in qualsiasi punto del rack.
 - Scorciatoie: ⌘S salva, ⌘⇧S memorizza la scena, ⌘O apri, ⌘N nuova sessione, ⌘R nuovo rack.
+
+## Aggiornamenti automatici
+- All'avvio (dopo 3 s, in background) StageRack controlla su GitHub se c'è una versione più nuova (beta comprese). Se c'è, mostra la versione, le novità e la dimensione, e chiede: **Download and install** / **Later** / **Skip this version**. Senza il tuo sì non scarica niente.
+- **Controllo manuale**: menu StageRack → **Check for Updates...**, oppure AUDIO / DSP → **Check now**. Lì c'è anche la casella **Check for updates at startup** per disattivare il controllo all'avvio.
+- Il download (con barra e Cancel) viene verificato prima di installare: bundle id, versione uguale a quella della release, firma del codice intatta.
+- **Install and restart**: StageRack chiede se salvare la sessione, si chiude, viene sostituito **nella stessa cartella** (la vecchia app resta finché la nuova non è copiata tutta; se qualcosa va storto viene rimessa la vecchia e al riavvio compare un avviso) e si riapre da solo. Se la cartella non è scrivibile, macOS chiede la password di amministratore. Se l'app gira da una posizione di sola lettura (aperta direttamente dallo zip scaricato, "App Translocation"), la nuova versione viene messa in Download con le istruzioni.
+- L'installazione ferma l'audio per qualche secondo: **non farla durante uno spettacolo**.
+- Diagnostica: `StageRack --check-update` stampa cosa vede su GitHub (`--download` scarica e verifica anche); log dell'installazione in `~/Library/Caches/StageRack/Update/install.log`.
+- Verificato da capo a fondo: una copia "finta 0.0.9" ha trovato la 0.1.0-beta su GitHub, l'ha scaricata, verificata, installata al suo posto e si è riaperta.
+
+### Pubblicare un aggiornamento
+1. In `CMakeLists.txt` alza `project(StageRack VERSION x.y.z)` (e `STAGERACK_VERSION_LABEL`: `"beta"`, oppure `""` per una versione finale), poi commit.
+2. `scripts/release.sh [note.md]`: compila, esegue i test, impacchetta, crea il tag `vx.y.z-beta` e la release GitHub con lo zip. Il tag deve coincidere con la versione dell'app: l'updater confronta le due.
 
 ## Test
 ```bash

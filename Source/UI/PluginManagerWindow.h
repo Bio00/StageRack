@@ -19,7 +19,8 @@ public:
 class SettingsWindow final : public juce::DocumentWindow
 {
 public:
-    SettingsWindow (AudioEngine&, PluginManager&, Session&, std::function<void (bool light)> onThemeChanged);
+    SettingsWindow (AudioEngine&, PluginManager&, Session&, std::function<void (bool light)> onThemeChanged,
+                    std::function<void()> onCheckUpdates);
     void closeButtonPressed() override { setVisible (false); }
 };
 

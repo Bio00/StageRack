@@ -5,6 +5,7 @@
 #include "UI/PluginMeters.h"
 #include "UI/PluginBrowser.h"
 #include "Engine/Rack.h"
+#include "Update/Updater.h"
 
 namespace stagerack
 {
@@ -132,6 +133,45 @@ public:
             std::_Exit (rc);
         }
 
+        if (args.contains ("--check-update"))
+        {
+            // Prints what the updater sees on GitHub; with --download also downloads and verifies.
+            juce::Process::setDockIconVisible (false);
+            juce::String error;
+            const auto rel = update::fetchLatest (error);
+            int rc = 1;
+
+            std::printf ("current %s\n", update::currentVersion().toRawUTF8());
+
+            if (! rel.has_value())
+            {
+                std::printf ("error: %s\n", error.toRawUTF8());
+            }
+            else
+            {
+                const auto newer = update::compareVersions (rel->version, update::currentVersion()) > 0;
+                std::printf ("latest %s (%s%s) %s, %lld bytes\n%s\n", rel->version.toRawUTF8(), rel->tag.toRawUTF8(),
+                             rel->prerelease ? ", pre-release" : "", rel->assetName.toRawUTF8(), (long long) rel->assetSize,
+                             newer ? "UPDATE AVAILABLE" : "up to date");
+                rc = 0;
+
+                if (args.contains ("--download"))
+                {
+                    const auto zip = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("stagerack-update-test/" + rel->assetName);
+                    int last = -1;
+                    auto err = update::download (*rel, zip, [&last] (double p) { if ((int) (p * 10) != last) { last = (int) (p * 10); std::printf ("  %d%%\n", last * 10); } }, {});
+                    juce::File app;
+                    if (err.isEmpty())
+                        app = update::unpackAndVerify (zip, *rel, err);
+                    std::printf ("%s\n", err.isEmpty() ? ("verified: " + app.getFullPathName()).toRawUTF8() : ("FAILED: " + err).toRawUTF8());
+                    rc = err.isEmpty() ? 0 : 1;
+                }
+            }
+
+            std::fflush (nullptr);
+            std::_Exit (rc);
+        }
+
         if (args.contains ("--edit-selftest"))
         {
             juce::Process::setDockIconVisible (false);
@@ -184,6 +224,7 @@ public:
     void shutdown() override
     {
         mainWindow = nullptr;
+        update::runPendingInstall();   // "Install and restart": the installer waits for this process to exit
     }
 
     void systemRequestedQuit() override
@@ -215,6 +256,10 @@ public:
                 else if (result == 2)
                 {
                     quit();
+                }
+                else
+                {
+                    update::clearPendingInstall();   // quit cancelled: no update either
                 }
             }));
     }

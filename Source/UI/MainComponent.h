@@ -12,6 +12,7 @@ class SceneListComponent;
 class RackComponent;
 class PluginManagerWindow;
 class SettingsWindow;
+namespace update { class Controller; }
 
 class MainComponent final : public juce::Component,
                             public juce::DragAndDropContainer,
@@ -87,6 +88,15 @@ private:
     std::unique_ptr<PluginManagerWindow> pluginWindow;
     std::unique_ptr<SettingsWindow> settingsWindow;
     std::unique_ptr<juce::FileChooser> chooser;
+
+    // updates from GitHub: checked at startup, "Check for Updates..." in the app menu and in Settings
+    std::unique_ptr<update::Controller> updater;
+    struct AppMenu final : juce::MenuBarModel
+    {
+        juce::StringArray getMenuBarNames() override                 { return {}; }
+        juce::PopupMenu getMenuForIndex (int, const juce::String&) override { return {}; }
+        void menuItemSelected (int, int) override {}
+    } appMenu;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };
