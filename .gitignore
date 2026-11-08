@@ -1,0 +1,7 @@
+build/
+build-*/
+dist/
+tmp/
+.DS_Store
+*.xcuserstate
+.claude/settings.local.json
