@@ -28,7 +28,7 @@ $EXE --bench VST3 <plugin> <racks> <buffer> [asyncBlock safetyMs perRack] [--asy
 ```
 - `--bench-device` = CoreAudio reale (workgroup vero), uscita muta, rumore in ingresso: **è l'unico benchmark affidabile** (quello offline era pessimista: niente workgroup/CLPC).
 - Dati app: `~/Library/Application Support/StageRack/` (`StageRack.settings` XML con `lastSession`, `verticalLayout`, `audioDevice`, `hopAlign`, `wakeAssist`...; `plugins.xml`). Sessione di test: `~/Documents/StageRack-Test.stagerack`.
-- Bundle id `com.bio.stagerack`. Repo git pubblico https://github.com/Bio00/StageRack (beta 0.2.0 in sviluppo; pubblicata v0.1.0-beta con lo zip; autore = noreply GitHub, mai la Gmail); JUCE e CLAP sono **submodule** in `libs/` (JUCE è AGPLv3/commerciale: va ricordato quando si distribuisce).
+- Bundle id `com.bio.stagerack`. Repo git pubblico https://github.com/Bio00/StageRack (release pubblicate: v0.1.0-beta, v0.2.0-beta con updater; nuove versioni con scripts/release.sh; autore = noreply GitHub, mai la Gmail); JUCE e CLAP sono **submodule** in `libs/` (JUCE è AGPLv3/commerciale: va ricordato quando si distribuisce).
 - `$EXE --edit-selftest` = test delle modifiche con ⌥ sui RackComponent veri (finestra fuori schermo, `ModifierKeys::currentModifiers` + MouseEvent sintetici, AUDelay); esce con `_Exit` (non salva plugins.xml).
 
 ## Architettura (Source/)
