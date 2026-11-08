@@ -184,7 +184,7 @@ cmake -S . -B build -G Ninja -DSTAGERACK_VST2_SDK_PATH=/percorso/vst2sdk
 ```
 
 ## Licenza
-StageRack usa [JUCE](https://juce.com) (submodule in `libs/JUCE`), distribuito con licenza **AGPLv3** oppure con licenza commerciale JUCE: distribuire StageRack (sorgente o app) richiede di rispettare l'AGPLv3 (codice aperto con la stessa licenza) oppure una licenza commerciale JUCE. CLAP SDK (`libs/clap`): MIT.
+StageRack usa [JUCE](https://juce.com) (submodule in `libs/JUCE`), distribuito con licenza **AGPLv3** oppure con licenza commerciale JUCE: per questo **StageRack è rilasciato sotto GNU AGPLv3** (testo in [`LICENSE`](LICENSE)). Chi lo modifica e lo ridistribuisce deve mantenere la stessa licenza. CLAP SDK (`libs/clap`): MIT.
 
 ## Clonare e compilare
 ```bash
