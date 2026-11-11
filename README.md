@@ -1,6 +1,6 @@
 # StageRack
 
-> **Beta 0.2.0** — prima versione pubblica di prova. Usala in prova prima di portarla su un palco vero.
+> **Beta 0.4.0** — versione di prova. Usala in prova prima di portarla su un palco vero.
 
 Host di plugin per l'audio dal vivo, per macOS 11 (Big Sur) o successivo, su **tutti i Mac**: app universale, nativa sia su Apple Silicon (M1…M4) sia su Intel. L'impostazione è quella di Waves SuperRack Performer (rack, scene, interfaccia scura), con alcune idee prese da LiveProfessor.
 

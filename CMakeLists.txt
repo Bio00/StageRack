@@ -7,7 +7,7 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 # Universal binary: runs natively on Apple Silicon and Intel Macs.
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Target architectures")
 
-project(StageRack VERSION 0.3.0 LANGUAGES C CXX OBJC OBJCXX)
+project(StageRack VERSION 0.4.0 LANGUAGES C CXX OBJC OBJCXX)
 
 # Pre-release label ("beta", "" for a final release). The full version ("0.2.0-beta") must match
 # the GitHub release tag ("v0.2.0-beta"): the built-in updater compares them.

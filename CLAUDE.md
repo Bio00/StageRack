@@ -28,7 +28,7 @@ $EXE --bench VST3 <plugin> <racks> <buffer> [asyncBlock safetyMs perRack] [--asy
 ```
 - `--bench-device` = CoreAudio reale (workgroup vero), uscita muta, rumore in ingresso: **è l'unico benchmark affidabile** (quello offline era pessimista: niente workgroup/CLPC).
 - Dati app: `~/Library/Application Support/StageRack/` (`StageRack.settings` XML con `lastSession`, `verticalLayout`, `audioDevice`, `hopAlign`, `wakeAssist`...; `plugins.xml`). Sessione di test: `~/Documents/StageRack-Test.stagerack`.
-- Bundle id `com.bio.stagerack`. Repo git pubblico https://github.com/Bio00/StageRack (release pubblicate: v0.1.0-beta, v0.2.0-beta con updater, v0.3.0-beta con autosalvataggio; nuove versioni con scripts/release.sh; autore = noreply GitHub, mai la Gmail); JUCE e CLAP sono **submodule** in `libs/` (JUCE è AGPLv3/commerciale: va ricordato quando si distribuisce).
+- Bundle id `com.bio.stagerack`. Repo git pubblico https://github.com/Bio00/StageRack (release pubblicate: v0.1.0-beta, v0.2.0-beta con updater, v0.3.0-beta con autosalvataggio, v0.4.0-beta con istanze parcheggiate; nuove versioni con scripts/release.sh; autore = noreply GitHub, mai la Gmail); JUCE e CLAP sono **submodule** in `libs/` (JUCE è AGPLv3/commerciale: va ricordato quando si distribuisce).
 - `$EXE --edit-selftest` = test delle modifiche con ⌥ sui RackComponent veri (finestra fuori schermo, `ModifierKeys::currentModifiers` + MouseEvent sintetici, AUDelay); esce con `_Exit` (non salva plugins.xml).
 
 ## Architettura (Source/)
@@ -78,7 +78,7 @@ Rack H/V con dimensione per-rack (bordo trascinabile, ⌘=/⌘-, layout compatto
 - Plugin con `prepareToPlay` resettano lo stato interno; `setStateInformation` di De-Feedback contiene solo Strength/Mute/Bypass.
 - Computer-use in background: niente ⌘/⌥ né combo da tastiera, niente modificatori sul drag; i pulsanti AXButton (••• , VERTICAL) e i menu JUCE funzionano. Per aprire una sessione di test: impostare `lastSession` nelle settings con l'app chiusa (l'app riscrive le settings all'uscita).
 
-## Branch `safe-plugins` (worktree `../StageRack-Safe`)
+## Istanze parcheggiate (da v0.4.0-beta, nato sul branch `safe-plugins`)
 - `Session::retirePlugin`: le istanze tolte a sessione aperta vengono parcheggiate in `retired` (mai elaborate) e distrutte solo in `newSession()` (`closingSession`) o in `~Session`. Lo usano removePlugin, loadPlugin/loadPluginFromTree (sostituzione), removeRack, LiveRespreader. Test in `--selftest`.
 - `--stress-lifecycle` (Source/StressTest.h): 0 crash di De-Feedback (60 cicli con Guard Malloc, 250 normali, 4-6 istanze vive con audio). Il crash non si riproduce a comando.
 - Crash report De-Feedback (`~/Library/Logs/DiagnosticReports/StageRack-2026-11-0[78]*`): in creazione (`SK_ApiContextSetFieldString`, licenze) e in distruzione durante il re-spread (helper in `cblas_sgemm` → `posix_memalign`: Accelerate alloca dentro l'hop). NON disassemblare il binario del plugin (prodotto commerciale): lavorare solo lato host.
