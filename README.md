@@ -1,6 +1,6 @@
 # StageRack
 
-> **Beta 0.5.0** — versione di prova. Usala in prova prima di portarla su un palco vero.
+> **Beta 0.5.1** — versione di prova. Usala in prova prima di portarla su un palco vero.
 
 Host di plugin per l'audio dal vivo, per macOS 11 (Big Sur) o successivo, su **tutti i Mac**: app universale, nativa sia su Apple Silicon (M1…M4) sia su Intel. L'impostazione è quella di Waves SuperRack Performer (rack, scene, interfaccia scura), con alcune idee prese da LiveProfessor.
 
@@ -84,6 +84,11 @@ Gli hop di plugin che girano **in serie** (stesso rack, o rack concatenati) si s
 
 ### Nota su Dante Virtual Soundcard
 Con DVS l'apertura del device può richiedere ~20 s (attesa dentro `coreaudiod`), e DVS dichiara già ~9-10 ms di round trip anche a 32 campioni. Con una scheda CoreAudio fisica la latenza totale scende davvero.
+
+### Se `coreaudiod` non risponde (da 0.5.1)
+Un driver audio appena installato (successo con un driver HAL di rete) può tenere `coreaudiod` al 100% di CPU senza rispondere. La prima chiamata CoreAudio di un processo aspetta la risposta senza timeout, quindi fino alla 0.5.0 StageRack restava appeso **prima di aprire la finestra** e sembrava che non partisse. Fare la chiamata in un thread non basta: il thread tiene il lock interno della HAL e AppKit (il monitor App Nap del volume) chiama CoreAudio sul thread principale e si blocca lì dietro.
+Ora la prima chiamata la fa un **processo figlio** (`StageRack --coreaudio-probe`): l'app non tocca CoreAudio finché il figlio non risponde. Se la risposta arriva entro 1.5 s l'avvio è identico a prima; altrimenti la finestra si apre comunque con l'avviso "Waiting for CoreAudio" (anche nella barra in alto) e il device e l'ultima sessione si aprono da soli appena `coreaudiod` risponde, a meno che nel frattempo tu non abbia aperto o modificato un'altra sessione. Mentre aspetta, AUDIO/DSP spiega cosa succede invece di bloccarsi, e all'uscita il device salvato non viene cancellato. Rimedi: togliere il driver che blocca, oppure `sudo killall coreaudiod`.
+Test: `STAGERACK_TEST_COREAUDIO_HANG=<secondi>` (0 = per sempre) simula un `coreaudiod` che non risponde.
 
 ### Istanze parcheggiate (branch `safe-plugins`)
 De-Feedback 1.1.4 (Alpha Labs) può corrompere la memoria in rari casi quando un'istanza viene creata o distrutta mentre altre sono in funzione (crash "memory corruption of free block" visti in StageRack: in creazione nella libreria licenze del plugin, e in distruzione durante il re-spread). Per questo, a sessione aperta, StageRack **non distrugge** le istanze che togli (rimozione, sostituzione, rack cancellato, gemello sostituito dal re-spread): le **parcheggia** vive, ma fuori dal percorso audio, e le libera solo quando chiudi o cambi sessione, o all'uscita.

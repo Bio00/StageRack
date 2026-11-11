@@ -54,6 +54,11 @@ private:
     std::unique_ptr<Autosave> autosave;
     void openLastSession();
     void offerRecovery (Autosave::Recovered);
+    void startAudioDevice();
+    void loadStartupSession();
+    bool audioReady = false;          // CoreAudio answered and the device manager is initialised
+    juce::Label coreAudioWaitLabel;
+    int waitingGeneration = -1;       // document generation of the empty session shown while waiting
     std::unique_ptr<EditController> edit;
 
     std::unique_ptr<TopBar> topBar;

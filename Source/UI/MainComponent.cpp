@@ -6,6 +6,7 @@
 #include "PluginManagerWindow.h"
 #include "AutomixerWindow.h"
 #include "../Update/Updater.h"
+#include "../Engine/CoreAudioProbe.h"
 
 namespace stagerack
 {
@@ -26,9 +27,13 @@ MainComponent::MainComponent()
     if (settings.containsKey ("workers"))
         engine.presetWorkerThreads (settings.getIntValue ("workers", -1));
 
-    auto deviceState = settings.getXmlValue ("audioDevice");
-    engine.initialiseDevice (deviceState.get());
-    engine.getDeviceManager().addChangeListener (this);
+    // The first CoreAudio call blocks until coreaudiod answers. If coreaudiod is stuck (a HAL
+    // driver spinning it), opening the device here would hang the app before any window shows:
+    // ask CoreAudio from a background thread and open the device only once it has answered.
+    audioReady = coreaudio::waitUntilReady (1500);
+
+    if (audioReady)
+        startAudioDevice();
 
     session = std::make_unique<Session> (engine, pluginManager);
     session->onPluginAboutToBeDeleted = [] (juce::AudioPluginInstance* p) { PluginWindow::closeFor (p); };
@@ -53,6 +58,16 @@ MainComponent::MainComponent()
     };
     topBar->onSettings = [this]
     {
+        if (! audioReady)
+        {
+            // the device list would block on coreaudiod too
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "CoreAudio is not responding",
+                "coreaudiod has not answered yet, so the audio settings cannot be opened.\n"
+                "If it lasts, a newly installed audio driver may be stuck: remove it or restart coreaudiod "
+                "(sudo killall coreaudiod in Terminal).");
+            return;
+        }
+
         if (settingsWindow == nullptr)
             settingsWindow = std::make_unique<SettingsWindow> (engine, pluginManager, *session, [this] (bool light) { setLightTheme (light); },
                                                                [this] { updater->checkNow(); });
@@ -84,20 +99,26 @@ MainComponent::MainComponent()
     addRackButton.onClick = [this] { session->addRack(); };
     rackContainer.addAndMakeVisible (addRackButton);
 
-    // Reopen the last session: after a crash or reboot at a gig you're back in one click.
-    // If the previous run crashed with unsaved changes, offer the autosave first (before
-    // creating any plugin: loading the session twice would be slow).
     autosave = std::make_unique<Autosave> (*session);
 
-    if (auto rec = Autosave::previousRunCrashed() ? Autosave::readRecovered() : Autosave::Recovered {}; rec.root.isValid())
+    if (audioReady)
     {
-        session->newSession();
-        offerRecovery (std::move (rec));
+        loadStartupSession();
     }
     else
     {
-        openLastSession();
-        autosave->start();
+        // plugins are prepared when the device starts: wait for CoreAudio before loading them
+        session->newSession();
+        waitingGeneration = session->getDocumentGeneration();
+        addAndMakeVisible (coreAudioWaitLabel);
+        coreAudioWaitLabel.setJustificationType (juce::Justification::centred);
+        coreAudioWaitLabel.setFont (theme::font (15.0f, true));
+        coreAudioWaitLabel.setColour (juce::Label::textColourId, theme::amber);
+        coreAudioWaitLabel.setText ("Waiting for CoreAudio: coreaudiod is not responding.\n"
+                                    "The session and the audio device open as soon as it answers.\n"
+                                    "If it lasts, a newly installed audio driver may be stuck: "
+                                    "remove it or restart coreaudiod (sudo killall coreaudiod).",
+                                    juce::dontSendNotification);
     }
 
     setVerticalLayout (settings.getBoolValue ("verticalLayout", false));
@@ -126,6 +147,7 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();
+    coreaudio::stopProbe();
     autosave->cleanExit();   // the user already answered "save changes?"
    #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu (nullptr);
@@ -140,8 +162,10 @@ MainComponent::~MainComponent()
     edit->removeChangeListener (this);
     engine.getDeviceManager().removeChangeListener (this);
 
-    if (auto xml = engine.getDeviceManager().createStateXml())
-        pluginManager.getSettings().setValue ("audioDevice", xml.get());
+    // never overwrite the saved device with an empty state if CoreAudio never answered
+    if (audioReady)
+        if (auto xml = engine.getDeviceManager().createStateXml())
+            pluginManager.getSettings().setValue ("audioDevice", xml.get());
 
     rackComponents.clear();
     engine.clearRacks();
@@ -166,6 +190,7 @@ void MainComponent::resized()
 
     scenesToggle.setBounds (r.removeFromLeft (16).reduced (0, 6));
     rackViewport.setBounds (r.reduced (6, 6));
+    coreAudioWaitLabel.setBounds (rackViewport.getBounds().removeFromTop (120));
     layoutRacks();
 }
 
@@ -309,6 +334,21 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 
 void MainComponent::timerCallback()
 {
+    if (! audioReady && coreaudio::isReady())
+    {
+        audioReady = true;
+        removeChildComponent (&coreAudioWaitLabel);
+        startAudioDevice();
+
+        // unless the user already started working while we waited
+        if (session->getFile() == juce::File() && session->getDocumentGeneration() == waitingGeneration)
+            loadStartupSession();
+        else
+            autosave->start();
+
+        topBar->repaint();
+    }
+
     // plugins can change their latency at any time: re-check groups twice a second
     if (++latencyCheckCounter % 15 == 0)
         engine.updateLatencyCompensation();
@@ -390,6 +430,30 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
 }
 
 //==============================================================================
+void MainComponent::startAudioDevice()
+{
+    auto deviceState = pluginManager.getSettings().getXmlValue ("audioDevice");
+    engine.initialiseDevice (deviceState.get());
+    engine.getDeviceManager().addChangeListener (this);
+}
+
+void MainComponent::loadStartupSession()
+{
+    // Reopen the last session: after a crash or reboot at a gig you're back in one click.
+    // If the previous run crashed with unsaved changes, offer the autosave first (before
+    // creating any plugin: loading the session twice would be slow).
+    if (auto rec = Autosave::previousRunCrashed() ? Autosave::readRecovered() : Autosave::Recovered {}; rec.root.isValid())
+    {
+        session->newSession();
+        offerRecovery (std::move (rec));
+    }
+    else
+    {
+        openLastSession();
+        autosave->start();
+    }
+}
+
 void MainComponent::openLastSession()
 {
     const juce::File last (pluginManager.getSettings().getValue ("lastSession"));

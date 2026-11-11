@@ -1,4 +1,5 @@
 #include "TopBar.h"
+#include "../Engine/CoreAudioProbe.h"
 #include "Theme.h"
 
 namespace stagerack
@@ -176,7 +177,12 @@ void TopBar::paint (juce::Graphics& g)
         auto& dm = session.getEngine().getDeviceManager();
         juce::String line1 = "No audio device", line2;
 
-        if (auto* dev = dm.getCurrentAudioDevice())
+        if (! coreaudio::isReady())
+        {
+            line1 = "Waiting for CoreAudio...";
+            line2 = "coreaudiod is not responding";
+        }
+        else if (auto* dev = dm.getCurrentAudioDevice())
         {
             const auto sr = dev->getCurrentSampleRate();
             const auto bs = dev->getCurrentBufferSizeSamples();

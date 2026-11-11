@@ -10,6 +10,7 @@
 #include "UI/AutomixerWindow.h"
 #include "Engine/Rack.h"
 #include "Update/Updater.h"
+#include "Engine/CoreAudioProbe.h"
 
 namespace stagerack
 {
@@ -47,6 +48,13 @@ public:
     void initialise (const juce::String&) override
     {
         const auto args = getCommandLineParameterArray();
+
+        if (args.contains (coreaudio::probeArgument))
+        {
+            // CoreAudio probe child (see CoreAudioProbe.h): one call to coreaudiod, exit.
+            juce::Process::setDockIconVisible (false);
+            std::_Exit (coreaudio::runProbeChild());
+        }
 
         if (args.contains (PluginManager::scanArgument))
         {
