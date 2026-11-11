@@ -3,8 +3,11 @@
 #include "Bench.h"
 #include "EditTest.h"
 #include "StressTest.h"
+#include "AutomixProbe.h"
 #include "UI/PluginMeters.h"
 #include "UI/PluginBrowser.h"
+#include "UI/TopBar.h"
+#include "UI/AutomixerWindow.h"
 #include "Engine/Rack.h"
 #include "Update/Updater.h"
 
@@ -104,6 +107,99 @@ public:
             std::_Exit (0);
         }
 
+        if (args.contains ("--render-racks"))
+        {
+            // Diagnostics: --render-racks <dir>  draws racks with the automixer at work + the top bar (PNG, no device)
+            juce::Process::setDockIconVisible (false);
+            const juce::File dir (args[args.indexOf ("--render-racks") + 1]);
+            AudioEngine engine;
+            auto* pm = new PluginManager();          // leaked on purpose: its destructor saves files
+            Session session (engine, *pm);
+            EditController edit (session);
+
+            const char* names[] = { "Pastore", "Lettore", "Coro", "Musica" };
+            for (int i = 0; i < 4; ++i)
+            {
+                auto& r = engine.addRack();
+                r.name = names[i];
+                r.inputChannel = i; r.stereoInput = false; r.outputChannel = 0;
+                r.automixGroup = i < 3 ? 1 : 0;
+            }
+            engine.getRack (2).automixWeightDb = -6.0f;
+            engine.prepare (48000.0, 64, {});
+
+            // rack 1 talks loud, rack 2 softer, rack 3 only noise
+            juce::AudioBuffer<float> in (4, 64), out (2, 64);
+            juce::Random rnd (3);
+            juce::AudioIODeviceCallbackContext ctx;
+            for (int k = 0; k < 400; ++k)
+            {
+                for (int i = 0; i < 64; ++i)
+                {
+                    in.setSample (0, i, 0.3f * (rnd.nextFloat() - 0.5f));
+                    in.setSample (1, i, 0.1f * (rnd.nextFloat() - 0.5f));
+                    in.setSample (2, i, 0.01f * (rnd.nextFloat() - 0.5f));
+                    in.setSample (3, i, 0.2f * (rnd.nextFloat() - 0.5f));
+                }
+                engine.audioDeviceIOCallbackWithContext (in.getArrayOfReadPointers(), 4, out.getArrayOfWritePointers(), 2, 64, ctx);
+            }
+
+            for (bool light : { false, true })
+            {
+                theme::setLight (light);
+                theme::LookAndFeel lnf;
+                juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
+
+                for (bool vertical : { false, true })
+                {
+                    juce::Component window;
+                    const int w = vertical ? 4 * RackComponent::baseWidth : 1400, h = vertical ? 700 : 4 * RackComponent::baseHeight + 76;
+                    window.setBounds (0, 0, w, h);
+                    TopBar bar (session);
+                    if (! vertical) { bar.setBounds (0, 0, w, TopBar::preferredHeight); window.addAndMakeVisible (bar); }
+                    juce::OwnedArray<RackComponent> comps;
+
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        auto* rc = comps.add (new RackComponent (session, edit, engine.getRack (i), i));
+                        rc->setVertical (vertical);
+                        rc->setBounds (vertical ? juce::Rectangle<int> (i * RackComponent::baseWidth, 0, RackComponent::baseWidth, h)
+                                                : juce::Rectangle<int> (0, TopBar::preferredHeight + i * RackComponent::baseHeight, w, RackComponent::baseHeight));
+                        window.addAndMakeVisible (rc);
+                        rc->updateMeters();
+                    }
+                    bar.updateMeters();
+
+                    juce::Image img (juce::Image::ARGB, w, h, true);
+                    juce::Graphics g (img);
+                    g.fillAll (theme::bg);
+                    window.paintEntireComponent (g, true);
+                    juce::PNGImageFormat png;
+                    juce::FileOutputStream os (dir.getChildFile (juce::String ("racks-") + (vertical ? "v-" : "h-") + (light ? "light.png" : "dark.png")));
+                    os.setPosition (0); os.truncate();
+                    png.writeImageToStream (img, os);
+                }
+
+                {
+                    AutomixerPanel panel (session);
+                    panel.setSize (480, 440);
+                    panel.tick();
+                    juce::Image img (juce::Image::ARGB, panel.getWidth(), panel.getHeight(), true);
+                    juce::Graphics g (img);
+                    panel.paintEntireComponent (g, true);
+                    juce::PNGImageFormat png;
+                    juce::FileOutputStream os (dir.getChildFile (light ? "automixer-light.png" : "automixer-dark.png"));
+                    os.setPosition (0); os.truncate();
+                    png.writeImageToStream (img, os);
+                }
+
+                juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
+            }
+
+            std::fflush (nullptr);
+            std::_Exit (0);
+        }
+
         if (args.contains ("--meters"))
         {
             // Diagnostics: --meters <description.xml>  lists the parameters shown in the slot's meter view
@@ -177,6 +273,12 @@ public:
         {
             juce::Process::setDockIconVisible (false);
             runEditSelfTest();   // exits
+        }
+
+        if (args.contains ("--automix-probe"))
+        {
+            juce::Process::setDockIconVisible (false);
+            automixprobe::run (args);   // exits
         }
 
         if (args.contains ("--selftest"))

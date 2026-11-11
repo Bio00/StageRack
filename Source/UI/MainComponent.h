@@ -12,6 +12,7 @@ class TopBar;
 class SceneListComponent;
 class RackComponent;
 class PluginManagerWindow;
+class AutomixerWindow;
 class SettingsWindow;
 namespace update { class Controller; }
 
@@ -91,6 +92,7 @@ private:
 
     std::unique_ptr<PluginManagerWindow> pluginWindow;
     std::unique_ptr<SettingsWindow> settingsWindow;
+    std::unique_ptr<AutomixerWindow> automixerWindow;
     std::unique_ptr<juce::FileChooser> chooser;
 
     // updates from GitHub: checked at startup, "Check for Updates..." in the app menu and in Settings

@@ -611,6 +611,147 @@ inline int runSelfTest()
         }
     }
 
+    // automixer (gain sharing): one talker = 0 dB, two equal talkers = -3 dB each, zero latency
+    {
+        float g[3] = { 1.0f, 1.0f, 1.0f };
+        const float p1[] = { 1.0f, 0.0f }, p2[] = { 1.0f, 1.0f }, p0[] = { 0.0f, 0.0f }, p3[] = { 1.0f, 1.0f, 2.0f };
+        bool ok = AudioEngine::automixGains (p1, g, 2) && std::abs (g[0] - 1.0f) < 1.0e-6f && g[1] <= 1.0e-3f;
+        ok = ok && AudioEngine::automixGains (p2, g, 2) && std::abs (g[0] - 0.70711f) < 1.0e-4f && std::abs (g[1] - 0.70711f) < 1.0e-4f;
+        ok = ok && ! AudioEngine::automixGains (p0, g, 2) && std::abs (g[0] - 0.70711f) < 1.0e-4f;   // silence: hold
+        ok = ok && AudioEngine::automixGains (p3, g, 3) && std::abs (g[0] * g[0] + g[1] * g[1] + g[2] * g[2] - 1.0f) < 1.0e-5f;
+        check (ok, "automix law: 1 talker 0 dB, 2 talkers -3 dB, silence holds, sum of powers = 1");
+
+        // overlap modes: two equal talkers -> soft -1.25 dB each, open 0 dB each; in a pause (nobody
+        // above its floor) and with a single talker, exactly Dugan
+        const float talk2[] = { 1.0f, 1.0f }, talk0[] = { 0.0f, 0.0f }, talk1[] = { 1.0f, 0.0f };
+        float h[2];
+        AudioEngine::automixGains (p2, h, 2); AudioEngine::automixOverlapGains (h, talk2, 2, 1.5f);
+        bool okq = std::abs (juce::Decibels::gainToDecibels (h[0]) + 1.249f) < 0.01f;
+        AudioEngine::automixGains (p2, h, 2); AudioEngine::automixOverlapGains (h, talk2, 2, 8.0f);
+        okq = okq && std::abs (h[0] - 1.0f) < 1.0e-5f && std::abs (h[1] - 1.0f) < 1.0e-5f;
+        AudioEngine::automixGains (p2, h, 2); AudioEngine::automixOverlapGains (h, talk0, 2, 8.0f);
+        okq = okq && std::abs (h[0] - 0.70711f) < 1.0e-4f;
+        AudioEngine::automixGains (p1, h, 2); AudioEngine::automixOverlapGains (h, talk1, 2, 8.0f);
+        okq = okq && std::abs (h[0] - 1.0f) < 1.0e-5f && h[1] <= 1.0e-3f;
+        check (okq, "automix overlap: two talkers soft -1.25 / open 0 dB each; pause and one talker = Dugan");
+
+        AudioEngine e;
+        auto& a = e.addRack();
+        auto& b = e.addRack();
+        a.inputChannel = 0; a.stereoInput = false; a.outputChannel = 0; a.automixGroup = 1;
+        b.inputChannel = 1; b.stereoInput = false; b.outputChannel = 0; b.automixGroup = 1;
+        e.prepare (sr, bs, {});
+
+        juce::AudioBuffer<float> in2 (2, bs);
+        // 750 Hz tones (voice band; one period per 64-sample block), same phase: returns the output RMS
+        int phase = 0;
+        auto feed = [&] (float l, float r, int blocks)
+        {
+            for (int k = 0; k < blocks; ++k)
+            {
+                for (int i = 0; i < bs; ++i, ++phase)
+                {
+                    const auto x = (float) std::sin (2.0 * juce::MathConstants<double>::pi * 750.0 * phase / sr);
+                    in2.setSample (0, i, l * x);
+                    in2.setSample (1, i, r * x);
+                }
+                e.audioDeviceIOCallbackWithContext (in2.getArrayOfReadPointers(), 2, out.getArrayOfWritePointers(), 4, bs, ctx);
+            }
+            return out.getRMSLevel (0, 0, bs);
+        };
+
+        auto v = feed (0.5f, 0.0f, 300);
+        check (std::abs (v - 0.3536f) < 0.01f && std::abs (a.automixGainDb.load()) < 0.05f && b.automixGainDb.load() <= -59.0f,
+               "automix: only A talks -> A at 0 dB (" + juce::String (v, 3) + "), B " + juce::String (b.automixGainDb.load(), 1) + " dB");
+
+        v = feed (0.5f, 0.5f, 300);
+        check (std::abs (a.automixGainDb.load() + 3.01f) < 0.1f && std::abs (b.automixGainDb.load() + 3.01f) < 0.1f && std::abs (v - 0.5f) < 0.01f,
+               "automix: A and B equal -> -3 dB each (" + juce::String (a.automixGainDb.load(), 2) + " dB, sum " + juce::String (v, 3) + ")");
+
+        b.automixWeightDb = -6.0f;
+        feed (0.5f, 0.5f, 300);
+        const auto expA = juce::Decibels::gainToDecibels (std::sqrt (1.0f / (1.0f + 0.2512f)));
+        check (std::abs (a.automixGainDb.load() - expA) < 0.1f,
+               "automix: weight -6 dB on B -> A " + juce::String (a.automixGainDb.load(), 2) + " dB (expected " + juce::String (expA, 2) + ")");
+        b.automixWeightDb = 0.0f;
+
+        b.muted = true;
+        feed (0.5f, 0.5f, 300);
+        check (std::abs (a.automixGainDb.load()) < 0.05f, "automix: muted B leaves the group, A back to 0 dB");
+        b.muted = false;
+
+        feed (0.5f, 0.0f, 300);
+        v = feed (0.0f, 0.0f, 2000);   // digital silence: nobody below the hold threshold changes
+        check (std::abs (a.automixGainDb.load()) < 0.05f, "automix: last mic hold in silence (A " + juce::String (a.automixGainDb.load(), 2) + " dB)");
+
+        e.automixEnabled = false;
+        v = feed (0.5f, 0.5f, 4);
+        check (std::abs (v - 0.7071f) < 1.0e-3f, "automix off: both racks at unity (" + juce::String (v, 3) + ")");
+        e.automixEnabled = true;
+
+        // detector listens to the voice band: 1 kHz on A vs the same RMS at 60 Hz on B
+        {
+            AudioEngine f;
+            auto& fa = f.addRack(); fa.inputChannel = 0; fa.stereoInput = false; fa.outputChannel = 0; fa.automixGroup = 1;
+            auto& fb = f.addRack(); fb.inputChannel = 1; fb.stereoInput = false; fb.outputChannel = 0; fb.automixGroup = 1;
+            f.prepare (sr, bs, {});
+            for (int k = 0, n = 0; k < 400; ++k)
+            {
+                for (int i = 0; i < bs; ++i, ++n)
+                {
+                    in2.setSample (0, i, 0.3f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * n / sr));
+                    in2.setSample (1, i, 0.3f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 60.0 * n / sr));
+                }
+                f.audioDeviceIOCallbackWithContext (in2.getArrayOfReadPointers(), 2, out.getArrayOfWritePointers(), 4, bs, ctx);
+            }
+            check (fa.automixGainDb.load() > -0.5f && fb.automixGainDb.load() < -15.0f,
+                   "automix detector: 60 Hz hum can't take the floor from a 1 kHz talker (" + juce::String (fa.automixGainDb.load(), 1)
+                     + " / " + juce::String (fb.automixGainDb.load(), 1) + " dB)");
+        }
+
+        // a mic that stops talking hands over within ~0.3 s (hold 40 ms + 100 dB/s)
+        {
+            feed (0.5f, 0.5f, 300);
+            int blocks = 0;
+            in2.clear();
+            while (blocks < 1000 && a.automixGainDb.load() < -0.5f)
+            {
+                feed (0.5f, 0.0005f, 1);   // B drops by 60 dB
+                ++blocks;
+            }
+            const auto ms = 1000.0 * blocks * bs / sr;
+            check (ms > 30.0 && ms < 400.0, "automix: B stops, A back to -0.5 dB in " + juce::String (ms, 0) + " ms");
+        }
+
+        // zero latency: a step on A shows up in the same callback
+        feed (0.0f, 0.5f, 300);
+        in2.clear();
+        in2.setSample (0, 0, 1.0f);
+        e.audioDeviceIOCallbackWithContext (in2.getArrayOfReadPointers(), 2, out.getArrayOfWritePointers(), 4, bs, ctx);
+        check (std::abs (out.getSample (0, 0)) > 1.0e-4f, "automix: zero latency (impulse in the same callback, at the current share)");
+
+        // cost of the automixer in the callback: 32 racks in one group vs not automixed
+        AudioEngine c;
+        for (int i = 0; i < 32; ++i) { auto& r = c.addRack(); r.inputChannel = 0; r.stereoInput = false; r.outputChannel = 0; }
+        c.prepare (sr, 32, {});
+        juce::AudioBuffer<float> in3 (2, 32), out3 (2, 32);
+        juce::Random rnd (7);
+        for (int i = 0; i < 32; ++i) in3.setSample (0, i, rnd.nextFloat() - 0.5f);
+        auto timeIt = [&]
+        {
+            const auto t0 = juce::Time::getHighResolutionTicks();
+            for (int k = 0; k < 20000; ++k)
+                c.audioDeviceIOCallbackWithContext (in3.getArrayOfReadPointers(), 2, out3.getArrayOfWritePointers(), 2, 32, ctx);
+            return 1.0e6 * juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - t0) / 20000.0;
+        };
+        const auto off = timeIt();
+        for (int i = 0; i < 32; ++i) c.getRack (i).automixGroup = 1;
+        const auto on = timeIt();
+        std::cout << "  INFO  automix cost, 32 racks @32 smp: " << juce::String (on - off, 2) << " us per callback ("
+                  << juce::String (off, 2) << " -> " << juce::String (on, 2) << " us, budget 667 us)" << std::endl;
+        check (on - off < 20.0, "automix cost negligible");
+    }
+
     // autosave: written only when the document changed, restorable, removed on a clean quit
     {
         const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("StageRackAutosaveTest");
@@ -633,6 +774,9 @@ inline int runSelfTest()
 
         e.getRack (0).gainDb = -7.5f;
         e.getRack (0).name = "Lead vox";
+        e.getRack (0).automixGroup = 2;
+        e.getRack (0).automixWeightDb = -3.0f;
+        e.automixEnabled = false;
         check (a.saveIfChanged() && Autosave::getAutosaveFile().existsAsFile(), "autosave: change written");
         check (! a.saveIfChanged(), "autosave: same state not written twice");
 
@@ -644,6 +788,8 @@ inline int runSelfTest()
         check (rec.root.isValid() && e2.getNumRacks() == 1 && std::abs (e2.getRack (0).gainDb.load() + 7.5f) < 1.0e-4f
                  && e2.getRack (0).name == "Lead vox" && s2.isDirty() && s2.getFile() == juce::File(),
                "autosave: recovered session has the change and is marked unsaved");
+        check (e2.getRack (0).automixGroup == 2 && std::abs (e2.getRack (0).automixWeightDb.load() + 3.0f) < 1.0e-4f && ! e2.automixEnabled,
+               "session keeps automix group, weight and on/off");
 
         const auto saved = dir.getChildFile ("Show.stagerack");
         s.saveTo (saved);

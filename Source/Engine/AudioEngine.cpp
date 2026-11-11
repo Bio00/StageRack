@@ -448,6 +448,115 @@ void AudioEngine::audioDeviceStopped()
         r->release();
 }
 
+bool AudioEngine::automixGains (const float* weightedPowers, float* gains, int n) noexcept
+{
+    double sum = 0.0;
+
+    for (int i = 0; i < n; ++i)
+        sum += weightedPowers[i];
+
+    if (sum < 1.0e-12)   // whole group below ~-120 dBFS: keep the last gains (last mic hold)
+        return false;
+
+    for (int i = 0; i < n; ++i)
+        gains[i] = juce::jmax (1.0e-3f, (float) std::sqrt (weightedPowers[i] / sum));   // floor -60 dB
+
+    return true;
+}
+
+void AudioEngine::automixOverlapGains (float* gains, const float* talk, int n, float maxOpen) noexcept
+{
+    float talkers = 0.0f, total = 0.0f;
+
+    for (int i = 0; i < n; ++i)
+    {
+        talkers += talk[i];
+        total += gains[i] * gains[i];
+    }
+
+    const auto target = juce::jlimit (1.0f, juce::jmax (1.0f, maxOpen), talkers);
+
+    if (target <= 1.0f || total <= 0.0f)
+        return;
+
+    const auto scale = std::sqrt (target / total);
+
+    for (int i = 0; i < n; ++i)
+        gains[i] = juce::jmin (1.0f, gains[i] * scale);
+}
+
+void AudioEngine::computeAutomixGains (bool anySolo) noexcept
+{
+    // Gain sharing (Dan Dugan, 1975): every rack of a group gets the share of the group's
+    // power it is contributing. One talker -> 0 dB on that mic, the others way down; two
+    // talkers -> -3 dB each; nobody -> all at -10 log10 (N): constant total gain, no gating,
+    // no threshold, no attack delay. Runs once per callback on the IO thread, after all
+    // racks finished: zero latency, ~N multiplies.
+    constexpr int maxGroupRacks = 128;
+    const bool enabled = automixEnabled.load (std::memory_order_relaxed);
+
+    for (int g = 1; g <= Rack::maxAutomixGroups; ++g)
+    {
+        Rack* members[maxGroupRacks];
+        float powers[maxGroupRacks], gains[maxGroupRacks], talk[maxGroupRacks];
+        int n = 0;
+
+        for (auto& r : racks)
+        {
+            if (r->automixGroup.load (std::memory_order_relaxed) != g || n >= maxGroupRacks)
+                continue;
+
+            if (! enabled)
+            {
+                r->automixTarget = 1.0f;
+                continue;
+            }
+
+            // only racks that reach the mix take part
+            const bool audible = r->producedAudio() && r->outputChannel.load (std::memory_order_relaxed) >= 0
+                                  && ! (anySolo && ! r->solo.load (std::memory_order_relaxed));
+            const auto w = juce::Decibels::decibelsToGain (r->automixWeightDb.load (std::memory_order_relaxed), -100.0f);
+
+            members[n] = r.get();
+            powers[n] = audible ? r->automixLevel * w * w : 0.0f;
+            talk[n] = audible ? r->automixTalk : 0.0f;
+            gains[n] = r->automixTarget;
+            ++n;
+        }
+
+        if (n > 0 && automixGains (powers, gains, n))
+        {
+            if (const auto mode = automixOverlap.load (std::memory_order_relaxed); mode > 0)
+            {
+                // a talker = above its own noise floor AND close to the loudest mic of the group
+                // (a mic that only hears another talker's bleed, ~15 dB down, is not one)
+                float loudest = 0.0f;
+                for (int i = 0; i < n; ++i)
+                    loudest = juce::jmax (loudest, powers[i]);
+
+                for (int i = 0; i < n; ++i)
+                {
+                    const auto relDb = powers[i] > 0.0f ? 10.0f * std::log10 (powers[i] / loudest) : -100.0f;
+                    talk[i] *= juce::jlimit (0.0f, 1.0f, (relDb + 12.0f) / 6.0f);
+                }
+
+                automixOverlapGains (gains, talk, n, mode == 1 ? 1.5f : 8.0f);
+            }
+
+            for (int i = 0; i < n; ++i)
+                members[i]->automixTarget = gains[i];
+        }
+    }
+
+    for (auto& r : racks)
+    {
+        if (r->automixGroup.load (std::memory_order_relaxed) <= 0)
+            r->automixTarget = 1.0f;
+
+        r->automixGainDb.store (juce::Decibels::gainToDecibels (r->automixTarget, -100.0f), std::memory_order_relaxed);
+    }
+}
+
 void AudioEngine::processRackTask (void* ctx, int index, int threadIndex)
 {
     auto& self = *static_cast<AudioEngine*> (ctx);
@@ -534,8 +643,29 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
     for (auto& r : racks)
         anySolo = anySolo || r->solo.load (std::memory_order_relaxed);
 
+    computeAutomixGains (anySolo);
+
+    // dest += src * gain, the gain ramping linearly over the block (automix: no zipper noise)
+    auto addRamped = [numSamples] (float* dest, const float* src, float g0, float g1)
+    {
+        if (g0 == g1)
+        {
+            juce::FloatVectorOperations::addWithMultiply (dest, src, g0, numSamples);
+            return;
+        }
+
+        const auto step = (g1 - g0) / (float) numSamples;
+
+        for (int i = 0; i < numSamples; ++i)
+            dest[i] += src[i] * (g0 + step * (float) (i + 1));
+    };
+
     for (auto& r : racks)
     {
+        // automix gain of this block: from the last one to the new target
+        const auto g0 = r->automixGain, g1 = r->automixTarget;
+        r->automixGain = g1;
+
         if (! r->producedAudio() || (anySolo && ! r->solo.load (std::memory_order_relaxed)))
             continue;
 
@@ -549,15 +679,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
         {
             if (juce::isPositiveAndBelow (outCh, numDeviceOutputs) && deviceOuts[(size_t) outCh] != nullptr)
             {
-                juce::FloatVectorOperations::addWithMultiply (deviceOuts[(size_t) outCh], buf.getReadPointer (0), 0.5f, numSamples);
-                juce::FloatVectorOperations::addWithMultiply (deviceOuts[(size_t) outCh], buf.getReadPointer (1), 0.5f, numSamples);
+                addRamped (deviceOuts[(size_t) outCh], buf.getReadPointer (0), 0.5f * g0, 0.5f * g1);
+                addRamped (deviceOuts[(size_t) outCh], buf.getReadPointer (1), 0.5f * g0, 0.5f * g1);
             }
             continue;
         }
 
         for (int i = 0; i < 2; ++i)
             if (juce::isPositiveAndBelow (outCh + i, numDeviceOutputs) && deviceOuts[(size_t) (outCh + i)] != nullptr)
-                juce::FloatVectorOperations::add (deviceOuts[(size_t) (outCh + i)], buf.getReadPointer (i), numSamples);
+                addRamped (deviceOuts[(size_t) (outCh + i)], buf.getReadPointer (i), g0, g1);
     }
 
     // master gain + meters on the main pair

@@ -151,6 +151,18 @@ public:
     std::atomic<int> totalLatencySamples { 0 }; // upstream + plugins + compensation (for display)
     static constexpr int maxCompensation = 32768;
 
+    // Automixer (gain sharing, see AudioEngine::computeAutomixGains). The rack measures its own
+    // level (after the plugins and its fader, as Dugan Speech does); the engine applies the shared gain where it
+    // sums the rack into the device outputs. Zero latency, a few flops per sample.
+    static constexpr int maxAutomixGroups = 4;   // A..D
+    std::atomic<int> automixGroup { 0 };         // 0 = not automixed, 1..maxAutomixGroups
+    std::atomic<float> automixWeightDb { 0.0f }; // bias of this rack in the group (dB)
+    std::atomic<float> automixGainDb { 0.0f };   // gain the automixer applies now (display)
+    std::atomic<float> automixLevelDb { -100.0f };   // detector level, dBFS RMS (display)
+    float automixTalk = 0.0f;                    // audio thread: 0..1, how clearly this mic is above its own noise floor
+    float automixLevel = 0.0f;                   // audio thread: detector power, post-fader
+    float automixTarget = 1.0f, automixGain = 1.0f;   // audio thread (engine): target / last applied gain
+
     // Engine graph data: written by AudioEngine under its racks lock, read by the audio thread.
     Rack* sourceRack = nullptr;
     int stage = 0;
@@ -190,6 +202,39 @@ private:
     juce::AudioBuffer<float> delayLine;    // latency-group compensation (2 x maxCompensation)
     int delayWrite = 0;
     void applyCompensation (int numSamples) noexcept;
+    void updateAutomixLevel (int numSamples) noexcept;
+
+    // automix detector (audio thread): voice-band filter -> 5 ms power average -> dB envelope
+    // (instant rise, hold, then a constant dB/s fall)
+    struct Biquad
+    {
+        float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
+        void set (const juce::IIRCoefficients& c) noexcept
+        {
+            b0 = c.coefficients[0]; b1 = c.coefficients[1]; b2 = c.coefficients[2];
+            a1 = c.coefficients[3]; a2 = c.coefficients[4];
+        }
+        void reset() noexcept { z1 = z2 = 0.0f; }
+        float process (float x) noexcept
+        {
+            const auto y = b0 * x + z1;
+            z1 = b1 * x - a1 * y + z2;
+            z2 = b2 * x - a2 * y;
+            return y;
+        }
+    };
+    Biquad amHighPass, amLowPass;
+    float amAvgCoeff = 0.0f, amAvg = 0.0f, amEnvDb = -200.0f, amReleaseDbPerSample = 0.0f;
+    float amFloorDb = -200.0f, amFloorRisePerSample = 0.0f;   // noise floor: follows minima, rises slowly
+    int amHoldSamples = 0, amHoldLeft = 0;
+    bool amActive = false;
+
+public:
+    /** Automix detector tuning (global; applied on the next prepare). Tuned against speech
+        with --automix-probe, see README. */
+    static inline std::atomic<float> automixAvgMs { 5.0f }, automixHoldMs { 40.0f }, automixReleaseDbPerSec { 100.0f },
+                                     automixHighPassHz { 200.0f }, automixLowPassHz { 4000.0f };
+private:
     juce::AudioBuffer<float> workBuffer;   // async thread chain buffer
     juce::AudioBuffer<float> twinBuffer;   // hand-over: the twin's copy of the slot input
     std::vector<std::unique_ptr<juce::AudioPluginInstance>> discarded;   // message thread, see takeDiscarded()

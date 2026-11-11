@@ -1,6 +1,6 @@
 # StageRack
 
-> **Beta 0.4.0** — versione di prova. Usala in prova prima di portarla su un palco vero.
+> **Beta 0.5.0** — versione di prova. Usala in prova prima di portarla su un palco vero.
 
 Host di plugin per l'audio dal vivo, per macOS 11 (Big Sur) o successivo, su **tutti i Mac**: app universale, nativa sia su Apple Silicon (M1…M4) sia su Intel. L'impostazione è quella di Waves SuperRack Performer (rack, scene, interfaccia scura), con alcune idee prese da LiveProfessor.
 
@@ -95,6 +95,34 @@ De-Feedback 1.1.4 (Alpha Labs) può corrompere la memoria in rari casi quando un
 ## Concatenamento e gruppi di latenza
 - **Rack concatenati**: nel menu IN di un rack, sotto "From rack", scegli un altro rack come sorgente. Il rack riceve l'uscita dell'altro (dopo gain e mute). Con OUT: none il rack sorgente alimenta solo la catena. Il motore elabora i rack a **stadi** (prima i rack che leggono dalla scheda, poi quelli che leggono da altri rack, ognuno in parallelo), sempre **nello stesso callback, quindi senza latenza aggiunta**. Le catene circolari sono rifiutate.
 - **Gruppi di latenza** (come SuperRack): menu del rack → Latency group A-H. Ogni rack del gruppo viene ritardato fino alla latenza più alta del gruppo, compresa quella ereditata dai rack a monte, così restano allineati in fase. Il badge "LG A +x ms" mostra il ritardo applicato. Le latenze vengono ricontrollate due volte al secondo, perché un plugin può cambiarle.
+
+## Automixer (gain sharing, stile Dugan)
+Automixer integrato per microfoni parlato (conferenze, culto, teatro, panel), senza plugin esterni.
+- **Come si usa**: menu del rack (••• o tasto destro) → **Automix** → Group A-D. Vale per tutti i rack selezionati. Pulsante **AUTOMIX** nella barra in alto = on/off di tutti i gruppi (salvato nella sessione e nelle scene). Il click sulla barra "AM A" del rack riapre il menu.
+- **Meter AM sul rack**: accanto ai meter IN/OUT, colonna col guadagno dell'automix (pieno = 0 dB, vuoto = −40 dB) nel colore del gruppo, con la lettera del gruppo; sopra, nell'intestazione, il badge "AM A −x.x". Click su meter o badge = menu Automix.
+- **Finestra Automixer** (pulsante **AM METERS** sotto AUTOMIX): una striscia per rack, come la vista di un Dugan: meter **IN** (il livello che vede l'automixer, dopo i plugin e prima del fader, 0…−60 dBFS), meter **GAIN** (il guadagno che l'automixer dà ora a quel microfono, 0…−40 dB: pieno = ha la parola), valore in dB, manopola **Weight** (doppio click = 0 dB), gruppo (Off/A-D, anche per assegnare i rack da qui), mute. Il colore del meter GAIN è quello del gruppo; grigio = automixer spento.
+- **Quando parlano in più** (finestra Automixer o menu Automix del rack, salvato in sessione e scene): **Share (Dugan)** = il guadagno si divide (−3 dB a testa con due voci uguali, il rumore di sala resta quello di un microfono: come il vero Dugan); **Soft** = fino a 1,5 microfoni aperti (−1,2 dB a testa); **Open** = un microfono aperto per ogni persona che parla (0 dB a testa). Conta come "persona che parla" un microfono sopra il proprio rumore di fondo (stimato da solo) e vicino al più forte del gruppo: un microfono che sente solo il rientro di un altro non conta. Con una persona sola e nelle pause tutte e tre sono esattamente Dugan. Scena parlata: Open lascia abbassato il 3,7 % del parlato (Share 7,6 %, QUORUM Euclid 4,1 %) con la stessa pulizia di QUORUM (−11,6 dB).
+- **Weight** (+6 … −20 dB): sbilancia la quota di un rack nel gruppo (es. il microfono del moderatore +3 dB, il coro −6 dB).
+- **Cosa fa**: ogni rack del gruppo riceve la sua quota della potenza totale del gruppo, `gain = √(w·P / Σ w·P)`. Uno parla → il suo microfono a 0 dB, gli altri giù; due parlano → −3 dB ciascuno; nessuno parla → l'ultimo guadagno resta (last mic hold). La somma delle potenze è sempre 1: il rumore di fondo e il margine sul feedback restano quelli di **un solo** microfono aperto, qualunque sia il numero di microfoni. Niente gate, niente soglie, niente tempi di attacco.
+- **Dove agisce**: il livello si misura dopo i plugin e **dopo il fader** del rack, come Dugan Speech nelle console Waves (abbassare un fader toglie a quel microfono anche la "parola": è il modo indicato dalla guida Dugan per zittire un microfono rumoroso); il guadagno si applica dove l'uscita del rack viene sommata nelle uscite della scheda. Un rack mutato esce subito dal gruppo; con un solo attivo contano solo i rack in solo; i rack con OUT none non partecipano. I rack concatenati ("From rack") ricevono il segnale **prima** dell'automixer.
+- **Rilevatore** (solo il ramo di misura, l'audio non viene filtrato): banda voce 200 Hz-4 kHz (un rientro di basse o un ronzio non "prende la parola"), media di potenza su 5 ms, inviluppo in dB che sale subito, tiene 40 ms (le pause dentro le parole) e poi scende a 100 dB/s: un microfono che smette passa la parola in ~0.2-0.3 s.
+- **Latenza 0**: nessun buffer, il guadagno di ogni blocco viene calcolato sul blocco stesso e raccordato con una rampa lineare (niente zipper). **Costo misurato**: ~0.5-4 µs per callback con 32 rack nel gruppo a 32 campioni (budget 667 µs), sul thread IO dopo che i rack sono finiti: nessun effetto sul multicore.
+- **Confronto con il vero Dugan e con QUORUM** (`--automix-probe`; scena parlata di 41 s con 4 voci italiane, rientri −15 dB, rumore di sala; il Dugan è **Dugan Speech dentro SuperRack Performer**, misurato in loopback su Pro Tools Audio Bridge 16 con `--loopback`; QUORUM 0.3.2 con Clean DNS off):
+
+  | | StageRack Share | StageRack Soft | StageRack Open | **Dugan Speech** | QUORUM Euclid |
+  |---|---|---|---|---|---|
+  | Parlato con una sola persona abbassato > 3 dB | 0.1 % | 0.0 % | 0.0 % | 0.6 % | 0.2 % |
+  | Parlato totale abbassato > 3 dB | 7.6 % | 5.0 % | 3.7 % | 6.7 % | 4.1 % |
+  | Miglioramento parlato / (rientri + rumore) | 12.3 dB | 11.7 dB | 11.2 dB | 11.5 dB | 11.5 dB |
+  | Primi 20 ms di ogni frase | −4.2 dB | −4.1 dB | −4.0 dB | −5.3 dB | −7.1 dB |
+  | 50-150 ms | −1.7 dB | −1.5 dB | −1.4 dB | −1.3 dB | −1.1 dB |
+  | A e C insieme (A più forte di 4 dB) | −2.5 / −6.0 | −1.2 / −4.4 | −0.6 / −3.6 | −2.1 / −4.4 | −0.8 / −2.9 |
+  | Pausa: rumore di sala vs tutti aperti | −6 dB | −6 dB | −6 dB | −9.5 dB | −16 dB |
+  | Microfoni che non parlano | −15.3 dB | −15.2 dB | −15.2 dB | −14.9 dB | −17.0 dB |
+
+  Il Dugan vero si comporta come il nostro Share: divide il guadagno quando parlano in due (la guida: "it sounds as if all talkers are sharing one microphone"), stessa pulizia, stesso profilo frase per frase (le interiezioni che entrano mentre un altro parla partono a −11…−15 dB in tutti e due). Differenze misurate: nelle sovrapposizioni il Dugan comprime un po' le differenze di livello (−2.1/−4.4 contro −2.5/−6.0, tra il nostro Share e Soft); nelle pause tiene la sala 3.5 dB sotto "un microfono aperto" (−9.5 contro −6); le prime sillabe il nostro le apre un po' prima (−4.2 contro −5.3 dB). Dentro SuperRack il Dugan ha latenza 0, ma passare per un'app separata aggiunge 128 campioni (2 buffer da 64).
+  QUORUM collega le istanze con un bus in memoria condivisa tra processi: istanze di un processo chiuso di colpo (crash) restano sul bus e ne cambiano il comportamento (misurato).
+- Perché non ospitare il plugin Waves Dugan Speech: è un plugin multicanale (8/16 canali in un'unica istanza) che in SuperRack è integrato con codice specifico di Waves; in un host generico servirebbe un bus a 16 canali che riceve tutti i rack e li restituisce separati, più la licenza Waves e il costo del plugin. L'algoritmo di gain sharing (brevetto Dugan del 1975, scaduto) è semplice e qui costa quasi zero. "Dugan" è un marchio: qui si chiama solo Automix.
 
 ## Slot dei plugin
 - **Tasto on/off** (icona ⏻ verde a sinistra del nome): accende o spegne il plugin. Da spento lo slot si attenua e mostra "OFF".

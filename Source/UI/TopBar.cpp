@@ -32,11 +32,26 @@ TopBar::TopBar (Session& s) : session (s)
         addAndMakeVisible (*b);
 
     storeButton.setColour (juce::TextButton::buttonColourId, theme::accent.withAlpha (0.25f));
+
+    automixButton.setClickingTogglesState (true);
+    automixButton.setColour (juce::TextButton::buttonOnColourId, theme::green.withAlpha (0.8f));
+    automixButton.setTooltip ("Gain-sharing automixer on/off for all groups (racks join a group from the rack menu > Automix). Stored in scenes.");
+    automixButton.onClick = [this]
+    {
+        session.getEngine().automixEnabled = automixButton.getToggleState();
+        session.markDirty();
+    };
+    addAndMakeVisible (automixButton);
+
+    automixViewButton.setTooltip ("Automixer window: input level and automix gain of every mic, weight, group");
+    automixViewButton.onClick = [this] { if (onAutomixView) onAutomixView(); };
+    addAndMakeVisible (automixViewButton);
 }
 
 void TopBar::lookAndFeelChanged()
 {
     storeButton.setColour (juce::TextButton::buttonColourId, theme::accent.withAlpha (0.25f));
+    automixButton.setColour (juce::TextButton::buttonOnColourId, theme::green.withAlpha (0.8f));
 }
 
 void TopBar::setVerticalLayout (bool v)
@@ -65,6 +80,14 @@ void TopBar::updateMeters()
     }
 
     totalLoad = juce::jmax ((float) engine.getCallbackLoad(), totalLoad * 0.9f);
+
+    // only meaningful when some rack is automixed
+    bool anyAutomix = false;
+    for (int i = 0; i < engine.getNumRacks() && ! anyAutomix; ++i)
+        anyAutomix = engine.getRack (i).automixGroup.load() > 0;
+
+    automixButton.setToggleState (engine.automixEnabled.load(), juce::dontSendNotification);
+    automixButton.setAlpha (anyAutomix ? 1.0f : 0.4f);
 
     repaint (cpuArea);
     repaint (deviceArea);
@@ -201,6 +224,12 @@ void TopBar::resized()
     settingsButton.setBounds (bottom.removeFromLeft (w3).reduced (2, 0));
     layoutButton.setBounds (bottom.reduced (2, 0));
 
+    r.removeFromRight (8);
+    {
+        auto am = r.removeFromRight (84);
+        automixButton.setBounds (am.removeFromTop (am.getHeight() / 2).reduced (0, 2));
+        automixViewButton.setBounds (am.reduced (0, 2));
+    }
     r.removeFromRight (12);
 
     cpuArea = r.removeFromLeft (juce::jmin (220, r.getWidth() / 2));
