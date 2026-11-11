@@ -85,6 +85,13 @@ Gli hop di plugin che girano **in serie** (stesso rack, o rack concatenati) si s
 ### Nota su Dante Virtual Soundcard
 Con DVS l'apertura del device può richiedere ~20 s (attesa dentro `coreaudiod`), e DVS dichiara già ~9-10 ms di round trip anche a 32 campioni. Con una scheda CoreAudio fisica la latenza totale scende davvero.
 
+### Istanze parcheggiate (branch `safe-plugins`)
+De-Feedback 1.1.4 (Alpha Labs) può corrompere la memoria in rari casi quando un'istanza viene creata o distrutta mentre altre sono in funzione (crash "memory corruption of free block" visti in StageRack: in creazione nella libreria licenze del plugin, e in distruzione durante il re-spread). Per questo, a sessione aperta, StageRack **non distrugge** le istanze che togli (rimozione, sostituzione, rack cancellato, gemello sostituito dal re-spread): le **parcheggia** vive, ma fuori dal percorso audio, e le libera solo quando chiudi o cambi sessione, o all'uscita.
+- Costo audio: zero, perché un'istanza parcheggiata non viene mai elaborata. Latenza: zero.
+- Costo misurato: 12 istanze De-Feedback parcheggiate = 0,34% di un core in totale (fuori dal thread audio), circa 4,5 MB di RAM ciascuna.
+- Il numero di istanze parcheggiate compare accanto allo stato del Re-spread (AUDIO/DSP).
+- Stress test: `--stress-lifecycle VST3 <plugin> <istanze vive> <cicli> [--audio] [--keep] [--hold s]`. Crea e distrugge istanze mentre altre elaborano audio; si può lanciare anche con Guard Malloc (`DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib`). Risultato: 0 crash in 60 cicli con Guard Malloc e in 250 cicli normali. Il bug è raro e non si riproduce a comando.
+
 ## Concatenamento e gruppi di latenza
 - **Rack concatenati**: nel menu IN di un rack, sotto "From rack", scegli un altro rack come sorgente. Il rack riceve l'uscita dell'altro (dopo gain e mute). Con OUT: none il rack sorgente alimenta solo la catena. Il motore elabora i rack a **stadi** (prima i rack che leggono dalla scheda, poi quelli che leggono da altri rack, ognuno in parallelo), sempre **nello stesso callback, quindi senza latenza aggiunta**. Le catene circolari sono rifiutate.
 - **Gruppi di latenza** (come SuperRack): menu del rack → Latency group A-H. Ogni rack del gruppo viene ritardato fino alla latenza più alta del gruppo, compresa quella ereditata dai rack a monte, così restano allineati in fase. Il badge "LG A +x ms" mostra il ritardo applicato. Le latenze vengono ricontrollate due volte al secondo, perché un plugin può cambiarle.

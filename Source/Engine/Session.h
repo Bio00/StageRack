@@ -35,6 +35,16 @@ public:
     /** Called before a plugin is destroyed, so editor windows can be closed. */
     std::function<void (juce::AudioPluginInstance*)> onPluginAboutToBeDeleted;
 
+    /** Instances taken out of the session while it is open (removed, replaced, re-spread,
+        rack deleted) are PARKED here instead of being destroyed: alive, but never processed,
+        so they cost nothing in the audio callback and add no latency. They are destroyed only
+        when the session is closed or replaced, or the app quits.
+        Why: some plugins (Alpha Labs De-Feedback 1.1.4) rarely corrupt the heap when an instance
+        is destroyed while other instances are running; this keeps destruction out of the show. */
+    void retirePlugin (std::unique_ptr<juce::AudioPluginInstance>);
+    void releaseRetiredPlugins();
+    int getNumRetiredPlugins() const noexcept { return (int) retired.size(); }
+
     /** Called when a live re-spread replaced an instance by its twin (before the old one is
         deleted), so an open editor can move to the new instance. */
     std::function<void (juce::AudioPluginInstance* oldOne, juce::AudioPluginInstance* newOne)> onPluginReplaced;
@@ -113,6 +123,8 @@ private:
 
     class LiveRespreader;
     std::unique_ptr<LiveRespreader> respreader;
+    std::vector<std::unique_ptr<juce::AudioPluginInstance>> retired;   // see retirePlugin()
+    bool closingSession = false;
 };
 
 } // namespace stagerack

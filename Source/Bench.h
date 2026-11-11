@@ -653,6 +653,26 @@ inline int runSelfTest()
         a.cleanExit();
         check (! Autosave::previousRunCrashed() && ! Autosave::getAutosaveFile().exists(), "autosave: clean quit removes marker and autosave");
 
+        // parked instances: removed/replaced plugins stay alive (not processed) until the session closes
+        {
+            struct Probe final : juce::AudioProcessorGraph::AudioGraphIOProcessor
+            {
+                explicit Probe (int& alive) : AudioGraphIOProcessor (audioInputNode), count (alive) { ++count; }
+                ~Probe() override { --count; }
+                int& count;
+            };
+            int alive = 0;
+            auto& r = e.getRack (0);
+            r.setPlugin (0, std::make_unique<Probe> (alive));
+            r.setPlugin (1, std::make_unique<Probe> (alive));
+            s.removePlugin (r, 0);
+            check (alive == 2 && s.getNumRetiredPlugins() == 1 && r.getPlugin (0) == nullptr, "removed plugin is parked, not destroyed");
+            s.removeRack (r);
+            check (alive == 2 && s.getNumRetiredPlugins() == 2, "deleting a rack parks its plugins");
+            s.newSession();
+            check (alive == 0 && s.getNumRetiredPlugins() == 0, "closing the session frees the parked plugins");
+        }
+
         Autosave::setDirectoryForTests ({});
         dir.deleteRecursively();
     }

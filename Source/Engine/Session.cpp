@@ -175,8 +175,7 @@ private:
 
     void deleteOnMessageThread (std::unique_ptr<juce::AudioPluginInstance> p)
     {
-        if (p != nullptr && session.onPluginAboutToBeDeleted)
-            session.onPluginAboutToBeDeleted (p.get());
+        session.retirePlugin (std::move (p));   // parked, not destroyed, while the session is open
     }
 
     void timerCallback() override
@@ -241,7 +240,13 @@ Session::~Session() = default;
 void Session::respreadLive()                    { respreader->start(); }
 void Session::cancelRespread()                  { respreader->cancel(); }
 bool Session::isRespreading() const noexcept    { return respreader->isBusy(); }
-juce::String Session::getRespreadStatus() const { return respreader->status(); }
+juce::String Session::getRespreadStatus() const
+{
+    auto s = respreader->status();
+    if (! retired.empty())
+        s << (s.isEmpty() ? "" : "  |  ") << (int) retired.size() << " old instance(s) parked, freed when the session closes";
+    return s;
+}
 
 void Session::markDirty()
 {
@@ -262,6 +267,14 @@ void Session::removeRack (Rack& rack)
     for (int i = 0; i < Rack::maxSlots; ++i)
         if (auto* p = rack.getPlugin (i); p != nullptr && onPluginAboutToBeDeleted)
             onPluginAboutToBeDeleted (p);
+
+    if (! closingSession)   // live edit: park the instances instead of destroying them with the rack
+    {
+        for (int i = 0; i < Rack::maxSlots; ++i)
+            retirePlugin (rack.setPlugin (i, nullptr));
+        for (auto& p : rack.takeDiscarded())
+            retirePlugin (std::move (p));
+    }
 
     engine.removeRack (rack);
     markDirty();
@@ -292,7 +305,7 @@ void Session::loadPlugin (Rack& rack, int slot, const juce::PluginDescription& d
         if (auto* old = target->getPlugin (slot); old != nullptr && onPluginAboutToBeDeleted)
             onPluginAboutToBeDeleted (old);
 
-        target->setPlugin (slot, std::move (p)); // previous plugin is destroyed here
+        retirePlugin (target->setPlugin (slot, std::move (p))); // previous plugin is parked
         target->getSlot (slot).hopCalls = hopCalls;
         target->getSlot (slot).hopPhase = hopPhase;
         markDirty();
@@ -306,8 +319,29 @@ void Session::removePlugin (Rack& rack, int slot)
     if (auto* p = rack.getPlugin (slot); p != nullptr && onPluginAboutToBeDeleted)
         onPluginAboutToBeDeleted (p);
 
-    rack.setPlugin (slot, nullptr);
+    retirePlugin (rack.setPlugin (slot, nullptr));
     markDirty();
+}
+
+void Session::retirePlugin (std::unique_ptr<juce::AudioPluginInstance> p)
+{
+    if (p == nullptr)
+        return;
+
+    if (onPluginAboutToBeDeleted)
+        onPluginAboutToBeDeleted (p.get());   // closes its editor window
+
+    if (closingSession)
+        p.reset();
+    else
+        retired.push_back (std::move (p));
+}
+
+void Session::releaseRetiredPlugins()
+{
+    // destroyed one at a time, newest first (same order as a normal teardown)
+    while (! retired.empty())
+        retired.pop_back();
 }
 
 //==============================================================================
@@ -453,8 +487,12 @@ void Session::newSession()
     ++*loadGeneration;
     cancelRespread();
 
+    // closing the session: everything goes, parked instances included (not during the show)
+    closingSession = true;
     for (int i = engine.getNumRacks(); --i >= 0;)
         removeRack (engine.getRack (i));
+    releaseRetiredPlugins();
+    closingSession = false;
 
     scenes.clear();
     currentScene = -1;
@@ -588,7 +626,7 @@ void Session::loadPluginFromTree (Rack& r, int slot, const juce::ValueTree& pt)
             if (auto* old = rack->getPlugin (slot); old != nullptr && onPluginAboutToBeDeleted)
                 onPluginAboutToBeDeleted (old);
 
-            rack->setPlugin (slot, std::move (p));
+            retirePlugin (rack->setPlugin (slot, std::move (p)));
             rack->getSlot (slot).bypassed = bypass;
             rack->getSlot (slot).hopCalls = hopCalls;
             rack->getSlot (slot).hopPhase = hopPhase;

@@ -78,6 +78,12 @@ Rack H/V con dimensione per-rack (bordo trascinabile, ⌘=/⌘-, layout compatto
 - Plugin con `prepareToPlay` resettano lo stato interno; `setStateInformation` di De-Feedback contiene solo Strength/Mute/Bypass.
 - Computer-use in background: niente ⌘/⌥ né combo da tastiera, niente modificatori sul drag; i pulsanti AXButton (••• , VERTICAL) e i menu JUCE funzionano. Per aprire una sessione di test: impostare `lastSession` nelle settings con l'app chiusa (l'app riscrive le settings all'uscita).
 
+## Branch `safe-plugins` (worktree `../StageRack-Safe`)
+- `Session::retirePlugin`: le istanze tolte a sessione aperta vengono parcheggiate in `retired` (mai elaborate) e distrutte solo in `newSession()` (`closingSession`) o in `~Session`. Lo usano removePlugin, loadPlugin/loadPluginFromTree (sostituzione), removeRack, LiveRespreader. Test in `--selftest`.
+- `--stress-lifecycle` (Source/StressTest.h): 0 crash di De-Feedback (60 cicli con Guard Malloc, 250 normali, 4-6 istanze vive con audio). Il crash non si riproduce a comando.
+- Crash report De-Feedback (`~/Library/Logs/DiagnosticReports/StageRack-2026-11-0[78]*`): in creazione (`SK_ApiContextSetFieldString`, licenze) e in distruzione durante il re-spread (helper in `cblas_sgemm` → `posix_memalign`: Accelerate alloca dentro l'hop). NON disassemblare il binario del plugin (prodotto commerciale): lavorare solo lato host.
+- Plugin sostitutivo scritto da zero: `../De-FeedbackBIO` (soppressore a notch adattivi, latenza 0).
+
 ## Non ancora verificato / aperto
 - Vista meter con **audio vero**: valori in movimento non visti (a riposo erano 0, tranne l'ago di Waves SSLComp a 800 = 0.8, semantica ignota). Tema chiaro verificato a vista su finestra principale e impostazioni (cambio live e all'avvio).
 - Probe latenze in background (thread + figli) non lanciato su tutti i 578 plugin; il figlio singolo è verificato.

@@ -2,6 +2,7 @@
 #include "UI/MainComponent.h"
 #include "Bench.h"
 #include "EditTest.h"
+#include "StressTest.h"
 #include "UI/PluginMeters.h"
 #include "UI/PluginBrowser.h"
 #include "Engine/Rack.h"
@@ -191,6 +192,15 @@ public:
             juce::Process::setDockIconVisible (false);
             setApplicationReturnValue (runHandoverTest (args));
             quit();
+            return;
+        }
+
+        if (args.contains ("--stress-lifecycle"))
+        {
+            juce::Process::setDockIconVisible (false);
+            static std::unique_ptr<LifecycleStress> stress;   // drives itself on the message loop, exits with _Exit
+            stress = std::make_unique<LifecycleStress> (args);
+            if (stress->start() != 0) std::_Exit (1);
             return;
         }
 
