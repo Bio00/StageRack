@@ -78,6 +78,24 @@ public:
 
     std::atomic<float> masterGainDb { 0.0f };
 
+    /** Automixer (Dugan-style gain sharing) on/off for all groups. Off = every rack at unity. */
+    std::atomic<bool> automixEnabled { true };
+
+    /** What happens when several people talk at once: 0 = share the gain (Dugan: the room
+        sounds like one open mic, two equal talkers -3 dB each), 1 = soft (up to 1.5 mics' worth
+        of gain while several talk: -1.2 dB each), 2 = open (one mic's worth per talker: 0 dB
+        each). With one talker or nobody talking all three are exactly Dugan's law. */
+    std::atomic<int> automixOverlap { 0 };
+
+    /** The overlap modes: scales a group's Dugan gains so their total power reaches
+        min (number of talkers, maxOpen), each gain capped at unity. talk[i] = 0..1. */
+    static void automixOverlapGains (float* gains, const float* talk, int n, float maxOpen) noexcept;
+
+    /** The gain-sharing law (public for the self test): gains[i] = sqrt (P_i / sum_j P_j), P = weighted
+        power: sum of gains^2 = 1, the group's noise stays that of one mic.
+        Returns false (gains untouched: "last mic hold") when the whole group is silent. */
+    static bool automixGains (const float* weightedPowers, float* gains, int n) noexcept;
+
     double getSampleRate() const noexcept                    { return sampleRate; }
     int getBlockSize() const noexcept                        { return blockSize; }
     /** Device channel -> packed callback buffer maps (set when the device starts; public for tests). */
@@ -106,6 +124,7 @@ public:
 private:
     void handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage&) override;
     static void processRackTask (void* ctx, int index, int threadIndex);
+    void computeAutomixGains (bool anySolo) noexcept;
 
     juce::AudioDeviceManager deviceManager;
     WorkerPool pool;

@@ -11,7 +11,7 @@ class TopBar final : public juce::Component
 public:
     explicit TopBar (Session&);
 
-    std::function<void()> onNew, onOpen, onSave, onPlugins, onSettings, onToggleLayout;
+    std::function<void()> onNew, onOpen, onSave, onPlugins, onSettings, onToggleLayout, onAutomixView;
     void setVerticalLayout (bool);
 
     void refresh();
@@ -30,6 +30,7 @@ private:
     juce::TextButton storeButton { "STORE" };
     juce::TextButton newButton { "NEW" }, openButton { "OPEN" }, saveButton { "SAVE" };
     juce::TextButton pluginsButton { "PLUGINS" }, settingsButton { "AUDIO / DSP" }, layoutButton { "VERTICAL" };
+    juce::TextButton automixButton { "AUTOMIX" }, automixViewButton { "AM METERS" };
 
     juce::Rectangle<int> sceneArea, cpuArea, deviceArea;
     std::vector<float> threadLoads;

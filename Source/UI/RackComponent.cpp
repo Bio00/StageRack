@@ -1,4 +1,5 @@
 #include "RackComponent.h"
+#include "AutomixerWindow.h"
 #include "PluginWindow.h"
 #include "PluginThumbnail.h"
 #include "PluginMeters.h"
@@ -1373,6 +1374,16 @@ void RackComponent::updateMeters()
 
     repaint (meterArea);
 
+    if ((rack.automixGroup.load() > 0) == automixArea.isEmpty())
+        resized();   // group changed elsewhere (scene, Alt on another rack)
+
+    if (rack.automixGroup.load() > 0)
+    {
+        automixDb = rack.automixGainDb.load();
+        repaint (automixArea);
+        repaint (automixMeterArea);
+    }
+
     // values changed from elsewhere (Alt on another rack, MIDI, scenes) show up here
     if (! gain.isMouseButtonDown() && std::abs ((float) gain.getValue() - rack.gainDb.load()) > 0.001f)
         gain.setValue (rack.gainDb.load(), juce::dontSendNotification);
@@ -1420,6 +1431,25 @@ void RackComponent::paint (juce::Graphics& g)
     g.setFont (theme::font (11.0f, true));
     g.drawText (juce::String (index + 1).paddedLeft ('0', 2), indexArea, juce::Justification::centredLeft);
 
+    // automix: group letter + the gain the automixer gives this rack right now (0 .. -40 dB)
+    if (const auto group = rack.automixGroup.load(); group > 0 && ! automixArea.isEmpty())
+    {
+        const bool on = session.getEngine().automixEnabled.load();
+        auto a = automixArea.toFloat();
+        g.setColour (theme::meterBg);
+        g.fillRoundedRectangle (a, 3.0f);
+
+        const auto frac = on ? juce::jlimit (0.0f, 1.0f, 1.0f + automixDb / 40.0f) : 1.0f;
+        g.setColour ((on ? theme::green : theme::textDim).withAlpha (on ? 0.75f : 0.35f));
+        g.fillRoundedRectangle (a.withWidth (a.getWidth() * frac), 3.0f);
+
+        g.setColour (theme::text);
+        g.setFont (theme::font (9.5f, true));
+        g.drawText ("AM " + juce::String::charToString ((juce::juce_wchar) ('A' + group - 1))
+                      + (on ? "  " + (automixDb <= -59.5f ? juce::String ("-inf") : juce::String (automixDb, 1)) : juce::String ("  off")),
+                    a.reduced (4.0f, 0.0f), juce::Justification::centredLeft, false);
+    }
+
     // meters: in L/R, out L/R
     auto m = meterArea.toFloat();
     const float w = (m.getWidth() - 6) / 4.0f;
@@ -1427,6 +1457,25 @@ void RackComponent::paint (juce::Graphics& g)
     theme::drawMeter (g, { m.getX() + w,             m.getY(), w - 1, m.getHeight() }, inLevel[1]);
     theme::drawMeter (g, { m.getX() + 2 * w + 6,     m.getY(), w - 1, m.getHeight() }, outLevel[0]);
     theme::drawMeter (g, { m.getX() + 3 * w + 6,     m.getY(), w - 1, m.getHeight() }, outLevel[1]);
+
+    // automix gain meter (0 dB = full, -40 dB = empty), in the colour of the group
+    if (const auto group = rack.automixGroup.load(); group > 0 && ! automixMeterArea.isEmpty())
+    {
+        const bool on = session.getEngine().automixEnabled.load();
+        auto a = automixMeterArea.toFloat();
+        g.setColour (theme::meterBg);
+        g.fillRoundedRectangle (a, 1.5f);
+
+        const auto norm = on ? juce::jlimit (0.0f, 1.0f, 1.0f + automixDb / 40.0f) : 1.0f;
+        const auto c = AutomixerPanel::groupColour (group);
+        g.setColour (on ? c : c.withSaturation (0.1f).withAlpha (0.4f));
+        g.fillRoundedRectangle (a.withTrimmedTop (a.getHeight() * (1.0f - norm)), 1.5f);
+
+        g.setColour (norm * a.getHeight() > 12.0f ? theme::meterBg : c);   // the letter stays readable on an empty meter
+        g.setFont (theme::font (9.0f, true));
+        g.drawText (juce::String::charToString ((juce::juce_wchar) ('A' + group - 1)),
+                    a.removeFromBottom (12.0f), juce::Justification::centred, false);
+    }
 }
 
 void RackComponent::paintOverChildren (juce::Graphics& g)
@@ -1453,7 +1502,11 @@ void RackComponent::resized()
         indexArea = nameRow.removeFromLeft (22);
         menuButton.setBounds (nameRow.removeFromRight (28));
         nameLabel.setBounds (nameRow);
-        statusLabel.setBounds (r.removeFromTop (16));
+        {
+            auto statusRow = r.removeFromTop (16);
+            automixArea = rack.automixGroup.load() > 0 ? statusRow.removeFromRight (statusRow.getWidth() / 2).reduced (0, 2) : juce::Rectangle<int>();
+            statusLabel.setBounds (statusRow);
+        }
         inputBox.setBounds (r.removeFromTop (21));
         r.removeFromTop (3);
         outputBox.setBounds (r.removeFromTop (21));
@@ -1472,6 +1525,14 @@ void RackComponent::resized()
         bypassButton.setBounds (buttons.removeFromTop (bh));
         controls.removeFromRight (4);
         meterArea = controls.removeFromLeft (26).reduced (0, 2);
+        automixMeterArea = {};
+
+        if (rack.automixGroup.load() > 0)
+        {
+            controls.removeFromLeft (3);
+            automixMeterArea = controls.removeFromLeft (11).reduced (0, 2);
+        }
+
         controls.removeFromLeft (4);
         gain.setBounds (controls);
 
@@ -1489,7 +1550,15 @@ void RackComponent::resized()
     indexArea = nameRow.removeFromLeft (22);
     menuButton.setBounds (nameRow.removeFromRight (28));
     nameRow.removeFromRight (4);
-    statusLabel.setBounds (nameRow.removeFromRight (96));
+    statusLabel.setBounds (nameRow.removeFromRight (rack.automixGroup.load() > 0 ? 60 : 96));
+    automixArea = {};
+
+    if (rack.automixGroup.load() > 0)
+    {
+        automixArea = nameRow.removeFromRight (78).reduced (0, 3);
+        nameRow.removeFromRight (4);
+    }
+
     nameLabel.setBounds (nameRow);
     header.removeFromTop (3);
 
@@ -1521,6 +1590,14 @@ void RackComponent::resized()
     r.removeFromRight (4);
     gain.setBounds (r.removeFromRight (58));
     r.removeFromRight (4);
+    automixMeterArea = {};
+
+    if (rack.automixGroup.load() > 0)
+    {
+        automixMeterArea = r.removeFromRight (11).reduced (0, 2);
+        r.removeFromRight (3);
+    }
+
     meterArea = r.removeFromRight (26).reduced (0, 2);
     r.removeFromRight (8);
 
@@ -1599,6 +1676,16 @@ void RackComponent::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    if ((automixArea.contains (e.getEventRelativeTo (this).getPosition()) || automixMeterArea.contains (e.getEventRelativeTo (this).getPosition()))
+        && rack.automixGroup.load() > 0)
+    {
+        if (! edit.isRackSelected (rack.getId()))
+            edit.clickRack (rack.getId(), {});
+
+        showAutomixMenu();
+        return;
+    }
+
     edit.clickRack (rack.getId(), e.mods);
 }
 
@@ -1650,6 +1737,78 @@ void RackComponent::itemDropped (const SourceDetails& d)
     edit.dropRack (rackId, target, altDown());
 }
 
+juce::PopupMenu RackComponent::automixMenu()
+{
+    // applies to the selected racks (or this one)
+    juce::Component::SafePointer<RackComponent> safe (this);
+    auto forTargets = [safe] (auto fn)
+    {
+        return [safe, fn]
+        {
+            if (safe == nullptr)
+                return;
+
+            for (auto id : safe->edit.targetRacks())
+                if (auto* r = safe->session.getEngine().findRack (id))
+                    fn (*r);
+
+            safe->session.markDirty();
+            safe->resized();   // the automix bar appears / disappears
+            safe->repaint();
+            if (safe->onResized) safe->onResized();
+        };
+    };
+
+    juce::PopupMenu m;
+    m.addSectionHeader ("Gain-sharing automixer");
+
+    for (int g = 0; g <= Rack::maxAutomixGroups; ++g)
+        m.addItem (juce::PopupMenu::Item (g == 0 ? juce::String ("Off (not automixed)")
+                                                 : "Group " + juce::String::charToString ((juce::juce_wchar) ('A' + g - 1)))
+                       .setTicked (rack.automixGroup.load() == g)
+                       .setAction (forTargets ([g] (Rack& r) { r.automixGroup = g; })));
+
+    juce::PopupMenu weights;
+    for (float w : { 6.0f, 3.0f, 0.0f, -3.0f, -6.0f, -10.0f, -15.0f, -20.0f })
+        weights.addItem (juce::PopupMenu::Item ((w > 0 ? "+" : "") + juce::String (w, 0) + " dB" + (w == 0.0f ? "  (default)" : ""))
+                             .setTicked (std::abs (rack.automixWeightDb.load() - w) < 0.05f)
+                             .setAction (forTargets ([w] (Rack& r) { r.automixWeightDb = w; })));
+
+    m.addSubMenu ("Weight", weights, rack.automixGroup.load() > 0);
+    m.addSeparator();
+
+    auto& engine = session.getEngine();
+    juce::PopupMenu overlap;
+    const char* overlapNames[] = { "Share (Dugan): -3 dB each", "Soft: -1.2 dB each", "Open: 0 dB each" };
+    for (int o = 0; o < 3; ++o)
+        overlap.addItem (juce::PopupMenu::Item (overlapNames[o])
+                             .setTicked (engine.automixOverlap.load() == o)
+                             .setAction ([safe, o]
+                             {
+                                 if (safe == nullptr) return;
+                                 safe->session.getEngine().automixOverlap = o;
+                                 safe->session.markDirty();
+                             }));
+    m.addSubMenu ("When several talk", overlap);
+
+    m.addItem (juce::PopupMenu::Item ("Automixer enabled (all groups)")
+                   .setTicked (engine.automixEnabled.load())
+                   .setAction ([safe]
+                   {
+                       if (safe == nullptr) return;
+                       auto& en = safe->session.getEngine();
+                       en.automixEnabled = ! en.automixEnabled.load();
+                       safe->session.markDirty();
+                   }));
+    return m;
+}
+
+void RackComponent::showAutomixMenu()
+{
+    automixMenu().showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this)
+                                     .withTargetScreenArea (localAreaToGlobal (automixArea)));
+}
+
 void RackComponent::showRackMenu()
 {
     juce::Component::SafePointer<RackComponent> safe (this);
@@ -1695,6 +1854,7 @@ void RackComponent::showRackMenu()
                                 rc.session.markDirty();
                             })));
     m.addSubMenu ("Latency group", groups);
+    m.addSubMenu ("Automix", automixMenu());
 
     juce::PopupMenu colours;
     const juce::Colour palette[] = { juce::Colour (0xff31c4f3), juce::Colour (0xff7ed957), juce::Colour (0xffffb341),

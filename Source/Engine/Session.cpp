@@ -323,7 +323,9 @@ juce::ValueTree Session::captureSceneData() const
           .setProperty ("gain", r.gainDb.load(), nullptr)
           .setProperty ("mute", r.muted.load(), nullptr)
           .setProperty ("bypass", r.bypassed.load(), nullptr)
-          .setProperty ("solo", r.solo.load(), nullptr);
+          .setProperty ("solo", r.solo.load(), nullptr)
+          .setProperty ("amGroup", r.automixGroup.load(), nullptr)
+          .setProperty ("amWeight", r.automixWeightDb.load(), nullptr);
 
         for (int s = 0; s < Rack::maxSlots; ++s)
         {
@@ -341,12 +343,19 @@ juce::ValueTree Session::captureSceneData() const
         data.appendChild (rt, nullptr);
     }
 
-    data.setProperty ("master", engine.masterGainDb.load(), nullptr);
+    data.setProperty ("master", engine.masterGainDb.load(), nullptr)
+        .setProperty ("automix", engine.automixEnabled.load(), nullptr)
+        .setProperty ("amOverlap", engine.automixOverlap.load(), nullptr);
     return data;
 }
 
 void Session::applySceneData (const juce::ValueTree& data)
 {
+    if (data.hasProperty ("automix"))
+        engine.automixEnabled = (bool) data["automix"];
+    if (data.hasProperty ("amOverlap"))
+        engine.automixOverlap = juce::jlimit (0, 2, (int) data["amOverlap"]);
+
     for (const auto& rt : data)
     {
         auto* r = engine.findRack (rt["id"]);
@@ -358,6 +367,12 @@ void Session::applySceneData (const juce::ValueTree& data)
         r->muted = (bool) rt["mute"];
         r->bypassed = (bool) rt["bypass"];
         r->solo = (bool) rt["solo"];
+
+        if (rt.hasProperty ("amGroup"))   // scenes stored before the automixer leave it alone
+        {
+            r->automixGroup = juce::jlimit (0, Rack::maxAutomixGroups, (int) rt["amGroup"]);
+            r->automixWeightDb = (float) rt["amWeight"];
+        }
 
         for (const auto& st : rt)
         {
@@ -460,6 +475,8 @@ void Session::newSession()
     currentScene = -1;
     file = juce::File();
     engine.masterGainDb = 0.0f;
+    engine.automixEnabled = true;
+    engine.automixOverlap = 0;
     engine.addRack();
     dirty = false;
     ++documentGeneration;
@@ -510,7 +527,9 @@ juce::ValueTree Session::rackToTree (const Rack& r) const
       .setProperty ("solo", r.solo.load(), nullptr)
       .setProperty ("size", r.uiSize, nullptr)
       .setProperty ("inRack", r.inputRackId.load(), nullptr)
-      .setProperty ("latGroup", r.latencyGroup.load(), nullptr);
+      .setProperty ("latGroup", r.latencyGroup.load(), nullptr)
+      .setProperty ("amGroup", r.automixGroup.load(), nullptr)
+      .setProperty ("amWeight", r.automixWeightDb.load(), nullptr);
 
     for (int s = 0; s < Rack::maxSlots; ++s)
         if (auto pt = pluginToTree (r, s); pt.isValid())
@@ -534,6 +553,8 @@ void Session::buildRack (Rack& r, const juce::ValueTree& rt)
     r.uiSize = rt.hasProperty ("size") ? (float) rt["size"] : 1.0f;
     r.inputRackId = rt.hasProperty ("inRack") ? (int) rt["inRack"] : -1;
     r.latencyGroup = (int) rt["latGroup"];
+    r.automixGroup = juce::jlimit (0, Rack::maxAutomixGroups, (int) rt["amGroup"]);
+    r.automixWeightDb = (float) rt["amWeight"];
 
     for (const auto& pt : rt)
         loadPluginFromTree (r, (int) pt["slot"], pt);
@@ -758,7 +779,9 @@ juce::ValueTree Session::toTree() const
     juce::ValueTree root (idRoot);
     root.setProperty ("version", 1, nullptr)
         .setProperty ("master", engine.masterGainDb.load(), nullptr)
-        .setProperty ("currentScene", currentScene, nullptr);
+        .setProperty ("currentScene", currentScene, nullptr)
+        .setProperty ("automix", engine.automixEnabled.load(), nullptr)
+        .setProperty ("amOverlap", engine.automixOverlap.load(), nullptr);
 
     juce::ValueTree racksTree (idRacks);
 
@@ -817,6 +840,8 @@ void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bo
     engine.removeRack (engine.getRack (0));
 
     engine.masterGainDb = 0.0f;   // no master fader any more: old sessions play at unity
+    engine.automixEnabled = root.hasProperty ("automix") ? (bool) root["automix"] : true;
+    engine.automixOverlap = juce::jlimit (0, 2, (int) root["amOverlap"]);
     ++*loadGeneration;
 
     for (const auto& rt : root.getChildWithName (idRacks))

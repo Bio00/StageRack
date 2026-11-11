@@ -4,6 +4,7 @@
 #include "RackComponent.h"
 #include "PluginWindow.h"
 #include "PluginManagerWindow.h"
+#include "AutomixerWindow.h"
 #include "../Update/Updater.h"
 
 namespace stagerack
@@ -59,6 +60,13 @@ MainComponent::MainComponent()
         settingsWindow->toFront (true);
     };
     topBar->onToggleLayout = [this] { setVerticalLayout (! verticalLayout); };
+    topBar->onAutomixView = [this]
+    {
+        if (automixerWindow == nullptr)
+            automixerWindow = std::make_unique<AutomixerWindow> (*session);
+        automixerWindow->setVisible (true);
+        automixerWindow->toFront (true);
+    };
     addAndMakeVisible (*topBar);
 
     sceneList = std::make_unique<SceneListComponent> (*session);
@@ -126,6 +134,7 @@ MainComponent::~MainComponent()
     PluginWindow::closeAll();
     pluginWindow = nullptr;
     settingsWindow = nullptr;
+    automixerWindow = nullptr;
 
     session->removeChangeListener (this);
     edit->removeChangeListener (this);

@@ -57,6 +57,7 @@ target_sources(StageRack PRIVATE
     Source/UI/EditController.cpp
     Source/UI/SceneListComponent.cpp
     Source/UI/TopBar.cpp
+    Source/UI/AutomixerWindow.cpp
     Source/UI/PluginWindow.cpp
     Source/UI/PluginThumbnail.mm
     Source/UI/PluginMeters.mm

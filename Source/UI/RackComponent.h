@@ -47,6 +47,8 @@ private:
     class ResizeHandle;
 
     void showRackMenu();
+    juce::PopupMenu automixMenu();
+    void showAutomixMenu();
     void fillRoutingBoxes();
     void layoutSlots (juce::Rectangle<int>);
     bool dropsAfter (juce::Point<int>) const;
@@ -64,8 +66,8 @@ private:
     juce::TextButton menuButton { juce::String::fromUTF8 ("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2") };
     std::unique_ptr<ResizeHandle> resizeHandle;
 
-    juce::Rectangle<int> meterArea, indexArea;
-    float inLevel[2] {}, outLevel[2] {}, peakLoad = 0.0f;
+    juce::Rectangle<int> meterArea, indexArea, automixArea, automixMeterArea;
+    float inLevel[2] {}, outLevel[2] {}, peakLoad = 0.0f, automixDb = 0.0f;
     bool vertical = false, gainDragging = false;
     juce::ModifierKeys gainDragMods;
     int dropIndicator = 0;          // 0 = none, -1 = before this rack, 1 = after

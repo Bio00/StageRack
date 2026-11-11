@@ -270,6 +270,15 @@ void Rack::prepare (double sr, int devBlock)
         gain.reset (sr, 0.02);
         gain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (gainDb.load()));
 
+        // automix level detector (see updateAutomixLevel)
+        amHighPass.set (juce::IIRCoefficients::makeHighPass (sr, automixHighPassHz.load()));
+        amLowPass.set (juce::IIRCoefficients::makeLowPass (sr, juce::jmin ((double) automixLowPassHz.load(), sr * 0.45)));
+        amAvgCoeff = (float) std::exp (-1.0 / (automixAvgMs.load() * 0.001 * sr));   // per sample
+        amHoldSamples = (int) (automixHoldMs.load() * 0.001 * sr);
+        amReleaseDbPerSample = (float) (automixReleaseDbPerSec.load() / sr);
+        amFloorRisePerSample = (float) (3.0 / sr);   // 3 dB/s, so a talker never turns into the floor
+        amActive = false;
+
         for (auto& s : slots)
         {
             dropTwin (s);   // prepared for the old rate/block
@@ -576,6 +585,69 @@ void Rack::applyCompensation (int numSamples) noexcept
     delayWrite = (delayWrite + numSamples) & mask;
 }
 
+void Rack::updateAutomixLevel (int numSamples) noexcept
+{
+    if (automixGroup.load (std::memory_order_relaxed) <= 0 || muted.load (std::memory_order_relaxed))
+    {
+        // out of the group at once (a muted rack too)
+        automixLevel = 0.0f;
+        automixTalk = 0.0f;
+        amActive = false;
+        automixLevelDb.store (-100.0f, std::memory_order_relaxed);
+        return;
+    }
+
+    if (! amActive)
+    {
+        amHighPass.reset(); amLowPass.reset();
+        amAvg = 0.0f; amEnvDb = -200.0f; amHoldLeft = 0; amFloorDb = -200.0f;
+        amActive = true;
+    }
+
+    // Detector, after the fader. 1) voice band only (~200 Hz-4 kHz): bass bleed from the stage
+    // or a hum can't take the floor, and low notes don't modulate the gain. 2) power averaged over
+    // ~5 ms. 3) dB envelope: rises at once (no clipped first syllable), holds 40 ms (the gaps
+    // inside words), then falls at 100 dB/s, so a mic that stopped talking hands over quickly.
+    const auto* l = buffer.getReadPointer (0);
+    const auto* r = buffer.getReadPointer (1);
+    float avg = amAvg;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const auto x = amLowPass.process (amHighPass.process (0.5f * (l[i] + r[i])));
+        avg = x * x + amAvgCoeff * (avg - x * x);
+    }
+
+    amAvg = avg < 1.0e-20f ? 0.0f : avg;   // no denormals after a long silence
+    const auto db = 10.0f * std::log10 (juce::jmax (amAvg, 1.0e-20f));
+
+    if (db >= amEnvDb)
+    {
+        amEnvDb = db;
+        amHoldLeft = amHoldSamples;
+    }
+    else if (amHoldLeft > 0)
+    {
+        amHoldLeft -= numSamples;
+    }
+    else
+    {
+        amEnvDb = juce::jmax (db, amEnvDb - amReleaseDbPerSample * (float) numSamples);
+    }
+
+    automixLevel = amEnvDb < -190.0f ? 0.0f : std::pow (10.0f, 0.1f * amEnvDb);
+
+    // own noise floor (minimum statistics) -> is someone talking into this mic? Only used by
+    // the Soft/Open overlap modes, never by the Dugan law itself.
+    if (amFloorDb < -190.0f || db < amFloorDb)
+        amFloorDb = db;
+    else
+        amFloorDb += amFloorRisePerSample * (float) numSamples;
+
+    automixTalk = juce::jlimit (0.0f, 1.0f, (amEnvDb - amFloorDb - 6.0f) / 6.0f);
+    automixLevelDb.store (juce::jmax (-100.0f, amEnvDb), std::memory_order_relaxed);
+}
+
 void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int numSamples, int threadIndex) noexcept
 {
     const juce::ScopedNoDenormals noDenormals;
@@ -648,6 +720,10 @@ void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int n
             buffer.applyGain (0, 0, numSamples, target);
             buffer.applyGain (1, 0, numSamples, target);
         }
+
+        // automix detector AFTER the fader, like Dugan Speech in Waves consoles: pulling a
+        // fader down also takes that mic's claim on the floor (the way to quiet a noisy mic)
+        updateAutomixLevel (numSamples);
 
         applyCompensation (numSamples);
 
