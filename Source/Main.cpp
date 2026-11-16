@@ -343,8 +343,22 @@ public:
 
     void shutdown() override
     {
-        mainWindow = nullptr;
+        if (mainWindow != nullptr)
+        {
+            // Off the screen first: from here on nothing may repaint (the top bar reads the
+            // session, which goes away), and a window in full screen would even be re-created
+            // by JUCE on a look-and-feel change.
+            mainWindow->removeFromDesktop();
+            mainWindow->getMain().prepareToQuit();
+        }
+
         update::runPendingInstall();   // "Install and restart": the installer waits for this process to exit
+
+        // Everything is saved and the plugins are gone. Tearing down the rest (windows, plugin
+        // formats, JUCE singletons) only frees memory, and a heap damaged by some plugin turns
+        // exactly that into a crash at quit (seen: LV2 format temp dir after UA/PACE plugins).
+        std::fflush (nullptr);
+        std::_Exit (0);
     }
 
     void systemRequestedQuit() override

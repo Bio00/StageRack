@@ -113,6 +113,14 @@ PluginManager::~PluginManager()
     saveLatencies();
 }
 
+void PluginManager::saveAll()
+{
+    stopLatencyProbe();
+    saveList();
+    saveLatencies();
+    settings->saveIfNeeded();
+}
+
 juce::File PluginManager::getDataDirectory()
 {
     auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)

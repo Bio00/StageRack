@@ -25,6 +25,12 @@ public:
     MainComponent();
     ~MainComponent() override;
 
+    /** Quit: closes every window, stops the audio, destroys the plugins and writes all
+        settings, once. After it only the components are left (nothing to save): the app
+        then exits without tearing them down, so a plugin that damaged the heap cannot turn
+        a clean quit into a crash report. */
+    void prepareToQuit();
+
     void paint (juce::Graphics&) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress&) override;
@@ -38,6 +44,7 @@ public:
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void timerCallback() override;
+    bool quitPrepared = false;
     void syncRacks();
     void layoutRacks();
     void setVerticalLayout (bool);

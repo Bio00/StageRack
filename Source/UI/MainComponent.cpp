@@ -146,6 +146,16 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    prepareToQuit();
+    juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
+}
+
+void MainComponent::prepareToQuit()
+{
+    if (quitPrepared)
+        return;
+
+    quitPrepared = true;
     stopTimer();
     coreaudio::stopProbe();
     autosave->cleanExit();   // the user already answered "save changes?"
@@ -167,11 +177,16 @@ MainComponent::~MainComponent()
         if (auto xml = engine.getDeviceManager().createStateXml())
             pluginManager.getSettings().setValue ("audioDevice", xml.get());
 
+    pluginManager.saveAll();   // before any plugin is destroyed: a crash after this loses nothing
+
     rackComponents.clear();
+    if (audioReady)
+        engine.getDeviceManager().closeAudioDevice();   // no callback while the plugins go
     engine.clearRacks();
     edit = nullptr;
-    session = nullptr;
-    juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
+    session = nullptr;        // the plugins are destroyed here
+
+    pluginManager.saveAll();
 }
 
 //==============================================================================

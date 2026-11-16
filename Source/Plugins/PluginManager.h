@@ -40,6 +40,9 @@ public:
 
     static juce::File getDataDirectory();
 
+    /** Stops the background probe and writes plugin list, latencies and settings now. */
+    void saveAll();
+
     //==============================================================================
     // Plugin latency, shown in the browser. Learned whenever a plugin is loaded, or measured
     // on request in child processes (same isolation as the scan).
