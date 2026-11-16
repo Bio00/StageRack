@@ -366,7 +366,10 @@ void MainComponent::timerCallback()
 
     // plugins can change their latency at any time: re-check groups twice a second
     if (++latencyCheckCounter % 15 == 0)
+    {
         engine.updateLatencyCompensation();
+        session->watchHops();
+    }
 
     topBar->updateMeters();
 

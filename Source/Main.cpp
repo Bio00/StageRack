@@ -1,6 +1,8 @@
 #include <JuceHeader.h>
 #include "UI/MainComponent.h"
 #include "Bench.h"
+#include "PluginProbe.h"
+#include "WatchTest.h"
 #include "EditTest.h"
 #include "StressTest.h"
 #include "AutomixProbe.h"
@@ -318,6 +320,23 @@ public:
         {
             juce::Process::setDockIconVisible (false);
             setApplicationReturnValue (runSpreadTest (args));
+            quit();
+            return;
+        }
+
+        if (args.contains ("--watch-test"))
+        {
+            juce::Process::setDockIconVisible (false);
+            static std::unique_ptr<HopWatchTest> test;   // drives itself on the message loop, exits with _Exit
+            test = std::make_unique<HopWatchTest> (args);
+            if (test->start() != 0) std::_Exit (1);
+            return;
+        }
+
+        if (args.contains ("--plugin-probe"))
+        {
+            juce::Process::setDockIconVisible (false);
+            setApplicationReturnValue (runPluginProbe (args));
             quit();
             return;
         }

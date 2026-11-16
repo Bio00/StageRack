@@ -5,6 +5,7 @@
 #include "Engine/HopAligner.h"
 #include "Plugins/PluginManager.h"
 #include "Update/Updater.h"
+#include "PluginProbe.h"
 #include <chrono>
 #include <thread>
 
@@ -243,6 +244,7 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
             auto p = fm.createPluginInstance (*found[0], sr, bs, err);
             if (p == nullptr) { std::cout << "create failed: " << err << std::endl; return 1; }
             Rack::configurePlugin (*p, sr, bs);
+            applySetArgs (*p, args);   // --set Name=Value (e.g. EverClean: --set Active=On)
             rack.setPlugin (s, std::move (p));
         }
     }
@@ -276,6 +278,10 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
 
         AudioEngine& engine;
         juce::AudioBuffer<float> noise { 2, 8192 }, scratch { 2, 8192 };
+        // one mono "microphone" per rack (device input r), looped; 20 s, a multiple of any block
+        juce::AudioBuffer<float> source;
+        std::vector<const float*> inPtrs;
+        int sourcePos = 0;
         std::vector<float> times;
         std::vector<float> perRack = std::vector<float> (60 * 16, 0.0f);
         std::atomic<int> count { 0 };
@@ -300,6 +306,15 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
             period = d->getCurrentBufferSizeSamples() / d->getCurrentSampleRate() * 1000.0;
             workgroup = (bool) d->getWorkgroup();
             engine.audioDeviceAboutToStart (d);
+
+            // The device is opened without inputs, so the engine would map 0 inputs and the
+            // racks would get silence (true for every --bench-device run before this fix):
+            // declare our own channels as the device inputs.
+            juce::BigInteger ins;
+            ins.setRange (0, source.getNumChannels(), true);
+            engine.setChannelMaps (ins, source.getNumChannels(), d->getActiveOutputChannels(), d->getOutputChannelNames().size());
+            inPtrs.resize ((size_t) source.getNumChannels());
+            sourcePos = 0;
         }
 
         void audioDeviceStopped() override { engine.audioDeviceStopped(); }
@@ -308,8 +323,12 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
                                                const juce::AudioIODeviceCallbackContext& ctx) override
         {
             const auto t0 = juce::Time::getHighResolutionTicks();
-            const float* in[2] = { noise.getReadPointer (0), noise.getReadPointer (1) };
-            engine.audioDeviceIOCallbackWithContext (in, 2, scratch.getArrayOfWritePointers(), 2, n, ctx);
+            if (sourcePos + n > source.getNumSamples())
+                sourcePos = 0;
+            for (int c = 0; c < source.getNumChannels(); ++c)
+                inPtrs[(size_t) c] = source.getReadPointer (c, sourcePos);
+            sourcePos += n;
+            engine.audioDeviceIOCallbackWithContext (inPtrs.data(), (int) inPtrs.size(), scratch.getArrayOfWritePointers(), 2, n, ctx);
 
             for (int c = 0; c < numOut; ++c)
                 if (out[c] != nullptr)
@@ -335,6 +354,47 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
         }
     } proxy (engine);
     engine.hopAlignEnabled = ! args.contains ("--noalign");
+
+    // --input <file> [startSec]: rack r hears the file's left channel from startSec + 37 s * r
+    // (different moments of a real recording = different "microphones"). Default: noise.
+    {
+        const int len = 48000 * 20;
+        proxy.source.setSize (engine.getNumRacks(), len);
+        juce::Random rnd (7);
+
+        if (const auto ii = args.indexOf ("--input"); ii >= 0)
+        {
+            juce::AudioFormatManager afm;
+            afm.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> reader (afm.createReaderFor (juce::File (args[ii + 1])));
+            if (reader == nullptr) { std::cout << "cannot read " << args[ii + 1] << std::endl; return 1; }
+            const auto start = args[ii + 2].getDoubleValue();
+            juce::AudioBuffer<float> tmp (2, len);
+            double rms = 0;
+
+            for (int r = 0; r < engine.getNumRacks(); ++r)
+            {
+                reader->read (&tmp, 0, len, (juce::int64) ((start + 37.0 * r) * reader->sampleRate), true, true);
+                proxy.source.copyFrom (r, 0, tmp, 0, 0, len);
+                rms += proxy.source.getRMSLevel (r, 0, len);
+            }
+
+            std::cout << "input: " << args[ii + 1] << " from " << start << " s, 20 s per rack, mean RMS "
+                      << juce::String (juce::Decibels::gainToDecibels (rms / engine.getNumRacks()), 1) << " dBFS" << std::endl;
+        }
+        else
+        {
+            for (int r = 0; r < engine.getNumRacks(); ++r)
+                for (int i = 0; i < len; ++i)
+                    proxy.source.setSample (r, i, rnd.nextFloat() * 0.2f - 0.1f);
+        }
+
+        for (int r = 0; r < engine.getNumRacks(); ++r)
+        {
+            engine.getRack (r).inputChannel = r;
+            engine.getRack (r).stereoInput = false;
+        }
+    }
 
 
     juce::AudioDeviceManager dm;
@@ -374,6 +434,8 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
         dm.addAudioCallback (&proxy);
 
         juce::Thread::sleep (12000);
+        std::cout << "      rack 1 input peak (last 12 s): " << juce::String (juce::Decibels::gainToDecibels (engine.getRack (0).inMeter[0].readAndReset()), 1)
+                  << " dBFS, output peak " << juce::String (juce::Decibels::gainToDecibels (engine.getRack (0).outMeter[0].readAndReset()), 1) << " dBFS" << std::endl;
         dm.removeAudioCallback (&proxy);
 
         const int n = juce::jmin ((int) proxy.count.load(), (int) proxy.times.size());
@@ -396,6 +458,8 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
                 std::cout << line << std::endl;
             }
 
+        std::cout << "      rack 1 hop wait (wall - CPU, smoothed): " << juce::String (engine.getRack (0).getSlot (0).hopWaitMs.load(), 3)
+                  << " ms -> wake assist " << (engine.getRack (0).getSlot (0).hopWaitMs.load() > 0.005f ? "used" : "skipped") << std::endl;
         std::cout << "  " << label << " wake-assist=" << (engine.getWakeAssistMode() == 0 ? "auto" : engine.getWakeAssistMode() == 1 ? "always" : "off") << " workgroup=" << (proxy.workgroup ? "yes" : "no")
                   << "  callbacks " << (n - skip) << "  avg " << juce::String (sum / juce::jmax (1, n - skip), 3)
                   << " ms  worst " << juce::String (worst, 3) << " ms  over budget (" << juce::String (proxy.period, 2)
@@ -1028,7 +1092,7 @@ inline int runHandoverTest (const juce::StringArray& args)
     {
         juce::String err;
         auto p = fm.createPluginInstance (*found[0], sr, bs, err);
-        if (p != nullptr) Rack::configurePlugin (*p, sr, bs);
+        if (p != nullptr) { Rack::configurePlugin (*p, sr, bs); applySetArgs (*p, args); }
         return p;
     };
 
@@ -1058,7 +1122,7 @@ inline int runHandoverTest (const juce::StringArray& args)
                 const auto r2 = HopAligner::detectAndAlign (*twin, bs, [targetShift] (int h) { return targetShift % juce::jmax (1, h); },
                                                             [call] { return call; });
                 std::cout << "  twin: hop " << r2.hopCalls << " calls, phase " << r2.phase << std::endl;
-                if (! rack->beginHandover (0, twin, r2.hopCalls, r2.phase, (int) (warmS * sr), (int) (fadeS * sr)))
+                if (! rack->beginHandover (0, twin, r2.hopCalls, r2.phase, call, (int) (warmS * sr), (int) (fadeS * sr)))
                     std::cout << "  beginHandover FAILED" << std::endl;
             }
 

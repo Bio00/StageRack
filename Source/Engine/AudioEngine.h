@@ -65,7 +65,15 @@ public:
 
     /** Aligns a new, prepared plugin before it is put in `rack` (message thread). */
     void alignNewPlugin (juce::AudioPluginInstance&, Rack&, int& hopCalls, int& hopPhase,
-                        const Rack::Slot* replacing = nullptr);   // replacing: its phase does not count as used
+                        const Rack::Slot* replacing = nullptr,    // replacing: its phase does not count as used
+                        juce::uint64* firstLiveCallback = nullptr); // out: callback the alignment assumed it starts in
+
+    /** Hop watch (message thread, ~2x/s): compares where each plugin's hop really falls in
+        the live callbacks with where it was put. A hop that appeared or moved (plugin switched
+        on later, un-bypassed, state recalled) is adopted; if it now shares a callback while a
+        freer phase exists, its (rackId, slot) is returned for a live re-spread. */
+    std::vector<std::pair<int, int>> watchHops();
+    int hopsAdopted = 0;    // hops found moved by watchHops (tests, status)
 
     /** Re-aligns every plugin of a running sync rack (after its plugins were re-prepared). */
     void realignRack (Rack&);
@@ -157,6 +165,7 @@ private:
     int blockSize = 512;
     bool workgroupActive = false;
     int choosePhase (int hopCalls, const Rack::Slot* exclude, const Rack* forRack) const;
+    std::vector<int> phaseCosts (int hopCalls, const Rack::Slot* exclude, const Rack* forRack) const;
     bool runsInSeries (const Rack&, const Rack&) const;
     void alignAllRacks();
 

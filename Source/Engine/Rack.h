@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
 #include <atomic>
 
 namespace stagerack
@@ -53,6 +54,24 @@ public:
         std::atomic<int> hopCalls { 0 };   // detected internal hop, in device callbacks (0 = none)
         std::atomic<int> hopPhase { -1 };  // callback phase its hop was moved to (see HopAligner)
 
+        // Hop watch: the audio thread logs the device callbacks in which this plugin had a
+        // heavy call (sync racks only); AudioEngine::watchHops() reads them on the message
+        // thread to see where the hop really is (it moves when a plugin is switched on later,
+        // e.g. EverClean's Active, or un-bypassed: their frame counter stops while idle).
+        static constexpr int heavyRing = 32;
+        std::array<std::atomic<juce::uint64>, heavyRing> heavyAt {};
+        std::atomic<juce::uint32> heavyCount { 0 };
+        float lightMs = 1.0e9f;            // audio thread: cost of an ordinary call (min-tracking)
+        // Time the audio thread spends blocked inside the plugin's hop call (wall - thread CPU,
+        // smoothed), -1 = not measured yet. De-Feedback waits for its helper thread (~0.1-0.25 ms);
+        // EverClean computes the whole hop on the calling thread (~0). The core wake assist
+        // is only useful for the first kind.
+        std::atomic<float> hopWaitMs { -1.0f };
+        // message thread only (watchHops)
+        const void* watchPlugin = nullptr;
+        juce::uint64 watchSince = 0;
+        int watchHop = 0, watchPhase = -1, watchSeen = 0, watchRespreads = 0;
+
         // Seamless hand-over (live re-spread): a twin instance, already re-phased offline,
         // runs on the same input next to `plugin`, then a crossfade hands the output over.
         // The fields below are written by the message thread under processLock, then only
@@ -60,6 +79,8 @@ public:
         std::unique_ptr<juce::AudioPluginInstance> twin;
         int twinHopCalls = 0, twinHopPhase = -1;
         int twinWarmSamples = 0, twinFadeSamples = 0, twinPos = 0;
+        juce::uint64 twinFirstCallback = 0;        // callback the twin's alignment assumed it starts in
+        std::atomic<int> twinLateBy { 0 };         // diagnostics: how many callbacks later it really started
         std::atomic<bool> handoverDone { false };
     };
 
@@ -67,6 +88,9 @@ public:
     ~Rack();
 
     int getId() const noexcept                      { return id; }
+
+    /** Index of the device callback being processed (set by the engine before each callback). */
+    juce::uint64 callbackIndex = 0;
 
     //==============================================================================
     // Message thread
@@ -85,7 +109,7 @@ public:
         this rack): the twin processes the live input in parallel for `warmSamples`, then the
         output crossfades to it over `fadeSamples`. No gap, no latency change. Returns false
         (and gives the twin back through `twin`) if the slot is empty, async or busy. */
-    bool beginHandover (int slot, std::unique_ptr<juce::AudioPluginInstance>& twin, int hopCalls, int hopPhase,
+    bool beginHandover (int slot, std::unique_ptr<juce::AudioPluginInstance>& twin, int hopCalls, int hopPhase, juce::uint64 firstCallback,
                         int warmSamples, int fadeSamples);
     bool isHandingOver (int slot) const noexcept;
     /** Message thread: once the hand-over has finished, returns the retired instance (to be

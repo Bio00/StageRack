@@ -134,6 +134,26 @@ juce::File PluginManager::getDeadMansPedalFile() const
     return getDataDirectory().getChildFile ("scan-in-progress.txt");
 }
 
+juce::String PluginManager::applyInsertDefaults (juce::AudioPluginInstance& p)
+{
+    struct Rule { const char* plugin; const char* parameter; float value; };
+    static const std::vector<Rule> rules { { "EverClean", "Active", 1.0f } };
+
+    juce::String changed;
+    const auto name = p.getPluginDescription().name;
+
+    for (auto& rule : rules)
+        if (name.containsIgnoreCase (rule.plugin))
+            for (auto* prm : p.getParameters())
+                if (prm->getName (64).equalsIgnoreCase (rule.parameter) && prm->getValue() != rule.value)
+                {
+                    prm->setValueNotifyingHost (rule.value);
+                    changed << rule.parameter << " = " << prm->getCurrentValueAsText() << " ";
+                }
+
+    return changed.trim();
+}
+
 void PluginManager::addAllFormats (juce::AudioPluginFormatManager& fm)
 {
     juce::addDefaultFormatsToManager (fm);

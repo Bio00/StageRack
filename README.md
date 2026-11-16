@@ -1,6 +1,8 @@
 # StageRack
 
-> **Beta 0.5.1** — versione di prova. Usala in prova prima di portarla su un palco vero.
+> **Beta 0.6.0** — versione di prova. Usala in prova prima di portarla su un palco vero.
+
+**Novità 0.6:** EverClean (Everworks, gratuito) ottimizzato come De-Feedback: si accende da solo quando lo inserisci, i suoi hop vengono distribuiti, e un **controllo continuo degli hop** ri-distribuisce dal vivo, senza click, qualsiasi plugin a blocchi che venga acceso o tolto dal bypass dopo. Il core wake assist ora si attiva solo per i plugin che ne hanno bisogno. Misure con audio reale: [De-Feedback contro EverClean](#de-feedback-contro-everclean-con-audio-reale).
 
 Host di plugin per l'audio dal vivo, per macOS 11 (Big Sur) o successivo, su **tutti i Mac**: app universale, nativa sia su Apple Silicon (M1…M4) sia su Intel. L'impostazione è quella di Waves SuperRack Performer (rack, scene, interfaccia scura), con alcune idee prese da LiveProfessor.
 
@@ -30,7 +32,9 @@ Per ripeterlo:
 build/StageRack_artefacts/Release/StageRack.app/Contents/MacOS/StageRack --bench VST3 "/Library/Audio/Plug-Ins/VST3/soothe2.vst3" 8 128
 ```
 
-## Plugin pesanti a latenza zero (De-Feedback, ...)
+## Plugin pesanti a latenza zero (De-Feedback, EverClean, ...)
+StageRack non ha impostazioni scritte per un plugin specifico: **misura ogni plugin** che inserisci (tempo di ogni chiamata, regolarità dei picchi, attesa di thread interni) e si adatta. I plugin a costo costante (EQ, compressori...) non vengono toccati. L'unica regola fissa è accendere *Active* su EverClean all'inserimento, perché spento non fa nulla.
+
 ### Come lavora De-Feedback (misurato)
 - Esegue la sua rete neurale una volta ogni **192 campioni** (un "hop"). In quel callback spende 0.2-0.7 ms; negli altri quasi niente (~0.02 ms).
 - Ogni istanza crea 2 thread propri e usa il BLAS di Accelerate. Il thread audio esegue gran parte del calcolo dell'hop.
@@ -38,7 +42,8 @@ build/StageRack_artefacts/Release/StageRack.app/Contents/MacOS/StageRack --bench
 
 ### Cosa fa StageRack (senza aggiungere latenza)
 1. **Spread degli hop** (AUDIO / DSP, attivo di default). Quando un plugin viene inserito o la scheda riparte, StageRack ne misura il costo chiamata per chiamata, riconosce l'hop e gli fa processare qualche blocco di silenzio una volta sola, così il suo hop cade nella fase di callback meno occupata. Il tempo di uscita del plugin non cambia: la latenza resta 0.
-2. **Core wake assist** (AUDIO / DSP, Auto di default). A ogni hop De-Feedback sveglia un proprio helper interno e lo aspetta. Con poche istanze i P-core sono in idle profondo e svegliarne uno richiede ~0.25 ms: **il 58% dell'hop era attesa** (misurato confrontando tempo CPU e tempo reale del thread audio). Per questo 8 istanze andavano meglio di 1: con più istanze i core restano accesi. StageRack conosce in anticipo il callback di ogni hop (punto 1) e circa 2 ms prima avvia un thread a priorità più bassa di quella dei plugin, che tiene acceso un P-core; l'helper lo prelaziona subito. Si attiva solo se prima dell'hop c'è una pausa abbastanza lunga da far addormentare i core, quindi con molte istanze resta spento.
+   **Controllo continuo degli hop**: durante lo show StageRack registra in quali callback ogni plugin ha davvero l'hop e lo confronta con dove l'aveva messo (2 volte al secondo, costo trascurabile). Se un hop compare o si sposta (plugin acceso dopo, come EverClean con *Active*, rack o slot tolto dal bypass, stato richiamato da una scena) e finisce in un callback già occupato mentre una fase più libera esiste, quel plugin viene ri-distribuito **dal vivo** con lo stesso passaggio senza interruzioni del Re-spread (gemello + crossfade, sotto). Un hop sparito da 1 s (plugin spento) libera la sua fase.
+2. **Core wake assist** (AUDIO / DSP, Auto di default). A ogni hop De-Feedback sveglia un proprio helper interno e lo aspetta. Con poche istanze i P-core sono in idle profondo e svegliarne uno richiede ~0.25 ms: **il 58% dell'hop era attesa** (misurato confrontando tempo CPU e tempo reale del thread audio). Per questo 8 istanze andavano meglio di 1: con più istanze i core restano accesi. StageRack conosce in anticipo il callback di ogni hop (punto 1) e circa 2 ms prima avvia un thread a priorità più bassa di quella dei plugin, che tiene acceso un P-core; l'helper lo prelaziona subito. Si attiva solo se prima dell'hop c'è una pausa abbastanza lunga da far addormentare i core, quindi con molte istanze resta spento. E solo per i plugin che durante l'hop **aspettano** davvero un loro thread: StageRack misura per ogni plugin tempo reale − tempo CPU della chiamata dell'hop (De-Feedback 0.02-0.13 ms → assist usato; EverClean 0.000 ms → assist saltato, niente CPU sprecata).
 3. **Rack in parallelo** su thread realtime nel workgroup CoreAudio.
 
 Cosa non ha funzionato (misurato e scartato): spin dei worker realtime, promozione a realtime o QoS dei thread del plugin, ballast di calcolo sul thread audio, tenere caldo il coprocessore AMX, carico in background, BLAS a thread singolo.
@@ -81,6 +86,64 @@ $EXE --handover-test VST3 /Library/Audio/Plug-Ins/VST3/Defeedback.vst3 32 [--inp
 ```
 
 Gli hop di plugin che girano **in serie** (stesso rack, o rack concatenati) si sommerebbero sullo stesso core. Lo spread li mette quindi prima in fasi diverse fra loro, poi bilancia con il resto. Risultato a 16 campioni: 1 rack × 2 De-Feedback, picco 0.21 ms, come 2 rack separati (0.22 ms); 1 rack × 4, picco 0.22 ms.
+
+### EverClean (Everworks)
+Gratuito e usato da molti tecnici al posto di De-Feedback. Misurato (`--plugin-probe`, `--bench-device`):
+- **Si inserisce spento**: il parametro *Active* è Off e il plugin non fa nulla (costo ~0, nessun hop). Quando lo inserisci da StageRack viene **acceso automaticamente** (*Active* = On), prima della misura dell'hop. Le sessioni, le copie e le scene mantengono invece lo stato salvato.
+- Acceso ha lo stesso schema di De-Feedback: hop ogni **192 campioni**, latenza 0, ~0.012 ms nelle chiamate normali. L'hop però è più pesante (0.21-0.27 ms offline, **0.31-0.36 ms dal vivo**) e lo calcola tutto il thread audio (nessun helper da aspettare: tempo reale = tempo CPU), quindi il core wake assist non serve.
+- **Il contatore dei frame si ferma quando è spento**: se *Active* resta Off più di ~40 ms, alla riaccensione l'hop riparte da dove capita. Se si accendono più istanze insieme (scena, modifica ⌥ su più rack) gli hop finiscono tutti nello stesso callback. Lo corregge il controllo continuo degli hop (sopra).
+
+Callback oltre il budget in 10 s (Altoparlanti MacBook Pro, 48 kHz, *Active* On):
+
+| EverClean @32 campioni | con spread | senza spread |
+|---|---|---|
+| 1 | **0** (picco 0.41 ms) | 0 (0.48 ms) |
+| 4 | **0** (0.46 ms) | |
+| 8 | **0** (0.49 ms) | 27 (1.24 ms) |
+| 12 | **0** (0.66 ms) | 1881 (1.35 ms) |
+
+Accensione simultanea di 8 istanze spente (`--watch-test`): subito tutti gli 8 hop nello stesso callback (picco 0.75 ms, 5 callback persi nel primo secondo), poi 6 passaggi dal vivo, uno ogni ~2 s, e in ~13 s le fasi sono 2-2-1-1-1-1 (l'ideale per 8 su 6), picco 0.47 ms, **0 callback persi durante i passaggi**. Il passaggio di EverClean è pulito come quello di De-Feedback (`--handover-test`: bit-identico prima del crossfade, nessun click).
+
+**A 16 campioni EverClean non ci sta**: anche una sola istanza ha un hop di 0.29 ms (mediana) / 0.35 ms (p90) contro un budget di 0.33 ms, e quel calcolo è in un solo thread dentro il plugin, quindi né lo spread né i core in più possono aiutare (1 istanza: ~2% di callback persi; 8 istanze: ~50%). Con EverClean usa **32 campioni** (o più). De-Feedback invece a 16 funziona perché divide l'hop col suo helper.
+
+```bash
+$EXE --plugin-probe VST3 /Library/Audio/Plug-Ins/VST3/EverClean.vst3 32 --set Active=On [--noise] [--insert] [--toggle-test Active]
+$EXE --bench-device VST3 /Library/Audio/Plug-Ins/VST3/EverClean.vst3 8 32 Altoparlanti --multicore-only --set Active=On [--noalign]
+$EXE --watch-test VST3 /Library/Audio/Plug-Ins/VST3/EverClean.vst3 8 32 Altoparlanti [--noalign] [--start-on] [--verbose] [--seconds 30]
+$EXE --handover-test VST3 /Library/Audio/Plug-Ins/VST3/EverClean.vst3 32 --set Active=On
+```
+Nota trovata con questi test: i gemelli del re-spread live partono nel callback successivo, non 2 dopo come si assumeva: ogni re-spread dal vivo (anche con De-Feedback) finiva 2 fasi prima del previsto. Corretto, e se un gemello parte comunque in ritardo il thread audio gli dà i blocchi di silenzio mancanti prima che venga ascoltato.
+
+### De-Feedback contro EverClean con audio reale
+Stessa serie di misure, plugin alternati: ogni rack riceve un canale mono della registrazione di un panel (`Castello_21-5_Panel-4.wav`, da 600 s, ogni rack un punto diverso = microfoni diversi, picco −16.5 dBFS), Altoparlanti MacBook Pro, 48 kHz, 10 s di misura. CPU = secondi di CPU del processo (user+sys) in ~15 s di prova, creazione compresa.
+
+| Istanze @32 | De-Feedback persi | picco | CPU | EverClean persi | picco | CPU |
+|---|---|---|---|---|---|---|
+| 1 | **0** | 0.26 ms | 9.7 s | **0** | 0.50 ms | 1.4 s |
+| 4 | **0** | 0.31 | 14.5 | 1 | 0.69 | 9.0 |
+| 8 | **0** | 0.48 | 22.0 | **0** | 0.46 | 16.9 |
+| 12 | **0** | 0.50 | 28.9 | **0** | 0.50 | 22.4 |
+| 16 | **0** | 0.52 | 34.0 | **0** | 0.51 | 29.2 |
+| 8 senza spread | 1678 | 2.38 | | 0 | 0.65 | |
+| 12 senza spread | 1681 | 3.42 | | 1912 | 1.01 | |
+
+| Istanze @16 | De-Feedback persi (picco) | EverClean persi (picco) |
+|---|---|---|
+| 1 | **0** (0.22 ms) | 21-157 su 33000 (0.66 ms) |
+| 2 | | 118 |
+| 4 | **0** (0.20) | 2381 |
+| 8 | **0** (0.22) | 10423 (~50%) |
+| 12 | **0** (0.23) | |
+
+- A 32 campioni sono equivalenti per i callback persi (0 fino a 16 istanze; il singolo callback perso con 4 EverClean è un evento isolato). EverClean usa **meno CPU**: 7 volte meno con 1 istanza (De-Feedback ha l'helper e il wake assist), 15-25% meno con 8-16.
+- A 16 campioni solo De-Feedback: EverClean con 1-2 istanze perde 0.06-0.5% dei callback (click occasionali), da 4 in su è inutilizzabile.
+- Senza spread De-Feedback crolla prima (8 istanze: 1678 persi) di EverClean (8: 0, 12: 1912).
+- Il costo dell'hop non dipende dal segnale: con parlato vero è uguale a quello misurato col silenzio (De-Feedback 0.17 ms, EverClean 0.30 ms con 1 istanza).
+- Nota: fino a questa misura `--bench-device` apriva la scheda senza ingressi e i rack ricevevano **silenzio**, non il rumore dichiarato (la mappa canali dell'engine aveva 0 ingressi). Ora ogni rack riceve davvero il suo canale (rumore, oppure `--input file.wav secondi`), e il bench stampa il picco in ingresso del rack 1.
+
+```bash
+$EXE --bench-device VST3 /Library/Audio/Plug-Ins/VST3/EverClean.vst3 8 32 Altoparlanti --multicore-only --set Active=On --input "/Users/bio/Documents/REAPER Media/Castello_21-5_Panel-4.wav" 600
+```
 
 ### Nota su Dante Virtual Soundcard
 Con DVS l'apertura del device può richiedere ~20 s (attesa dentro `coreaudiod`), e DVS dichiara già ~9-10 ms di round trip anche a 32 campioni. Con una scheda CoreAudio fisica la latenza totale scende davvero.

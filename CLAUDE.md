@@ -6,7 +6,7 @@ Questo file riassume tutto il lavoro fatto: NON ri-esplorare il codice o ripeter
 ## Utente
 - Fonico live, scrive in italiano: rispondi in italiano, conciso. Mac **M4 Pro: 8 P-core (CPU 4-11) + 4 E-core (CPU 0-3)**.
 - Scheda attuale: **Dante Virtual Soundcard** (~9-10 ms RT già da sola; apertura device lenta ~20 s dentro coreaudiod: non è un bug nostro). A volte usa "Altoparlanti MacBook Pro".
-- Plugin chiave: **Alpha Labs De-Feedback** (VST3 only) ed EverClean; 578 plugin scansionati (AU, VST3, CLAP, LV2).
+- Plugin chiave: **Alpha Labs De-Feedback** (VST3 only) ed **EverClean** (Everworks, gratis, ottimizzato allo stesso livello: vedi sezione); 578 plugin scansionati (AU, VST3, CLAP, LV2).
 - Priorità assoluta: **latenza minima, zero latenza aggiunta** dal processing (ha rifiutato la modalità ASYNC per questo). Buffer realistico 32 campioni (anche 16).
 - Vuole: CPU leggera, multicore pieno, misure concrete, verifica a vista. Apprezza spiegazioni del "perché".
 
@@ -24,6 +24,8 @@ $EXE --selftest                          # catena, latenza zero, cicli, compensa
 $EXE --bench-device VST3 "/Library/Audio/Plug-Ins/VST3/Defeedback.vst3" <racks> <buffer> Altoparlanti --multicore-only [--per-rack N] [--noalign] [--nowake|--wake-always] [--timeline] [--trace]
 $EXE --spread-test VST3 <plugin> <buffer> [wavDir] [--input file sec]   # null test spread on/off
 $EXE --handover-test VST3 <plugin> <buffer> [--input file sec]           # passaggio live senza click
+$EXE --plugin-probe VST3 <plugin> <buffer> [--set Active=On] [--noise] [--insert] [--toggle-test Active]   # costo per chiamata, hop, thread
+$EXE --watch-test VST3 <plugin> <racks> <buffer> Altoparlanti [--start-on] [--noalign] [--verbose]          # hop watch: accensione simultanea
 $EXE --automix-probe AudioUnit "AudioUnit:Effects/aufx,Qrm1,Ewks" [--speech dir] [--csv dir] [--set "Automix Mode=Classic (Dugan)"] [--name X] [--plugin-only]   # automixer nostro vs plugin (QUORUM): legge, tempi, banda, scena parlata
 $EXE --bench VST3 <plugin> <racks> <buffer> [asyncBlock safetyMs perRack] [--async-only] [--params]   # offline, meno realistico
 ```
@@ -81,6 +83,19 @@ Rack H/V con dimensione per-rack (bordo trascinabile, ⌘=/⌘-, layout compatto
 - zsh non fa word-splitting di `$var`: nei loop usa `set -- $(echo $cfg)` o `bash -c`.
 - Plugin con `prepareToPlay` resettano lo stato interno; `setStateInformation` di De-Feedback contiene solo Strength/Mute/Bypass.
 - Computer-use in background: niente ⌘/⌥ né combo da tastiera, niente modificatori sul drag; i pulsanti AXButton (••• , VERTICAL) e i menu JUCE funzionano. Per aprire una sessione di test: impostare `lastSession` nelle settings con l'app chiusa (l'app riscrive le settings all'uscita).
+
+## EverClean (Everworks) — ottimizzato come De-Feedback
+- Parametri: `Active` (Off all'inserimento = non fa nulla), `Clean Amount`, `Bypass` (VST3 e AU `aufx,EvCl,EvWr` uguali). `PluginManager::applyInsertDefaults` lo accende in `Session::loadPlugin` (solo inserimento fresco, prima di `alignNewPlugin`).
+- Acceso: hop 192 campioni, latenza 0, 0.012 ms/chiamata, hop 0.21-0.27 ms offline / 0.31-0.36 ms dal vivo, **tutto sul thread audio** (wall = CPU, nessun helper da aspettare). Crea 2 thread (VST3) / 1 (AU) alla creazione.
+- Contatore dei frame: gira se Off < ~40 ms, si **ferma** se Off più a lungo → alla riaccensione l'hop cade a caso (`--plugin-probe ... --toggle-test Active`).
+- **Hop watch** (generico): `Rack::processSlot` registra gli indici dei callback pesanti per slot (`heavyAt` ring 32, `lightMs` min-tracking, soglia come HopAligner; `Rack::callbackIndex` impostato dall'engine); `AudioEngine::watchHops()` (2×/s da MainComponent via `Session::watchHops`) trova hop/fase reali, conferma su 2 controlli, adotta; se la fase è affollata e una più libera esiste → `LiveRespreader::add` (max 3 per istanza); hop assente da 1 s → hopCalls 0. Niente falsi interventi con De-Feedback/EverClean già allineati.
+- Bug trovato e corretto: `alignNewPlugin` assumeva che il plugin andasse in onda a `callbackCount+2`; misurato: parte a `callbackCount` (il gemello finiva 2 fasi prima). Ora +0, e `beginHandover` riceve `firstCallback`: se il gemello parte k callback dopo, `processSlot` gli dà k blocchi di silenzio prima di copiare l'ingresso (`twinLateBy` diagnostico).
+- Wake assist selettivo: `Slot::hopWaitMs` (wall − thread CPU sulla chiamata dell'hop prevista, EMA); `armWakeAssist` ignora gli slot con attesa misurata ≤ 0.005 ms (EverClean 0.000; De-Feedback 0.023 con 1 istanza, 0.134 con 8).
+- Misure (Altoparlanti, 10 s): @32 con spread 1/4/8/12 istanze → 0 callback persi (senza spread 8 → 27, 12 → 1881). **@16 impossibile** anche con 1 istanza (hop p50 0.29 / p90 0.35 ms > 0.33 ms, single-thread nel plugin). `--watch-test` 8 istanze accese insieme: 0 8 0 0 0 0 → 2 2 1 1 1 1 in ~13 s, 0 persi durante i handover. `--handover-test` EverClean OK.
+- **Audio reale** (`--bench-device ... --input "/Users/bio/Documents/REAPER Media/Castello_21-5_Panel-4.wav" 600`, un canale mono diverso per rack, tabelle nel README): @32 entrambi 0 persi fino a 16 istanze, picchi DF 0.26-0.52 / EC 0.46-0.51 ms; CPU processo EC 7× meno con 1 istanza, 15-25% meno con 8-16. @16: DF 0 persi fino a 12; EC 1-2 istanze 0.06-0.5% persi, 4+ inutilizzabile. Senza spread: DF 8 → 1678 persi, EC 8 → 0, 12 → 1912. Costo hop indipendente dal segnale.
+- **Bug del bench trovato**: `--bench-device` apriva il device senza ingressi → `setChannelMaps` con 0 ingressi → i rack ricevevano SILENZIO (tutte le misure precedenti). Ora il Proxy chiama `engine.setChannelMaps` con un canale per rack (rumore o `--input`), rack mono-in su canale r, e stampa il picco in ingresso.
+- Strumenti nuovi: `--plugin-probe` (Source/PluginProbe.h, `applySetArgs` per `--set Name=Value`, usato anche da `--bench-device` e `--handover-test`), `--watch-test` (Source/WatchTest.h, Session+PluginManager veri sul message loop, esce con `_Exit`).
+- Non verificato: EverClean nell'app GUI con audio vero (inserimento dal browser, toggle Active dal suo editor). Le istanze sostituite dal re-spread automatico restano parcheggiate fino alla chiusura della sessione (ogni accensione che collide ne parcheggia una).
 
 ## Istanze parcheggiate (da v0.4.0-beta, nato sul branch `safe-plugins`)
 - `Session::retirePlugin`: le istanze tolte a sessione aperta vengono parcheggiate in `retired` (mai elaborate) e distrutte solo in `newSession()` (`closingSession`) o in `~Session`. Lo usano removePlugin, loadPlugin/loadPluginFromTree (sostituzione), removeRack, LiveRespreader. Test in `--selftest`.

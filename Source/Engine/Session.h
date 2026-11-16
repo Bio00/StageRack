@@ -56,6 +56,10 @@ public:
         a time; plugins without a hop are left alone. Sound, latency and state are kept. */
     void respreadLive();
     void cancelRespread();
+
+    /** Hop watch (call ~2x/s): plugins whose hop appeared or moved onto a busy callback
+        (e.g. EverClean switched on later, a plugin un-bypassed) are re-spread live. */
+    void watchHops();
     bool isRespreading() const noexcept;
     juce::String getRespreadStatus() const;
 

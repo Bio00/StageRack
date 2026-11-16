@@ -117,6 +117,9 @@ std::unique_ptr<juce::AudioPluginInstance> Rack::setPlugin (int slot, std::uniqu
         s.cpuMs = 0.0f;
         s.hopCalls = 0;
         s.hopPhase = -1;
+        s.heavyCount = 0;
+        s.lightMs = 1.0e9f;
+        s.hopWaitMs = -1.0f;
         s.shownParams.clearQuick();
         s.paramsChosen = false;
         s.viewMode = 0;
@@ -164,7 +167,7 @@ void Rack::dropTwin (Slot& s)
     s.twinPos = 0;
 }
 
-bool Rack::beginHandover (int slot, std::unique_ptr<juce::AudioPluginInstance>& twin, int hopCalls, int hopPhase,
+bool Rack::beginHandover (int slot, std::unique_ptr<juce::AudioPluginInstance>& twin, int hopCalls, int hopPhase, juce::uint64 firstCallback,
                           int warmSamples, int fadeSamples)
 {
     if (! juce::isPositiveAndBelow (slot, maxSlots) || twin == nullptr || isAsync())
@@ -183,6 +186,7 @@ bool Rack::beginHandover (int slot, std::unique_ptr<juce::AudioPluginInstance>& 
     s.twinWarmSamples = juce::jmax (0, warmSamples);
     s.twinFadeSamples = juce::jmax (1, fadeSamples);
     s.twinPos = 0;
+    s.twinFirstCallback = firstCallback;
     s.handoverDone = false;
     s.twin = std::move (twin);
     return true;
@@ -366,6 +370,13 @@ void Rack::startAsyncIfNeeded()
     asyncActive.store (true, std::memory_order_release);
 }
 
+static double threadCpuMs() noexcept
+{
+    timespec ts {};
+    clock_gettime (CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (double) ts.tv_sec * 1000.0 + (double) ts.tv_nsec / 1.0e6;
+}
+
 //==============================================================================
 void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) noexcept
 {
@@ -404,15 +415,67 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
     const bool handover = s.twin != nullptr && ! s.handoverDone.load (std::memory_order_relaxed)
                           && numSamples <= twinBuffer.getNumSamples();
 
+    if (handover && s.twinPos == 0)
+    {
+        // Started k callbacks later than its alignment assumed: k silent blocks put its hop
+        // back on the chosen phase (its output is not heard yet: warm-up).
+        const auto late = (juce::int64) callbackIndex - (juce::int64) s.twinFirstCallback;
+        s.twinLateBy.store ((int) late, std::memory_order_relaxed);
+
+        if (s.twinHopCalls > 1 && late > 0)
+        {
+            juce::AudioBuffer<float> silent (twinBuffer.getArrayOfWritePointers(), viewChannels, numSamples);
+
+            for (int k = 0; k < (int) (late % s.twinHopCalls); ++k)
+            {
+                silent.clear();
+                run (*s.twin, silent);
+            }
+        }
+    }
+
     if (handover)
         for (int ch = 0; ch < viewChannels; ++ch)
             twinBuffer.copyFrom (ch, 0, buf, ch, 0, numSamples);
 
+    // on the expected hop call, also measure the thread's own CPU time (see hopWaitMs)
+    const auto hop = s.hopCalls.load (std::memory_order_relaxed);
+    const bool hopCall = hop > 1 && (int) (callbackIndex % (juce::uint64) hop) == s.hopPhase.load (std::memory_order_relaxed)
+                         && ! isAsync();
+    const auto cpu0 = hopCall ? threadCpuMs() : 0.0;
+    const auto tp = juce::Time::getHighResolutionTicks();
+
     run (p, view);
+
+    if (! isAsync())
+    {
+        // hop watch: heavy = well above an ordinary call (same rule as HopAligner)
+        const auto ms = (float) (juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - tp) * 1000.0);
+
+        if (ms > juce::jmax (s.lightMs * 4.0f, s.lightMs + 0.03f))
+        {
+            if (hopCall)
+            {
+                const auto wait = juce::jmax (0.0f, ms - (float) (threadCpuMs() - cpu0));
+                const auto old = s.hopWaitMs.load (std::memory_order_relaxed);
+                s.hopWaitMs.store (old < 0.0f ? wait : old + 0.05f * (wait - old), std::memory_order_relaxed);
+            }
+
+            const auto n = s.heavyCount.load (std::memory_order_relaxed);
+            s.heavyAt[n % Slot::heavyRing].store (callbackIndex, std::memory_order_relaxed);
+            s.heavyCount.store (n + 1, std::memory_order_release);
+            s.lightMs += 0.0005f * (ms - s.lightMs);
+        }
+        else
+        {
+            s.lightMs = ms < s.lightMs ? ms : s.lightMs + 0.002f * (ms - s.lightMs);
+        }
+    }
 
     if (handover)
     {
         juce::AudioBuffer<float> twinView (twinBuffer.getArrayOfWritePointers(), viewChannels, numSamples);
+
         run (*s.twin, twinView);
 
         // Equal-gain crossfade (the two outputs are near-identical, i.e. highly correlated).
@@ -452,12 +515,6 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
                    std::memory_order_relaxed);
 }
 
-static double threadCpuMs() noexcept
-{
-    timespec ts {};
-    clock_gettime (CLOCK_THREAD_CPUTIME_ID, &ts);
-    return (double) ts.tv_sec * 1000.0 + (double) ts.tv_nsec / 1.0e6;
-}
 
 void Rack::runChain (juce::AudioBuffer<float>& buf, int numSamples) noexcept
 {

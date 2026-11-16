@@ -146,6 +146,12 @@ Rack* AudioEngine::findRack (int id) const
 
 int AudioEngine::choosePhase (int hopCalls, const Rack::Slot* exclude, const Rack* forRack) const
 {
+    const auto cost = phaseCosts (hopCalls, exclude, forRack);
+    return (int) (std::min_element (cost.begin(), cost.end()) - cost.begin());
+}
+
+std::vector<int> AudioEngine::phaseCosts (int hopCalls, const Rack::Slot* exclude, const Rack* forRack) const
+{
     // Least loaded phase among the instances with the same hop. Instances that run in
     // series with this one (same rack, or racks chained to it) weigh far more: their hops
     // would add up on one core, while hops of independent racks run on different cores.
@@ -161,7 +167,127 @@ int AudioEngine::choosePhase (int hopCalls, const Rack::Slot* exclude, const Rac
                 cost[(size_t) s.hopPhase.load()] += serial ? 1000 : 1;
     }
 
-    return (int) (std::min_element (cost.begin(), cost.end()) - cost.begin());
+    return cost;
+}
+
+std::vector<std::pair<int, int>> AudioEngine::watchHops()
+{
+    std::vector<std::pair<int, int>> toRespread;
+
+    if (! hopAlignEnabled || blockSize <= 0)
+        return toRespread;
+
+    const auto now = callbackCount.load();
+    const auto perSecond = (juce::uint64) juce::jmax (1.0, sampleRate / blockSize);
+
+    for (auto& r : racks)
+    {
+        if (r->isAsync())
+            continue;
+
+        for (int i = 0; i < Rack::maxSlots; ++i)
+        {
+            auto& s = r->getSlot (i);
+
+            if (s.plugin == nullptr || r->isHandingOver (i))
+            {
+                s.watchPlugin = nullptr;
+                continue;
+            }
+
+            if (s.watchPlugin != s.plugin.get() || now < s.watchSince)
+            {
+                // new instance (or the device restarted): its log starts now
+                s.watchPlugin = s.plugin.get();
+                s.watchSince = now;
+                s.watchSeen = 0;
+                s.watchRespreads = 0;
+                continue;
+            }
+
+            if (now < s.watchSince + perSecond / 2)
+                continue;
+
+            // heavy callbacks logged since watchSince, oldest first
+            std::vector<juce::uint64> at;
+            const auto count = s.heavyCount.load (std::memory_order_acquire);
+
+            for (auto k = count > (juce::uint32) Rack::Slot::heavyRing ? count - (juce::uint32) Rack::Slot::heavyRing : 0u; k < count; ++k)
+                if (const auto v = s.heavyAt[k % Rack::Slot::heavyRing].load (std::memory_order_relaxed);
+                    v >= s.watchSince && v <= now && (at.empty() || v > at.back()))
+                    at.push_back (v);
+
+            if (at.empty() || now - at.back() > perSecond)
+            {
+                // no heavy calls for a second: switched off / bypassed. Its phase is free again
+                // (and the wake assist stops waiting for it).
+                if (s.hopCalls > 0 && now - s.watchSince > perSecond)
+                {
+                    s.hopCalls = 0;
+                    s.hopPhase = -1;
+                }
+                s.watchSeen = 0;
+                continue;
+            }
+
+            if (at.size() < 8)
+                continue;
+
+            std::map<int, int> gaps;
+            for (size_t k = 1; k < at.size(); ++k)
+                ++gaps[(int) (at[k] - at[k - 1])];
+
+            const auto best = std::max_element (gaps.begin(), gaps.end(), [] (auto& a, auto& b) { return a.second < b.second; });
+            const int hop = best->first;
+
+            if (hop < 2 || hop > 128 || best->second < (int) (0.6 * (double) (at.size() - 1)))
+                continue;
+
+            std::vector<int> hits ((size_t) hop, 0);
+            for (auto v : at)
+                ++hits[(size_t) (v % (juce::uint64) hop)];
+
+            const int phase = (int) (std::max_element (hits.begin(), hits.end()) - hits.begin());
+
+            if (hits[(size_t) phase] < (int) (0.7 * (double) at.size()))
+                continue;
+
+            if (hop == s.hopCalls && phase == s.hopPhase)
+            {
+                s.watchSeen = 0;
+                continue;
+            }
+
+            // the hop appeared or moved: act only when two checks in a row agree
+            if (hop != s.watchHop || phase != s.watchPhase)
+            {
+                s.watchHop = hop;
+                s.watchPhase = phase;
+                s.watchSeen = 1;
+                continue;
+            }
+
+            if (++s.watchSeen < 2)
+                continue;
+
+            s.watchSeen = 0;
+            const auto cost = phaseCosts (hop, &s, r.get());
+            const bool crowded = cost[(size_t) phase] > *std::min_element (cost.begin(), cost.end());
+
+            s.hopCalls = hop;       // where it really is now
+            s.hopPhase = phase;
+            ++hopsAdopted;
+
+            // a better phase is free: hand over to a re-phased twin (at most 3 tries per instance)
+            if (crowded && s.watchRespreads < 3)
+            {
+                ++s.watchRespreads;
+                toRespread.push_back ({ r->getId(), i });
+            }
+        }
+    }
+
+    return toRespread;
 }
 
 bool AudioEngine::runsInSeries (const Rack& a, const Rack& b) const
@@ -294,6 +420,9 @@ void AudioEngine::alignAllRacks()
         {
             auto& slot = r->getSlot (i);
 
+            slot.heavyCount = 0;
+            slot.watchPlugin = nullptr;
+
             if (slot.plugin == nullptr)
                 continue;
 
@@ -307,7 +436,7 @@ void AudioEngine::alignAllRacks()
 }
 
 void AudioEngine::alignNewPlugin (juce::AudioPluginInstance& p, Rack& rack, int& hopCalls, int& hopPhase,
-                                  const Rack::Slot* replacing)
+                                  const Rack::Slot* replacing, juce::uint64* firstLiveCallback)
 {
     hopCalls = 0;
     hopPhase = -1;
@@ -315,10 +444,17 @@ void AudioEngine::alignNewPlugin (juce::AudioPluginInstance& p, Rack& rack, int&
     if (rack.isAsync() || ! hopAlignEnabled)
         return;
 
-    // +2: the plugin goes live a callback or two after we finish here
+    // The plugin goes live in the next callback (measured: a twin started exactly at
+    // callbackCount; the old "+2" put every live-aligned hop two phases early). A twin that
+    // still starts later is corrected on the audio thread (Rack::processSlot).
     const auto res = HopAligner::detectAndAlign (p, rack.getBlockSize(),
                                                  [this, &rack, replacing] (int hop) { return choosePhase (hop, replacing, &rack); },
-                                                 [this] { return callbackCount.load() + 2; });
+                                                 [this, firstLiveCallback]
+                                                 {
+                                                     const auto live = callbackCount.load();
+                                                     if (firstLiveCallback != nullptr) *firstLiveCallback = live;
+                                                     return live;
+                                                 });
     hopCalls = res.hopCalls;
     hopPhase = res.phase;
 }
@@ -333,6 +469,7 @@ void AudioEngine::realignRack (Rack& rack)
         for (int i = 0; i < Rack::maxSlots; ++i)
         {
             auto& slot = rack.getSlot (i);
+            slot.watchPlugin = nullptr;
 
             if (slot.plugin == nullptr)
                 continue;
@@ -368,7 +505,11 @@ void AudioEngine::armWakeAssist (juce::uint64 index) noexcept
             const auto hop = s.hopCalls.load (std::memory_order_relaxed);
             const auto phase = s.hopPhase.load (std::memory_order_relaxed);
 
-            if (hop > 1 && phase >= 0)
+            // plugins that compute their hop on the calling thread (measured: no waiting)
+            // gain nothing from a woken core, e.g. EverClean
+            const auto wait = s.hopWaitMs.load (std::memory_order_relaxed);
+
+            if (hop > 1 && phase >= 0 && (wait < 0.0f || wait > 0.005f))
                 soonest = juce::jmin (soonest, (phase - (int) (index % (juce::uint64) hop) + hop) % hop);
         }
     }
@@ -582,6 +723,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
         return;
 
     armWakeAssist (callbackIndex);
+
+    for (auto& r : racks)
+        r->callbackIndex = callbackIndex;
 
     // device channel numbering (what the I/O menus show) -> packed callback buffers
     for (int ch = 0; ch < numDeviceInputs; ++ch)

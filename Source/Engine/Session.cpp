@@ -66,6 +66,38 @@ public:
         // timer keeps collecting it
     }
 
+    /** Queues single plugins (found by the hop watch) without cancelling what is running. */
+    void add (const std::vector<std::pair<int, int>>& slots)
+    {
+        const bool wasIdle = ! isBusy();
+
+        if (wasIdle)
+        {
+            total = 0;
+            done = 0;
+            changed = 0;
+        }
+
+        for (auto& [rackId, slot] : slots)
+        {
+            auto* rack = session.engine.findRack (rackId);
+            auto* p = rack != nullptr ? rack->getPlugin (slot) : nullptr;
+
+            if (p == nullptr || (state != State::idle && current.original == p)
+                || std::any_of (jobs.begin(), jobs.end(), [p] (const Job& j) { return j.original == p; }))
+                continue;
+
+            jobs.push_back ({ rackId, slot, p });
+            ++total;
+        }
+
+        if (wasIdle && ! jobs.empty())
+        {
+            startTimerHz (30);
+            next();
+        }
+    }
+
     bool isBusy() const noexcept { return state != State::idle || ! jobs.empty(); }
 
     juce::String status() const
@@ -147,7 +179,8 @@ private:
         copyParameters (*current.original, *twin);
 
         int hop = 0, phase = -1;
-        session.engine.alignNewPlugin (*twin, *rack, hop, phase, &slot);
+        juce::uint64 firstCallback = 0;
+        session.engine.alignNewPlugin (*twin, *rack, hop, phase, &slot, &firstCallback);
 
         // no periodic hop, or already where it should be: nothing to move
         if (hop == 0 || (slot.hopCalls == hop && slot.hopPhase == phase))
@@ -157,7 +190,7 @@ private:
         auto* raw = twin.get();
         const auto sr = rack->getSampleRate();
 
-        if (! rack->beginHandover (current.slot, twin, hop, phase, (int) (warmSeconds * sr), (int) (fadeSeconds * sr)))
+        if (! rack->beginHandover (current.slot, twin, hop, phase, firstCallback, (int) (warmSeconds * sr), (int) (fadeSeconds * sr)))
             return next();
 
         twinPtr = raw;
@@ -238,6 +271,7 @@ Session::Session (AudioEngine& e, PluginManager& p) : engine (e), plugins (p)
 Session::~Session() = default;
 
 void Session::respreadLive()                    { respreader->start(); }
+void Session::watchHops()                       { if (auto list = engine.watchHops(); ! list.empty()) respreader->add (list); }
 void Session::cancelRespread()                  { respreader->cancel(); }
 bool Session::isRespreading() const noexcept    { return respreader->isBusy(); }
 juce::String Session::getRespreadStatus() const
@@ -298,6 +332,7 @@ void Session::loadPlugin (Rack& rack, int slot, const juce::PluginDescription& d
         }
 
         Rack::configurePlugin (*p, target->getSampleRate(), target->getBlockSize());
+        PluginManager::applyInsertDefaults (*p);   // e.g. EverClean: on (before the hop is measured)
 
         int hopCalls = 0, hopPhase = -1;
         engine.alignNewPlugin (*p, *target, hopCalls, hopPhase);

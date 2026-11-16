@@ -21,6 +21,12 @@ public:
 
     static void addAllFormats (juce::AudioPluginFormatManager&);
 
+    /** Settings a plugin needs when the user inserts it fresh (not when it comes back from a
+        session, a copy or a scene, which keep their own state). Returns what it changed.
+        EverClean (Everworks) loads with "Active" off, i.e. doing nothing: switched on here,
+        so it works right away and its hop is seen (and spread) at insertion. */
+    static juce::String applyInsertDefaults (juce::AudioPluginInstance&);
+
     juce::AudioPluginFormatManager& getFormatManager() noexcept    { return formatManager; }
     juce::KnownPluginList& getKnownList() noexcept                  { return knownList; }
     juce::PropertiesFile& getSettings() noexcept                    { return *settings; }
