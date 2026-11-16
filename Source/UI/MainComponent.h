@@ -2,8 +2,10 @@
 
 #include "../Engine/Autosave.h"
 #include "../Engine/Session.h"
+#include "../Engine/DeviceGuard.h"
 #include "Theme.h"
 #include "EditController.h"
+#include "AppMenu.h"
 
 namespace stagerack
 {
@@ -18,6 +20,7 @@ namespace update { class Controller; }
 
 class MainComponent final : public juce::Component,
                             public juce::DragAndDropContainer,
+                            public juce::ApplicationCommandTarget,
                             private juce::ChangeListener,
                             private juce::Timer
 {
@@ -40,6 +43,12 @@ public:
     void newSession();
     void openSession();
     void saveSession (bool saveAs);
+
+    // menu bar commands
+    juce::ApplicationCommandTarget* getNextCommandTarget() override { return nullptr; }
+    void getAllCommands (juce::Array<juce::CommandID>&) override;
+    void getCommandInfo (juce::CommandID, juce::ApplicationCommandInfo&) override;
+    bool perform (const InvocationInfo&) override;
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
@@ -64,6 +73,7 @@ private:
     void startAudioDevice();
     void loadStartupSession();
     bool audioReady = false;          // CoreAudio answered and the device manager is initialised
+    std::unique_ptr<DeviceGuard> deviceGuard;   // keeps the chosen interface, never the Mac's speakers by itself
     juce::Label coreAudioWaitLabel;
     int waitingGeneration = -1;       // document generation of the empty session shown while waiting
     std::unique_ptr<EditController> edit;
@@ -73,7 +83,26 @@ private:
     juce::Viewport rackViewport;
     juce::Component rackContainer;
     juce::OwnedArray<RackComponent> rackComponents;
-    juce::TextButton addRackButton { "+  ADD RACK" };
+    /** "+ ADD RACK": click adds one, right-click offers several at once (consecutive inputs). */
+    struct AddRackButton final : juce::TextButton
+    {
+        std::function<void()> onRightClick;
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            if (e.mods.isPopupMenu()) { if (onRightClick) onRightClick(); return; }
+            juce::TextButton::mouseDown (e);
+        }
+        void mouseUp (const juce::MouseEvent& e) override
+        {
+            if (! e.mods.isPopupMenu()) juce::TextButton::mouseUp (e);
+        }
+    } addRackButton;
+    void showAddRacksMenu();
+    void commonConstructorTail();
+    void openSettings();
+    void openPluginManager();
+    void openAutomixer();
+    void toggleLightTheme();
     /** Slim strip that collapses/expands the scene column. */
     struct ScenesToggle final : juce::Component
     {
@@ -109,12 +138,16 @@ private:
 
     // updates from GitHub: checked at startup, "Check for Updates..." in the app menu and in Settings
     std::unique_ptr<update::Controller> updater;
+    juce::ApplicationCommandManager commands;
     struct AppMenu final : juce::MenuBarModel
     {
-        juce::StringArray getMenuBarNames() override                 { return {}; }
-        juce::PopupMenu getMenuForIndex (int, const juce::String&) override { return {}; }
+        explicit AppMenu (MainComponent& o) : owner (o) {}
+        juce::StringArray getMenuBarNames() override;
+        juce::PopupMenu getMenuForIndex (int, const juce::String&) override;
         void menuItemSelected (int, int) override {}
-    } appMenu;
+        MainComponent& owner;
+    } appMenu { *this };
+    juce::PopupMenu commandItems (std::initializer_list<juce::CommandID>);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

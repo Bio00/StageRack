@@ -4,11 +4,15 @@
 #include "PluginProbe.h"
 #include "WatchTest.h"
 #include "EditTest.h"
+#include "EditorTest.h"
+#include "UndoTest.h"
+#include "DeviceGuardTest.h"
 #include "StressTest.h"
 #include "AutomixProbe.h"
 #include "UI/PluginMeters.h"
 #include "UI/PluginBrowser.h"
 #include "UI/TopBar.h"
+#include "UI/PluginManagerWindow.h"
 #include "UI/AutomixerWindow.h"
 #include "Engine/Rack.h"
 #include "Update/Updater.h"
@@ -113,6 +117,31 @@ public:
                 juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
             }
 
+            std::fflush (nullptr);
+            std::_Exit (0);
+        }
+
+        if (args.contains ("--render-settings"))
+        {
+            // Diagnostics: --render-settings <dir>  draws the Settings window with the default devices (PNG)
+            juce::Process::setDockIconVisible (false);
+            const juce::File dir (args[args.indexOf ("--render-settings") + 1]);
+            AudioEngine engine;
+            auto* pm = new PluginManager();          // leaked on purpose: its destructor saves files
+            Session session (engine, *pm);
+            theme::LookAndFeel lnf;
+            juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
+            engine.getDeviceManager().initialise (2, 2, nullptr, true);
+            auto* w = new SettingsWindow (engine, *pm, session, [] (bool) {}, [] {});   // leaked: _Exit below
+            auto* content = w->getContentComponent();
+            content->resized();
+            juce::Image img (juce::Image::ARGB, content->getWidth(), content->getHeight(), true);
+            juce::Graphics g (img);
+            content->paintEntireComponent (g, true);
+            juce::PNGImageFormat png;
+            juce::FileOutputStream os (dir.getChildFile ("settings.png"));
+            os.setPosition (0); os.truncate();
+            png.writeImageToStream (img, os);
             std::fflush (nullptr);
             std::_Exit (0);
         }
@@ -329,6 +358,30 @@ public:
             juce::Process::setDockIconVisible (false);
             static std::unique_ptr<HopWatchTest> test;   // drives itself on the message loop, exits with _Exit
             test = std::make_unique<HopWatchTest> (args);
+            if (test->start() != 0) std::_Exit (1);
+            return;
+        }
+
+        if (args.contains ("--device-guard-test"))
+        {
+            juce::Process::setDockIconVisible (false);
+            static std::unique_ptr<DeviceGuardTest> test;   // drives itself on the message loop, exits with _Exit
+            test = std::make_unique<DeviceGuardTest>();
+            if (test->start() != 0) std::_Exit (1);
+            return;
+        }
+
+        if (args.contains ("--undo-selftest"))
+        {
+            juce::Process::setDockIconVisible (false);
+            runUndoSelfTest();
+            return;
+        }
+
+        if (args.contains ("--editor-test"))
+        {
+            static std::unique_ptr<EditorTest> test;   // drives itself on the message loop, exits with _Exit
+            test = std::make_unique<EditorTest> (args);
             if (test->start() != 0) std::_Exit (1);
             return;
         }

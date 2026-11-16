@@ -226,7 +226,7 @@ private:
                 for (int i = 0; i < Rack::maxSlots; ++i)
                     if (auto old = rack.collectHandover (i))
                     {
-                        if (session.onPluginReplaced) session.onPluginReplaced (old.get(), rack.getPlugin (i));
+                        session.pluginReplaced (old.get(), rack.getPlugin (i));
                         deleteOnMessageThread (std::move (old));
                         session.notify();
                     }
@@ -253,7 +253,7 @@ private:
         if (auto old = rack->collectHandover (current.slot))
         {
             ++changed;
-            if (session.onPluginReplaced) session.onPluginReplaced (old.get(), twinPtr);
+            session.pluginReplaced (old.get(), twinPtr);
             deleteOnMessageThread (std::move (old));
             session.notify();
             next();
@@ -285,6 +285,7 @@ juce::String Session::getRespreadStatus() const
 void Session::markDirty()
 {
     dirty = true;
+    recordUndoStep();
     notify();
 }
 
@@ -294,6 +295,35 @@ Rack& Session::addRack()
     auto& r = engine.addRack();
     markDirty();
     return r;
+}
+
+void Session::addRacks (int count, bool stereoInputs)
+{
+    int nextIn = 0, out = 0;
+    bool stereoOut = true;
+
+    for (int i = 0; i < engine.getNumRacks(); ++i)
+    {
+        auto& r = engine.getRack (i);
+
+        if (r.inputRackId.load() < 0 && r.inputChannel.load() >= 0)
+            nextIn = juce::jmax (nextIn, r.inputChannel.load() + (r.stereoInput.load() ? 2 : 1));
+
+        out = r.outputChannel.load();
+        stereoOut = r.stereoOutput.load();
+    }
+
+    for (int i = 0; i < count; ++i)
+    {
+        auto& r = engine.addRack();
+        r.inputChannel = nextIn;
+        r.stereoInput = stereoInputs;
+        r.outputChannel = out;
+        r.stereoOutput = stereoOut;
+        nextIn += stereoInputs ? 2 : 1;
+    }
+
+    markDirty();
 }
 
 void Session::removeRack (Rack& rack)
@@ -390,6 +420,7 @@ juce::ValueTree Session::captureSceneData() const
         juce::ValueTree rt (idRack);
         rt.setProperty ("id", r.getId(), nullptr)
           .setProperty ("gain", r.gainDb.load(), nullptr)
+          .setProperty ("inGain", r.inputGainDb.load(), nullptr)
           .setProperty ("mute", r.muted.load(), nullptr)
           .setProperty ("bypass", r.bypassed.load(), nullptr)
           .setProperty ("solo", r.solo.load(), nullptr)
@@ -433,6 +464,8 @@ void Session::applySceneData (const juce::ValueTree& data)
             continue;
 
         r->gainDb = (float) rt["gain"];
+        if (rt.hasProperty ("inGain"))   // scenes stored before the input gain leave it alone
+            r->inputGainDb = (float) rt["inGain"];
         r->muted = (bool) rt["mute"];
         r->bypassed = (bool) rt["bypass"];
         r->solo = (bool) rt["solo"];
@@ -483,6 +516,7 @@ void Session::recallScene (int index)
 
     applySceneData (scenes[(size_t) index].data);
     currentScene = index;
+    amendUndoState();   // a recall is not an edit: undo never jumps back across it
     notify();
 }
 
@@ -553,6 +587,8 @@ void Session::newSession()
     engine.addRack();
     dirty = false;
     ++documentGeneration;
+    replacedTokens.clear();
+    resetUndoHistory();
     notify();
 }
 
@@ -586,6 +622,17 @@ juce::ValueTree Session::pluginToTree (const Rack& r, int s) const
 
 juce::ValueTree Session::rackToTree (const Rack& r) const
 {
+    auto rt = rackSettingsToTree (r);
+
+    for (int s = 0; s < Rack::maxSlots; ++s)
+        if (auto pt = pluginToTree (r, s); pt.isValid())
+            rt.appendChild (pt, nullptr);
+
+    return rt;
+}
+
+juce::ValueTree Session::rackSettingsToTree (const Rack& r) const
+{
     juce::ValueTree rt (idRack);
     rt.setProperty ("id", r.getId(), nullptr)
       .setProperty ("name", r.name, nullptr)
@@ -595,6 +642,7 @@ juce::ValueTree Session::rackToTree (const Rack& r) const
       .setProperty ("out", r.outputChannel.load(), nullptr)
       .setProperty ("stereoOut", r.stereoOutput.load(), nullptr)
       .setProperty ("gain", r.gainDb.load(), nullptr)
+      .setProperty ("inGain", r.inputGainDb.load(), nullptr)
       .setProperty ("mute", r.muted.load(), nullptr)
       .setProperty ("bypass", r.bypassed.load(), nullptr)
       .setProperty ("solo", r.solo.load(), nullptr)
@@ -603,15 +651,18 @@ juce::ValueTree Session::rackToTree (const Rack& r) const
       .setProperty ("latGroup", r.latencyGroup.load(), nullptr)
       .setProperty ("amGroup", r.automixGroup.load(), nullptr)
       .setProperty ("amWeight", r.automixWeightDb.load(), nullptr);
-
-    for (int s = 0; s < Rack::maxSlots; ++s)
-        if (auto pt = pluginToTree (r, s); pt.isValid())
-            rt.appendChild (pt, nullptr);
-
     return rt;
 }
 
 void Session::buildRack (Rack& r, const juce::ValueTree& rt)
+{
+    applyRackSettings (r, rt);
+
+    for (const auto& pt : rt)
+        loadPluginFromTree (r, (int) pt["slot"], pt);
+}
+
+void Session::applyRackSettings (Rack& r, const juce::ValueTree& rt)
 {
     r.name = rt["name"].toString();
     r.colour = juce::Colour::fromString (rt["colour"].toString());
@@ -620,6 +671,7 @@ void Session::buildRack (Rack& r, const juce::ValueTree& rt)
     r.outputChannel = (int) rt["out"];
     r.stereoOutput = rt.hasProperty ("stereoOut") ? (bool) rt["stereoOut"] : true;
     r.gainDb = (float) rt["gain"];
+    r.inputGainDb = (float) rt.getProperty ("inGain", 0.0f);
     r.muted = (bool) rt["mute"];
     r.bypassed = (bool) rt["bypass"];
     r.solo = (bool) rt["solo"];
@@ -628,12 +680,9 @@ void Session::buildRack (Rack& r, const juce::ValueTree& rt)
     r.latencyGroup = (int) rt["latGroup"];
     r.automixGroup = juce::jlimit (0, Rack::maxAutomixGroups, (int) rt["amGroup"]);
     r.automixWeightDb = (float) rt["amWeight"];
-
-    for (const auto& pt : rt)
-        loadPluginFromTree (r, (int) pt["slot"], pt);
 }
 
-void Session::loadPluginFromTree (Rack& r, int slot, const juce::ValueTree& pt)
+void Session::loadPluginFromTree (Rack& r, int slot, const juce::ValueTree& pt, bool newUndoStep)
 {
     juce::PluginDescription saved;
 
@@ -661,7 +710,7 @@ void Session::loadPluginFromTree (Rack& r, int slot, const juce::ValueTree& pt)
     ++*pendingLoads;
 
     plugins.createPlugin (*known, r.getSampleRate(), r.getBlockSize(),
-        [this, weakGen, weakPending, generation, rackId, slot, bypass, state, paramsChosen, shownParams, slotSize, viewMode] (std::unique_ptr<juce::AudioPluginInstance> p, const juce::String&)
+        [this, weakGen, weakPending, generation, rackId, slot, bypass, state, paramsChosen, shownParams, slotSize, viewMode, newUndoStep] (std::unique_ptr<juce::AudioPluginInstance> p, const juce::String&)
         {
             if (auto pending = weakPending.lock())
                 --*pending;
@@ -690,7 +739,14 @@ void Session::loadPluginFromTree (Rack& r, int slot, const juce::ValueTree& pt)
             rack->getSlot (slot).shownParams = shownParams;
             rack->getSlot (slot).uiSize = slotSize;
             rack->getSlot (slot).viewMode = viewMode;
-            notify();
+
+            if (newUndoStep)
+                markDirty();
+            else
+            {
+                amendUndoState();
+                notify();
+            }
         });
 }
 
@@ -777,7 +833,7 @@ void Session::movePlugin (Rack& from, int fromSlot, Rack& to, int toSlot)
 void Session::copyPlugin (Rack& from, int fromSlot, Rack& to, int toSlot)
 {
     if (auto pt = pluginToTree (from, fromSlot); pt.isValid())
-        loadPluginFromTree (to, toSlot, pt);
+        loadPluginFromTree (to, toSlot, pt, true);
 }
 
 static juce::Array<Rack*> racksInOrder (AudioEngine& engine, const juce::Array<int>& ids)
@@ -819,10 +875,11 @@ void Session::setConsecutiveInputs (const juce::Array<int>& rackIds, bool stereo
 
     for (auto* r : list)
     {
+        const bool st = firstRackId < 0 || r->getId() == firstRackId ? stereo : r->stereoInput.load();
         r->inputChannel = ch;
-        r->stereoInput = stereo;
+        r->stereoInput = st;
         engine.setRackInputSource (*r, -1);
-        ch += stereo ? 2 : 1;
+        ch += st ? 2 : 1;
     }
 
     markDirty();
@@ -839,9 +896,10 @@ void Session::setConsecutiveOutputs (const juce::Array<int>& rackIds, bool stere
 
     for (auto* r : list)
     {
+        const bool st = firstRackId < 0 || r->getId() == firstRackId ? stereo : r->stereoOutput.load();
         r->outputChannel = ch;
-        r->stereoOutput = stereo;
-        ch += stereo ? 2 : 1;
+        r->stereoOutput = st;
+        ch += st ? 2 : 1;
     }
 
     markDirty();
@@ -939,6 +997,312 @@ void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bo
     file = f;
     dirty = markAsChanged;
     ++documentGeneration;
+    resetUndoHistory();   // its plugins complete this state as they arrive (amendUndoState)
+    notify();
+}
+
+//==============================================================================
+// Undo
+static juce::int64 tokenOf (const juce::AudioPluginInstance* p) noexcept { return (juce::int64) (juce::pointer_sized_int) p; }
+
+bool Session::UndoState::sameAs (const UndoState& o) const
+{
+    if (currentScene != o.currentScene || scenes.size() != o.scenes.size() || ! tree.isEquivalentTo (o.tree))
+        return false;
+
+    for (size_t i = 0; i < scenes.size(); ++i)
+        if (scenes[i].name != o.scenes[i].name || scenes[i].data != o.scenes[i].data)   // same shared tree?
+            return false;
+
+    return true;
+}
+
+Session::UndoState Session::captureUndoState() const
+{
+    UndoState u;
+    u.tree = juce::ValueTree ("UNDO");
+    u.tree.setProperty ("automix", engine.automixEnabled.load(), nullptr)
+          .setProperty ("amOverlap", engine.automixOverlap.load(), nullptr);
+
+    for (int i = 0; i < engine.getNumRacks(); ++i)
+    {
+        auto& r = engine.getRack (i);
+        auto rt = rackSettingsToTree (r);
+
+        for (int s = 0; s < Rack::maxSlots; ++s)
+        {
+            if (auto* p = r.getPlugin (s))
+            {
+                auto& sl = r.getSlot (s);
+                juce::StringArray params;
+                for (auto k : sl.shownParams)
+                    params.add (juce::String (k));
+
+                juce::ValueTree st ("SLOT");
+                st.setProperty ("slot", s, nullptr)
+                  .setProperty ("token", tokenOf (p), nullptr)
+                  .setProperty ("bypass", sl.bypassed.load(), nullptr)
+                  .setProperty ("paramsChosen", sl.paramsChosen, nullptr)
+                  .setProperty ("params", params.joinIntoString (","), nullptr)
+                  .setProperty ("slotSize", sl.uiSize, nullptr)
+                  .setProperty ("view", sl.viewMode, nullptr);
+                rt.appendChild (st, nullptr);
+            }
+        }
+
+        u.tree.appendChild (rt, nullptr);
+    }
+
+    u.scenes = scenes;
+    u.currentScene = currentScene;
+    return u;
+}
+
+void Session::resetUndoHistory()
+{
+    undoStack.clear();
+    redoStack.clear();
+    undoCurrent = captureUndoState();
+}
+
+void Session::recordUndoStep()
+{
+    if (applyingUndo)
+        return;
+
+    auto now = captureUndoState();
+
+    if (now.sameAs (undoCurrent))
+        return;
+
+    undoStack.push_back (std::move (undoCurrent));
+    if (undoStack.size() > maxUndoSteps)
+        undoStack.erase (undoStack.begin());
+
+    undoCurrent = std::move (now);
+    redoStack.clear();
+}
+
+void Session::amendUndoState()
+{
+    if (! applyingUndo)
+        undoCurrent = captureUndoState();
+}
+
+void Session::pluginReplaced (juce::AudioPluginInstance* oldOne, juce::AudioPluginInstance* newOne)
+{
+    if (oldOne != nullptr && newOne != nullptr)
+        replacedTokens[tokenOf (oldOne)] = tokenOf (newOne);   // older steps then point at the twin
+
+    amendUndoState();
+
+    if (onPluginReplaced)
+        onPluginReplaced (oldOne, newOne);
+}
+
+bool Session::undo()
+{
+    if (! canUndo())
+        return false;
+
+    amendUndoState();   // changes that were not a step of their own (e.g. a wheel on a knob) stay redoable
+    redoStack.push_back (undoCurrent);
+    auto target = std::move (undoStack.back());
+    undoStack.pop_back();
+    applyUndoState (target);
+    return true;
+}
+
+bool Session::redo()
+{
+    if (! canRedo())
+        return false;
+
+    amendUndoState();
+    undoStack.push_back (undoCurrent);
+    auto target = std::move (redoStack.back());
+    redoStack.pop_back();
+    applyUndoState (target);
+    return true;
+}
+
+/** The instance a step refers to: in the pool (taken out of a slot just now) or parked. */
+juce::AudioPluginInstance* Session::takeInstance (juce::int64 token, std::map<juce::int64, std::unique_ptr<juce::AudioPluginInstance>>& pool)
+{
+    for (int guard = 0; guard < 64; ++guard)   // follow re-spread replacements
+    {
+        auto it = replacedTokens.find (token);
+        if (it == replacedTokens.end())
+            break;
+        token = it->second;
+    }
+
+    if (auto it = pool.find (token); it != pool.end())
+    {
+        auto* p = it->second.release();
+        pool.erase (it);
+        return p;
+    }
+
+    for (auto it = retired.begin(); it != retired.end(); ++it)
+        if (tokenOf (it->get()) == token)
+        {
+            auto* p = it->release();
+            retired.erase (it);
+            return p;
+        }
+
+    return nullptr;
+}
+
+void Session::applyUndoState (const UndoState& u)
+{
+    const juce::ScopedValueSetter<bool> guard (applyingUndo, true);
+    cancelRespread();
+
+    engine.automixEnabled = (bool) u.tree["automix"];
+    engine.automixOverlap = juce::jlimit (0, 2, (int) u.tree["amOverlap"]);
+
+    // target instance of every (rack, slot)
+    std::map<std::pair<int, int>, juce::int64> wanted;
+    juce::Array<int> wantedRacks;
+
+    for (const auto& rt : u.tree)
+    {
+        wantedRacks.add ((int) rt["id"]);
+        for (const auto& st : rt)
+            wanted[{ (int) rt["id"], (int) st["slot"] }] = (juce::int64) st["token"];
+    }
+
+    auto resolve = [this] (juce::int64 t)
+    {
+        for (int g = 0; g < 64; ++g)
+            if (auto it = replacedTokens.find (t); it != replacedTokens.end()) t = it->second; else break;
+        return t;
+    };
+
+    // 1. take out every instance that is not where it should be (kept alive in the pool)
+    std::map<juce::int64, std::unique_ptr<juce::AudioPluginInstance>> pool;
+    std::map<juce::int64, std::pair<int, int>> poolHop;   // its live hop calls/phase (moves keep them)
+
+    for (int i = 0; i < engine.getNumRacks(); ++i)
+    {
+        auto& r = engine.getRack (i);
+
+        for (int s = 0; s < Rack::maxSlots; ++s)
+        {
+            auto* p = r.getPlugin (s);
+
+            if (p == nullptr)
+                continue;
+
+            const auto it = wanted.find ({ r.getId(), s });
+
+            if (it != wanted.end() && resolve (it->second) == tokenOf (p))
+                continue;
+
+            const std::pair<int, int> hop { r.getSlot (s).hopCalls.load(), r.getSlot (s).hopPhase.load() };
+            auto taken = r.setPlugin (s, nullptr);
+            poolHop[tokenOf (taken.get())] = hop;
+            pool[tokenOf (taken.get())] = std::move (taken);
+        }
+    }
+
+    // 2. racks that should not exist (their plugins are already in the pool)
+    for (int i = engine.getNumRacks(); --i >= 0;)
+    {
+        auto& r = engine.getRack (i);
+
+        if (! wantedRacks.contains (r.getId()))
+        {
+            for (auto& p : r.takeDiscarded())
+                retirePlugin (std::move (p));
+            engine.removeRack (r);
+        }
+    }
+
+    // 3. racks that should exist, in order, with their settings
+    int index = 0;
+
+    for (const auto& rt : u.tree)
+    {
+        auto* r = engine.findRack ((int) rt["id"]);
+
+        if (r == nullptr)
+            r = &engine.addRackWithId ((int) rt["id"]);
+
+        engine.moveRack (engine.indexOf (*r), index++);
+        applyRackSettings (*r, rt);
+    }
+
+    for (int i = 0; i < engine.getNumRacks(); ++i)
+        if (auto& r = engine.getRack (i); ! engine.setRackInputSource (r, r.inputRackId.load()))
+            engine.setRackInputSource (r, -1);
+
+    // 4. instances back in place: moved ones keep their hop phase, parked ones are re-aligned
+    for (const auto& rt : u.tree)
+    {
+        auto& r = *engine.findRack ((int) rt["id"]);
+
+        for (const auto& st : rt)
+        {
+            const int s = st["slot"];
+            const auto token = resolve ((juce::int64) st["token"]);
+            int hopCalls = -1, hopPhase = -1;
+
+            if (r.getPlugin (s) != nullptr && tokenOf (r.getPlugin (s)) == token)
+            {
+                hopCalls = r.getSlot (s).hopCalls;   // stayed: nothing to do but the slot settings
+                hopPhase = r.getSlot (s).hopPhase;
+            }
+            else
+            {
+                const bool fromPool = pool.count (token) > 0;
+                std::unique_ptr<juce::AudioPluginInstance> p (takeInstance (token, pool));
+
+                if (p == nullptr)
+                    continue;   // gone (should not happen: instances are parked until the session closes)
+
+                if (fromPool)
+                {
+                    hopCalls = poolHop[token].first;
+                    hopPhase = poolHop[token].second;
+                }
+                else
+                {
+                    // parked: it was not processed meanwhile, its hop may sit anywhere now
+                    if (p->getSampleRate() != r.getSampleRate() || p->getBlockSize() != r.getBlockSize())
+                        Rack::configurePlugin (*p, r.getSampleRate(), r.getBlockSize());
+                    engine.alignNewPlugin (*p, r, hopCalls, hopPhase);
+                }
+
+                retirePlugin (r.setPlugin (s, std::move (p)));
+            }
+
+            auto& sl = r.getSlot (s);
+            sl.bypassed = (bool) st["bypass"];
+            sl.paramsChosen = (bool) st["paramsChosen"];
+            sl.shownParams.clearQuick();
+            for (auto& t : juce::StringArray::fromTokens (st["params"].toString(), ",", ""))
+                if (t.isNotEmpty())
+                    sl.shownParams.add (t.getIntValue());
+            sl.uiSize = (float) st["slotSize"];
+            sl.viewMode = (int) st["view"];
+            sl.hopCalls = juce::jmax (0, hopCalls);
+            sl.hopPhase = hopPhase;
+        }
+    }
+
+    // 5. whatever is left was added by the undone edit: parked (a redo brings it back)
+    for (auto& [t, p] : pool)
+        retirePlugin (std::move (p));
+
+    scenes = u.scenes;
+    currentScene = juce::jmin (u.currentScene, getNumScenes() - 1);
+    engine.updateLatencyCompensation();
+
+    dirty = true;
+    undoCurrent = captureUndoState();
     notify();
 }
 

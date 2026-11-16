@@ -165,8 +165,16 @@ inline int runEditSelfTest()
     // --- consecutive from the picked channel, starting at the clicked rack (C), wrapping to B
     session.setConsecutiveOutputs ({ b.getId(), c.getId() }, true, 4, c.getId());
     check (c.outputChannel == 4 && b.outputChannel == 6 && c.stereoOutput && b.stereoOutput, "consecutive outputs from C at 5-6: C 5-6, B 7-8");
+    a.stereoInput = true; c.stereoInput = false;   // mixed widths: only the clicked rack takes the picked one
     session.setConsecutiveInputs ({ a.getId(), b.getId(), c.getId() }, false, 2, b.getId());
-    check (b.inputChannel == 2 && c.inputChannel == 3 && a.inputChannel == 4 && ! b.stereoInput, "consecutive mono inputs from B at 3: B 3, C 4, A 5");
+    check (b.inputChannel == 2 && c.inputChannel == 3 && a.inputChannel == 4 && ! b.stereoInput && ! c.stereoInput && a.stereoInput,
+           "consecutive inputs, mono picked on B at 3, C mono, A stereo: B 3, C 4, A 5-6");
+    session.setConsecutiveInputs ({ a.getId(), b.getId(), c.getId() }, true, 0, b.getId());
+    check (b.inputChannel == 0 && c.inputChannel == 2 && a.inputChannel == 3 && b.stereoInput && ! c.stereoInput && a.stereoInput,
+           "consecutive inputs, stereo picked on B at 1: B 1-2, C 3 mono, A 4-5");
+    c.stereoOutput = false;
+    session.setConsecutiveOutputs ({ b.getId(), c.getId() }, true, 0, b.getId());
+    check (b.outputChannel == 0 && c.outputChannel == 2 && b.stereoOutput && ! c.stereoOutput, "consecutive outputs, mixed: B 1-2, C 3 mono");
 
     // --- plugin power (Alt-click on B's slot): same plugin in C switches too; selection kept
     auto slotOf = [&] (RackComponent& rc, int n) -> juce::Component*

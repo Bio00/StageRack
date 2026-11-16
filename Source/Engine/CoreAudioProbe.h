@@ -22,6 +22,10 @@ bool waitUntilReady (int timeoutMs);
 /** Kills a probe child still waiting for coreaudiod (at quit). */
 void stopProbe();
 
+/** True if the CoreAudio device with this name is built into the Mac (speakers, microphone,
+    headphone jack). Only once isReady(). */
+bool isBuiltInDevice (const char* utf8Name);
+
 /** Body of the child process: one CoreAudio call, returns the exit code. */
 int runProbeChild();
 

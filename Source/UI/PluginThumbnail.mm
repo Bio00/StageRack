@@ -174,4 +174,33 @@ bool PluginThumbnails::looksBlank (const juce::Image& img)
     return hi - lo < 0.03f;
 }
 
+static void collectViewClasses (NSView* v, juce::StringArray& out, int depth)
+{
+    if (v == nil || depth > 6)
+        return;
+
+    out.addIfNotAlreadyThere (juce::String (NSStringFromClass ([v class]).UTF8String));
+
+    for (NSView* sub in v.subviews)
+        collectViewClasses (sub, out, depth + 1);
+}
+
+juce::String PluginThumbnails::describeEditor (juce::Component& c)
+{
+    juce::String s = typeid (c).name();
+
+    if (dynamic_cast<juce::GenericAudioProcessorEditor*> (&c) != nullptr)
+        s << " [JUCE GENERIC]";
+
+    juce::StringArray classes;
+
+    if (auto* peer = c.getPeer())
+        collectViewClasses ((NSView*) peer->getNativeHandle(), classes, 0);
+
+    if (classes.joinIntoString (" ").containsIgnoreCase ("AUGenericView"))
+        s << " [AU GENERIC VIEW]";
+
+    return s + "  views: " + classes.joinIntoString (", ");
+}
+
 } // namespace stagerack

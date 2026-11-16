@@ -6,6 +6,8 @@
 #include <chrono>
 #include <climits>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 #include <condition_variable>
 #include <mutex>
 #include <signal.h>
@@ -133,6 +135,48 @@ void stopProbe()
 
     if (const auto pid = s.child.load(); pid > 0)
         kill (pid, SIGKILL);
+}
+
+bool isBuiltInDevice (const char* utf8Name)
+{
+    if (utf8Name == nullptr || *utf8Name == 0 || ! isReady())
+        return false;
+
+    AudioObjectPropertyAddress addr { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 size = 0;
+
+    if (AudioObjectGetPropertyDataSize (kAudioObjectSystemObject, &addr, 0, nullptr, &size) != noErr || size == 0)
+        return false;
+
+    std::vector<AudioObjectID> ids (size / sizeof (AudioObjectID));
+
+    if (AudioObjectGetPropertyData (kAudioObjectSystemObject, &addr, 0, nullptr, &size, ids.data()) != noErr)
+        return false;
+
+    for (auto id : ids)
+    {
+        CFStringRef cfName = nullptr;
+        UInt32 nameSize = sizeof (cfName);
+        AudioObjectPropertyAddress nameAddr { kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+
+        if (AudioObjectGetPropertyData (id, &nameAddr, 0, nullptr, &nameSize, &cfName) != noErr || cfName == nullptr)
+            continue;
+
+        char buf[512] = {};
+        const bool ok = CFStringGetCString (cfName, buf, sizeof (buf), kCFStringEncodingUTF8);
+        CFRelease (cfName);
+
+        if (! ok || std::strcmp (buf, utf8Name) != 0)
+            continue;
+
+        UInt32 transport = 0, tSize = sizeof (transport);
+        AudioObjectPropertyAddress tAddr { kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+
+        if (AudioObjectGetPropertyData (id, &tAddr, 0, nullptr, &tSize, &transport) == noErr && transport == kAudioDeviceTransportTypeBuiltIn)
+            return true;
+    }
+
+    return false;
 }
 
 } // namespace stagerack::coreaudio

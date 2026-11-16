@@ -594,6 +594,29 @@ inline int runSelfTest()
         e.audioDeviceStopped();
     }
 
+    // 5b: input gain (before the plugins) and master mute (all outputs, ramped, racks keep running)
+    {
+        AudioEngine e;
+        auto& r = e.addRack();
+        r.inputChannel = 0; r.stereoInput = false; r.outputChannel = 0;
+        r.inputGainDb = -6.0f;
+        e.prepare (sr, bs, {});
+
+        for (int k = 0; k < 20; ++k) runBlock (e, 1.0f, false);
+        check (std::abs (out.getSample (0, bs - 1) - juce::Decibels::decibelsToGain (-6.0f)) < 0.01f,
+               "input gain -6 dB (" + juce::String (out.getSample (0, bs - 1), 3) + ")");
+
+        e.masterMuted = true;
+        for (int k = 0; k < 20; ++k) runBlock (e, 1.0f, false);
+        check (out.getMagnitude (0, bs) < 1.0e-6f && out.getMagnitude (1, bs) < 1.0e-6f && r.outMeter[0].readAndReset() > 0.4f,
+               "master mute: outputs silent, rack still metering");
+
+        e.masterMuted = false;
+        for (int k = 0; k < 20; ++k) runBlock (e, 1.0f, false);
+        check (std::abs (out.getSample (0, bs - 1) - juce::Decibels::decibelsToGain (-6.0f)) < 0.01f, "master unmute: back");
+        e.audioDeviceStopped();
+    }
+
     // 0: updater version order (semver: release > beta.2 > beta.1 > beta > alpha)
     {
         using update::compareVersions;

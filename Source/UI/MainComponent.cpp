@@ -49,14 +49,107 @@ MainComponent::MainComponent()
     topBar->onNew      = [this] { newSession(); };
     topBar->onOpen     = [this] { openSession(); };
     topBar->onSave     = [this] { saveSession (false); };
-    topBar->onPlugins  = [this]
+    topBar->onPlugins  = [this] { openPluginManager(); };
+    topBar->onSettings = [this] { openSettings(); };
+    topBar->onToggleLayout = [this] { setVerticalLayout (! verticalLayout); };
+    topBar->onAutomixView = [this] { openAutomixer(); };
+    topBar->deviceStatus = [this] { return deviceGuard != nullptr ? deviceGuard->getStatus() : juce::String(); };
+    addAndMakeVisible (*topBar);
+
+    sceneList = std::make_unique<SceneListComponent> (*session);
+    addAndMakeVisible (*sceneList);
+
+    scenesToggle.onClick = [this] { setScenesCollapsed (! scenesCollapsed); };
+    addAndMakeVisible (scenesToggle);
+
+    rackViewport.setViewedComponent (&rackContainer, false);
+    rackViewport.setScrollBarsShown (true, false);
+    rackViewport.setScrollBarThickness (8);
+    addAndMakeVisible (rackViewport);
+
+    lookAndFeelChanged();
+    addRackButton.setButtonText ("+  ADD RACK");
+    addRackButton.setTooltip ("Add a rack (Cmd+R). Right-click: add several racks at once, on consecutive inputs");
+    addRackButton.onClick = [this] { session->addRack(); };
+    addRackButton.onRightClick = [this] { showAddRacksMenu(); };
+    rackContainer.addAndMakeVisible (addRackButton);
+
+    autosave = std::make_unique<Autosave> (*session);
+    commonConstructorTail();
+}
+
+void MainComponent::openPluginManager()
+{
+    if (pluginWindow == nullptr)
+        pluginWindow = std::make_unique<PluginManagerWindow> (pluginManager);
+    pluginWindow->setVisible (true);
+    pluginWindow->toFront (true);
+}
+
+void MainComponent::openAutomixer()
+{
+    if (automixerWindow == nullptr)
+        automixerWindow = std::make_unique<AutomixerWindow> (*session);
+    automixerWindow->setVisible (true);
+    automixerWindow->toFront (true);
+}
+
+void MainComponent::toggleLightTheme()
+{
+    pluginManager.getSettings().setValue ("lightTheme", ! theme::light);
+    setLightTheme (! theme::light);
+}
+
+void MainComponent::showAddRacksMenu()
+{
+    // inputs continue after the highest one in use
+    int nextIn = 0;
+    for (int i = 0; i < engine.getNumRacks(); ++i)
+        if (auto& r = engine.getRack (i); r.inputRackId.load() < 0 && r.inputChannel.load() >= 0)
+            nextIn = juce::jmax (nextIn, r.inputChannel.load() + (r.stereoInput.load() ? 2 : 1));
+
+    juce::PopupMenu m;
+    m.addSectionHeader ("Add racks on consecutive inputs, from IN " + juce::String (nextIn + 1));
+
+    for (bool stereo : { false, true })
     {
-        if (pluginWindow == nullptr)
-            pluginWindow = std::make_unique<PluginManagerWindow> (pluginManager);
-        pluginWindow->setVisible (true);
-        pluginWindow->toFront (true);
-    };
-    topBar->onSettings = [this]
+        juce::PopupMenu sub;
+        for (int n : { 2, 4, 6, 8, 12, 16, 24, 32 })
+        {
+            const auto last = nextIn + n * (stereo ? 2 : 1);
+            sub.addItem (juce::String (n) + " racks  (IN " + juce::String (nextIn + 1) + "-" + juce::String (last) + ")",
+                         [safe = juce::Component::SafePointer<MainComponent> (this), n, stereo]
+                         { if (safe != nullptr) safe->session->addRacks (n, stereo); });
+        }
+        m.addSubMenu (stereo ? "Stereo racks" : "Mono racks", sub);
+    }
+
+    m.addSeparator();
+    m.addItem ("Other number...", [safe = juce::Component::SafePointer<MainComponent> (this)]
+    {
+        if (safe == nullptr)
+            return;
+
+        auto* w = new juce::AlertWindow ("Add racks", "How many racks? They take consecutive inputs.", juce::MessageBoxIconType::NoIcon, safe.getComponent());
+        w->addTextEditor ("n", "8", "Racks");
+        w->addComboBox ("type", { "Mono inputs", "Stereo inputs" });
+        w->addButton ("Add", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w] (int result)
+        {
+            const auto n = juce::jlimit (0, 128, w->getTextEditorContents ("n").getIntValue());
+            const bool stereo = w->getComboBoxComponent ("type")->getSelectedItemIndex() == 1;
+
+            if (result == 1 && n > 0 && safe != nullptr)
+                safe->session->addRacks (n, stereo);
+        }), true);
+    });
+
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&addRackButton));
+}
+
+void MainComponent::openSettings()
+{
     {
         if (! audioReady)
         {
@@ -73,33 +166,12 @@ MainComponent::MainComponent()
                                                                [this] { updater->checkNow(); });
         settingsWindow->setVisible (true);
         settingsWindow->toFront (true);
-    };
-    topBar->onToggleLayout = [this] { setVerticalLayout (! verticalLayout); };
-    topBar->onAutomixView = [this]
-    {
-        if (automixerWindow == nullptr)
-            automixerWindow = std::make_unique<AutomixerWindow> (*session);
-        automixerWindow->setVisible (true);
-        automixerWindow->toFront (true);
-    };
-    addAndMakeVisible (*topBar);
+    }
+}
 
-    sceneList = std::make_unique<SceneListComponent> (*session);
-    addAndMakeVisible (*sceneList);
-
-    scenesToggle.onClick = [this] { setScenesCollapsed (! scenesCollapsed); };
-    addAndMakeVisible (scenesToggle);
-
-    rackViewport.setViewedComponent (&rackContainer, false);
-    rackViewport.setScrollBarsShown (true, false);
-    rackViewport.setScrollBarThickness (8);
-    addAndMakeVisible (rackViewport);
-
-    lookAndFeelChanged();
-    addRackButton.onClick = [this] { session->addRack(); };
-    rackContainer.addAndMakeVisible (addRackButton);
-
-    autosave = std::make_unique<Autosave> (*session);
+void MainComponent::commonConstructorTail()
+{
+    auto& settings = pluginManager.getSettings();
 
     if (audioReady)
     {
@@ -134,9 +206,15 @@ MainComponent::MainComponent()
         juce::JUCEApplication::getInstance()->systemRequestedQuit();
     });
 
+    commands.registerAllCommandsForTarget (this);
+    commands.setFirstCommandTarget (this);
+    appMenu.setApplicationCommandManagerToWatch (&commands);
+
    #if JUCE_MAC
     juce::PopupMenu extra;
     extra.addItem ("Check for Updates...", [this] { updater->checkNow(); });
+    extra.addSeparator();
+    extra.addCommandItem (&commands, cmd::audioSettings, "Settings...");
     juce::MenuBarModel::setMacMainMenu (&appMenu, &extra);
    #endif
 
@@ -172,10 +250,14 @@ void MainComponent::prepareToQuit()
     edit->removeChangeListener (this);
     engine.getDeviceManager().removeChangeListener (this);
 
-    // never overwrite the saved device with an empty state if CoreAudio never answered
-    if (audioReady)
-        if (auto xml = engine.getDeviceManager().createStateXml())
-            pluginManager.getSettings().setValue ("audioDevice", xml.get());
+    // the device the user chose (not a fallback, never an empty state if CoreAudio never answered);
+    // the guard goes before the device closes, or it would reopen it
+    if (deviceGuard != nullptr)
+    {
+        if (auto* xml = deviceGuard->getPreferredState())
+            pluginManager.getSettings().setValue ("audioDevice", xml);
+        deviceGuard = nullptr;
+    }
 
     pluginManager.saveAll();   // before any plugin is destroyed: a crash after this loses nothing
 
@@ -332,9 +414,7 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 
     if (source == &engine.getDeviceManager())
     {
-        if (auto xml = engine.getDeviceManager().createStateXml())
-            pluginManager.getSettings().setValue ("audioDevice", xml.get());
-
+        // the chosen device is saved by DeviceGuard (a fallback device must never overwrite it)
         for (auto* rc : rackComponents)
             rc->refresh();
 
@@ -345,6 +425,7 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
     syncRacks();
     sceneList->refresh();
     topBar->refresh();
+    commands.commandStatusChanged();   // Undo/Redo and the ticks in the menu bar
 }
 
 void MainComponent::timerCallback()
@@ -405,6 +486,9 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     const auto shift = juce::ModifierKeys::shiftModifier;
 
     // editing
+    if (key == juce::KeyPress ('z', cmd, 0))         { session->undo(); return true; }
+    if (key == juce::KeyPress ('z', cmd | shift, 0)) { session->redo(); return true; }
+    if (key == juce::KeyPress ('m', cmd | shift, 0)) { engine.masterMuted = ! engine.masterMuted.load(); topBar->updateMeters(); return true; }
     if (key == juce::KeyPress ('c', cmd, 0)) { edit->copy(); return true; }
     if (key == juce::KeyPress ('v', cmd, 0)) { edit->paste(); return true; }
     if (key == juce::KeyPress ('d', cmd, 0)) { edit->duplicate(); return true; }
@@ -450,8 +534,32 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
 //==============================================================================
 void MainComponent::startAudioDevice()
 {
-    auto deviceState = pluginManager.getSettings().getXmlValue ("audioDevice");
-    engine.initialiseDevice (deviceState.get());
+    deviceGuard = std::make_unique<DeviceGuard> (engine, pluginManager.getSettings().getXmlValue ("audioDevice"));
+    deviceGuard->onPreferredChanged = [this] (const juce::XmlElement& xml)
+    {
+        pluginManager.getSettings().setValue ("audioDevice", &xml);
+    };
+    deviceGuard->askUseBuiltIn = [this] (std::function<void (bool)> answer)
+    {
+        auto options = juce::MessageBoxOptions()
+            .withIconType (juce::MessageBoxIconType::WarningIcon)
+            .withTitle ("No audio interface chosen")
+            .withMessage ("The only audio device available is the Mac's own (built-in speakers / microphone).\n\n"
+                          "StageRack does not use it by itself: speakers and microphone in the same room can feed back.\n"
+                          "Choose your interface in Settings, or use the built-in devices anyway.")
+            .withButton ("Open Settings", 1)
+            .withButton ("Use built-in anyway", 2)
+            .withAssociatedComponent (this);
+
+        juce::AlertWindow::showAsync (options, juce::ModalCallbackFunction::create (
+            [safe = juce::Component::SafePointer<MainComponent> (this), answer] (int result)
+            {
+                answer (result == 2);
+                if (result == 1 && safe != nullptr)
+                    safe->openSettings();
+            }));
+    };
+    deviceGuard->start();
     engine.getDeviceManager().addChangeListener (this);
 }
 
@@ -566,6 +674,165 @@ void MainComponent::saveSession (bool saveAs)
             if (session->saveTo (f))
                 pluginManager.getSettings().setValue ("lastSession", f.getFullPathName());
         });
+}
+
+//==============================================================================
+// Menu bar
+juce::StringArray MainComponent::AppMenu::getMenuBarNames()
+{
+    return { "File", "Edit", "Rack", "Scene", "Audio", "View" };
+}
+
+juce::PopupMenu MainComponent::commandItems (std::initializer_list<juce::CommandID> ids)
+{
+    juce::PopupMenu m;
+
+    for (auto id : ids)
+    {
+        if (id == 0)
+        {
+            m.addSeparator();
+            continue;
+        }
+
+        juce::ApplicationCommandInfo info (id);
+        getCommandInfo (id, info);
+
+        juce::PopupMenu::Item item (info.shortName);
+        item.itemID = (int) id;
+        item.commandManager = &commands;
+        item.isEnabled = (info.flags & juce::ApplicationCommandInfo::isDisabled) == 0;
+        item.isTicked = (info.flags & juce::ApplicationCommandInfo::isTicked) != 0;
+        item.customCallback = new KeyOriginCallback();   // remembers keyboard vs click
+        m.addItem (item);
+    }
+
+    return m;
+}
+
+juce::PopupMenu MainComponent::AppMenu::getMenuForIndex (int index, const juce::String&)
+{
+    switch (index)
+    {
+        case 0:  return owner.commandItems ({ cmd::newSession, cmd::openSession, 0, cmd::saveSession, cmd::saveSessionAs });
+        case 1:  return owner.commandItems ({ cmd::undo, cmd::redo, 0, cmd::copy, cmd::paste, cmd::duplicate, cmd::deleteSelection, 0,
+                                              cmd::selectAll, cmd::deselect, 0,
+                                              cmd::consecutiveInMono, cmd::consecutiveInStereo, cmd::consecutiveOutMono, cmd::consecutiveOutStereo });
+        case 2:  return owner.commandItems ({ cmd::addRack, cmd::addRacks, 0, cmd::biggerRacks, cmd::smallerRacks });
+        case 3:  return owner.commandItems ({ cmd::nextScene, cmd::prevScene, 0, cmd::storeScene, cmd::addScene });
+        case 4:  return owner.commandItems ({ cmd::masterMute, cmd::automixOnOff, 0, cmd::audioSettings, cmd::pluginManager });
+        case 5:  return owner.commandItems ({ cmd::toggleLayout, cmd::toggleScenes, cmd::automixerWindow, 0, cmd::lightTheme });
+        default: return {};
+    }
+}
+
+void MainComponent::getAllCommands (juce::Array<juce::CommandID>& ids)
+{
+    for (juce::CommandID id = cmd::newSession; id <= cmd::lightTheme; ++id)
+        ids.add (id);
+}
+
+void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommandInfo& info)
+{
+    const auto c = juce::ModifierKeys::commandModifier, s = juce::ModifierKeys::shiftModifier, a = juce::ModifierKeys::altModifier;
+    const bool hasSelection = ! edit->targetRacks().isEmpty();
+    auto set = [&] (const juce::String& name, const juce::String& category, int key = 0, int mods = 0)
+    {
+        info.setInfo (name, name, category, 0);
+        if (key != 0)
+            info.addDefaultKeypress (key, mods);
+    };
+
+    switch (id)
+    {
+        case cmd::newSession:          set ("New Session", "File", 'n', c); break;
+        case cmd::openSession:         set ("Open...", "File", 'o', c); break;
+        case cmd::saveSession:         set ("Save", "File", 's', c); break;
+        case cmd::saveSessionAs:       set ("Save As...", "File", 's', c | a); break;
+        case cmd::undo:                set (session->canUndo() ? "Undo" : "Can't Undo", "Edit", 'z', c); info.setActive (session->canUndo()); break;
+        case cmd::redo:                set (session->canRedo() ? "Redo" : "Can't Redo", "Edit", 'z', c | s); info.setActive (session->canRedo()); break;
+        case cmd::copy:                set ("Copy", "Edit", 'c', c); break;
+        case cmd::paste:               set ("Paste", "Edit", 'v', c); break;
+        case cmd::duplicate:           set ("Duplicate", "Edit", 'd', c); break;
+        case cmd::deleteSelection:     set ("Delete", "Edit", juce::KeyPress::backspaceKey, 0); break;
+        case cmd::selectAll:           set ("Select All Racks", "Edit", 'a', c); break;
+        case cmd::deselect:            set ("Deselect", "Edit"); break;
+        case cmd::consecutiveInMono:   set ("Consecutive Inputs (mono)", "Edit", 'i', c | a); info.setActive (hasSelection); break;
+        case cmd::consecutiveInStereo: set ("Consecutive Inputs (stereo)", "Edit", 'i', c | s); info.setActive (hasSelection); break;
+        case cmd::consecutiveOutMono:  set ("Consecutive Outputs (mono)", "Edit", 'o', c | a); info.setActive (hasSelection); break;
+        case cmd::consecutiveOutStereo:set ("Consecutive Outputs (stereo)", "Edit", 'o', c | s); info.setActive (hasSelection); break;
+        case cmd::addRack:             set ("Add Rack", "Rack", 'r', c); break;
+        case cmd::addRacks:            set ("Add Several Racks...", "Rack"); break;
+        case cmd::biggerRacks:         set ("Bigger Racks", "Rack", '=', c); break;
+        case cmd::smallerRacks:        set ("Smaller Racks", "Rack", '-', c); break;
+        case cmd::nextScene:           set ("Next Scene", "Scene"); break;
+        case cmd::prevScene:           set ("Previous Scene", "Scene"); break;
+        case cmd::storeScene:          set ("Store Scene", "Scene", 's', c | s); info.setActive (session->getCurrentScene() >= 0); break;
+        case cmd::addScene:            set ("New Scene", "Scene"); break;
+        case cmd::masterMute:          set ("Mute All Outputs", "Audio", 'm', c | s); info.setTicked (engine.masterMuted.load()); break;
+        case cmd::automixOnOff:        set ("Automixer On", "Audio"); info.setTicked (engine.automixEnabled.load()); break;
+        case cmd::audioSettings:       set ("Settings...", "Audio", ',', c); break;
+        case cmd::pluginManager:       set ("Plugin Manager...", "Audio"); break;
+        case cmd::toggleLayout:        set ("Vertical Racks", "View"); info.setTicked (verticalLayout); break;
+        case cmd::toggleScenes:        set ("Scene List", "View", 'l', c); info.setTicked (! scenesCollapsed); break;
+        case cmd::automixerWindow:     set ("Automixer Window", "View"); break;
+        case cmd::lightTheme:          set ("Light Theme", "View"); info.setTicked (theme::light); break;
+        default: break;
+    }
+}
+
+bool MainComponent::perform (const InvocationInfo& info)
+{
+    // a shortcut typed in a plugin or settings window reaches the menu bar if that window did not
+    // use it: never let it edit the racks (it would undo or delete something out of sight)
+    if (cmd::isRackEdit (info.commandID) && KeyOriginCallback::lastWasKey)
+    {
+        KeyOriginCallback::lastWasKey = false;
+        if (auto* peer = getPeer(); peer == nullptr || ! peer->isFocused())
+            return true;
+    }
+
+    KeyOriginCallback::lastWasKey = false;
+
+    switch (info.commandID)
+    {
+        case cmd::newSession:          newSession(); break;
+        case cmd::openSession:         openSession(); break;
+        case cmd::saveSession:         saveSession (false); break;
+        case cmd::saveSessionAs:       saveSession (true); break;
+        case cmd::undo:                session->undo(); break;
+        case cmd::redo:                session->redo(); break;
+        case cmd::copy:                edit->copy(); break;
+        case cmd::paste:               edit->paste(); break;
+        case cmd::duplicate:           edit->duplicate(); break;
+        case cmd::deleteSelection:     edit->deleteSelection(); break;
+        case cmd::selectAll:           edit->selectAllRacks(); break;
+        case cmd::deselect:            edit->clearSelection(); break;
+        case cmd::consecutiveInMono:   edit->consecutiveInputs (false); break;
+        case cmd::consecutiveInStereo: edit->consecutiveInputs (true); break;
+        case cmd::consecutiveOutMono:  edit->consecutiveOutputs (false); break;
+        case cmd::consecutiveOutStereo:edit->consecutiveOutputs (true); break;
+        case cmd::addRack:             session->addRack(); break;
+        case cmd::addRacks:            showAddRacksMenu(); break;
+        case cmd::biggerRacks:         edit->resizeTargets (1.15f); break;
+        case cmd::smallerRacks:        edit->resizeTargets (1.0f / 1.15f); break;
+        case cmd::nextScene:           session->stepScene (1); break;
+        case cmd::prevScene:           session->stepScene (-1); break;
+        case cmd::storeScene:          if (session->getCurrentScene() >= 0) session->storeScene (session->getCurrentScene()); break;
+        case cmd::addScene:            session->addScene ("Scene " + juce::String (session->getNumScenes() + 1)); break;
+        case cmd::masterMute:          engine.masterMuted = ! engine.masterMuted.load(); topBar->updateMeters(); break;
+        case cmd::automixOnOff:        engine.automixEnabled = ! engine.automixEnabled.load(); session->markDirty(); break;
+        case cmd::audioSettings:       openSettings(); break;
+        case cmd::pluginManager:       openPluginManager(); break;
+        case cmd::toggleLayout:        setVerticalLayout (! verticalLayout); break;
+        case cmd::toggleScenes:        setScenesCollapsed (! scenesCollapsed); break;
+        case cmd::automixerWindow:     openAutomixer(); break;
+        case cmd::lightTheme:          toggleLightTheme(); break;
+        default:                       return false;
+    }
+
+    commands.commandStatusChanged();
+    return true;
 }
 
 } // namespace stagerack

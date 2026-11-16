@@ -176,6 +176,89 @@ PluginManagerWindow::PluginManagerWindow (PluginManager& pm)
 }
 
 //==============================================================================
+/** JUCE's device selector, with the input rows (device, active channels) above the output ones:
+    signal flow order, input first. JUCE lays them out output-first inside a private panel, so the
+    rows are swapped after every layout pass (idempotent). */
+class InputFirstDeviceSelector final : public juce::AudioDeviceSelectorComponent
+{
+public:
+    InputFirstDeviceSelector (juce::AudioDeviceManager& dm, int minIn, int maxIn, int minOut, int maxOut)
+        : juce::AudioDeviceSelectorComponent (dm, minIn, maxIn, minOut, maxOut, true, false, true, false), manager (dm)
+    {
+        manager.addChangeListener (&deviceListener);
+    }
+
+    ~InputFirstDeviceSelector() override { manager.removeChangeListener (&deviceListener); }
+
+    void resized() override
+    {
+        juce::AudioDeviceSelectorComponent::resized();
+        swapRows();
+    }
+
+    void childBoundsChanged (juce::Component* c) override
+    {
+        juce::AudioDeviceSelectorComponent::childBoundsChanged (c);
+        swapRows();
+    }
+
+private:
+    // the panel re-lays itself out on device changes: fix it afterwards
+    struct DeviceListener final : juce::ChangeListener
+    {
+        InputFirstDeviceSelector& owner;
+        explicit DeviceListener (InputFirstDeviceSelector& o) : owner (o) {}
+        void changeListenerCallback (juce::ChangeBroadcaster*) override
+        {
+            juce::Component::SafePointer<InputFirstDeviceSelector> safe (&owner);
+            juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->swapRows(); });
+        }
+    } deviceListener { *this };
+
+    static juce::Component* attachedTo (juce::Component& panel, const juce::String& labelText)
+    {
+        for (auto* c : panel.getChildren())
+            if (auto* l = dynamic_cast<juce::Label*> (c); l != nullptr && l->getText() == labelText)
+                return l->getAttachedComponent();
+        return nullptr;
+    }
+
+    /** Puts the row of `in` where the row of `out` is (and vice versa), if `out` is above. */
+    static void swapPair (juce::Component& panel, juce::Component* out, juce::Component* in)
+    {
+        if (out == nullptr || in == nullptr || out->getY() >= in->getY())
+            return;
+
+        const int top = out->getY(), gap = in->getY() - out->getBottom();
+        const int outY = out->getY(), inY = in->getY();
+        const int newOutY = top + in->getHeight() + gap;
+        juce::Array<juce::Component*> outRow, inRow;
+
+        for (auto* c : panel.getChildren())
+        {
+            if (dynamic_cast<juce::Label*> (c) != nullptr)
+                continue;   // attached labels follow their component
+            if (c->getY() == outY) outRow.add (c);
+            else if (c->getY() == inY) inRow.add (c);
+        }
+
+        for (auto* c : inRow)  c->setTopLeftPosition (c->getX(), top);
+        for (auto* c : outRow) c->setTopLeftPosition (c->getX(), newOutY);
+    }
+
+    void swapRows()
+    {
+        for (auto* panel : getChildren())
+        {
+            swapPair (*panel, attachedTo (*panel, "Output:"), attachedTo (*panel, "Input:"));
+            swapPair (*panel, attachedTo (*panel, "Active output channels:"), attachedTo (*panel, "Active input channels:"));
+        }
+    }
+
+    juce::AudioDeviceManager& manager;
+};
+
+//==============================================================================
 class SettingsContent final : public juce::Component,
                               private juce::Timer
 {
@@ -183,7 +266,7 @@ public:
     SettingsContent (AudioEngine& e, PluginManager& pm, Session& se, std::function<void (bool)> themeChanged,
                      std::function<void()> checkUpdatesFn)
         : engine (e), plugins (pm), session (se), onThemeChanged (std::move (themeChanged)),
-          devices (e.getDeviceManager(), 0, 64, 0, 64, true, false, true, false)
+          devices (e.getDeviceManager(), 0, 64, 0, 64)
     {
         addAndMakeVisible (devices);
 
@@ -341,7 +424,7 @@ public:
 private:
     AudioEngine& engine;
     PluginManager& plugins;
-    juce::AudioDeviceSelectorComponent devices;
+    InputFirstDeviceSelector devices;
     juce::Label title, threadsLabel, nextLabel, prevLabel, midiInfo;
     std::function<void (bool)> onThemeChanged;
     juce::ToggleButton spread, lightTheme, autoUpdate;

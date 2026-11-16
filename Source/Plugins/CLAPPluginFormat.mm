@@ -940,6 +940,9 @@ public:
 
     ~CLAPEditor() override
     {
+        // like JUCE's VST3/AU windows: otherwise getActiveEditor() keeps pointing at freed memory,
+        // the next createEditorAndMakeActive() fails and the window fell back to the generic editor
+        instance.editorBeingDeleted (this);
         instance.onGuiResizeRequest = nullptr;
 
         if (created)

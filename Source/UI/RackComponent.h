@@ -61,15 +61,15 @@ private:
     juce::Label nameLabel, statusLabel, infoLabel;
     juce::ComboBox inputBox, outputBox;
     juce::OwnedArray<SlotComponent> slots;
-    juce::Slider gain;
+    juce::Slider gain, inputGain;   // output fader (after the plugins), input trim (before)
     juce::TextButton muteButton { "M" }, soloButton { "S" }, bypassButton { "B" };
     juce::TextButton menuButton { juce::String::fromUTF8 ("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2") };
     std::unique_ptr<ResizeHandle> resizeHandle;
 
     juce::Rectangle<int> meterArea, indexArea, automixArea, automixMeterArea;
     float inLevel[2] {}, outLevel[2] {}, peakLoad = 0.0f, automixDb = 0.0f;
-    bool vertical = false, gainDragging = false;
-    juce::ModifierKeys gainDragMods;
+    bool vertical = false, gainDragging = false, inGainDragging = false;
+    juce::ModifierKeys gainDragMods, inGainDragMods;
     int dropIndicator = 0;          // 0 = none, -1 = before this rack, 1 = after
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RackComponent)

@@ -273,6 +273,8 @@ void Rack::prepare (double sr, int devBlock)
         midi.ensureSize (2048);
         gain.reset (sr, 0.02);
         gain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (gainDb.load()));
+        inGain.reset (sr, 0.02);
+        inGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (inputGainDb.load()));
 
         // automix level detector (see updateAutomixLevel)
         amHighPass.set (juce::IIRCoefficients::makeHighPass (sr, automixHighPassHz.load()));
@@ -747,6 +749,27 @@ void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int n
         {
             copyIn (0, inCh);
             copyIn (1, stereoIn ? inCh + 1 : inCh);
+        }
+
+        // input trim (before the plugins, so the meter shows what they get)
+        inGain.setTargetValue (juce::Decibels::decibelsToGain (inputGainDb.load (std::memory_order_relaxed), -100.0f));
+
+        if (inGain.isSmoothing())
+        {
+            auto* l = buffer.getWritePointer (0);
+            auto* r = buffer.getWritePointer (1);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const auto g = inGain.getNextValue();
+                l[i] *= g;
+                r[i] *= g;
+            }
+        }
+        else if (const auto g = inGain.getTargetValue(); g != 1.0f)
+        {
+            buffer.applyGain (0, 0, numSamples, g);
+            buffer.applyGain (1, 0, numSamples, g);
         }
 
         inMeter[0].push (buffer.getMagnitude (0, 0, numSamples));

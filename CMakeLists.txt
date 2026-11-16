@@ -51,6 +51,7 @@ target_sources(StageRack PRIVATE
     Source/Engine/HopAligner.cpp
     Source/Engine/CoreWakeAssist.cpp
     Source/Engine/CoreAudioProbe.cpp
+    Source/Engine/DeviceGuard.cpp
     Source/Plugins/PluginManager.cpp
     Source/Plugins/CLAPPluginFormat.mm
     Source/UI/MainComponent.cpp
@@ -62,6 +63,7 @@ target_sources(StageRack PRIVATE
     Source/UI/PluginWindow.cpp
     Source/UI/PluginThumbnail.mm
     Source/UI/PluginMeters.mm
+    Source/UI/AppMenu.mm
     Source/UI/PluginBrowser.cpp
     Source/UI/PluginManagerWindow.cpp
     Source/Update/Updater.cpp)

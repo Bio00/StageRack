@@ -31,6 +31,9 @@ public:
     void removePlugin (Rack&, int slot);
     void removeRack (Rack&);
     Rack& addRack();
+    /** Adds `count` racks in one edit (one undo step). Inputs: consecutive, after the highest
+        input used by any rack; outputs: like the last rack. */
+    void addRacks (int count, bool stereoInputs);
 
     /** Called before a plugin is destroyed, so editor windows can be closed. */
     std::function<void (juce::AudioPluginInstance*)> onPluginAboutToBeDeleted;
@@ -68,14 +71,17 @@ public:
     juce::ValueTree rackToTree (const Rack&) const;                     // settings + plugins + states
     juce::ValueTree pluginToTree (const Rack&, int slot) const;         // description + state
     Rack& createRackFromTree (const juce::ValueTree&, int insertIndex); // new id; plugins load async
-    void loadPluginFromTree (Rack&, int slot, const juce::ValueTree& pluginTree);
+    /** newUndoStep: the plugin's arrival is an edit of its own (paste); otherwise it completes
+        the edit that started the load (duplicate, session open). */
+    void loadPluginFromTree (Rack&, int slot, const juce::ValueTree& pluginTree, bool newUndoStep = false);
     void duplicateRacks (const juce::Array<int>& rackIds);              // copies go after the last one
     void moveRackTo (int rackId, int newIndex);
     void movePlugin (Rack& from, int fromSlot, Rack& to, int toSlot);   // swaps if the target is used
     void copyPlugin (Rack& from, int fromSlot, Rack& to, int toSlot);
     /** Consecutive channels for the racks, in rack order. With startChannel >= 0 and firstRackId set,
         that rack gets startChannel and the numbering continues downward (racks above it come last);
-        otherwise the first rack keeps its channel. */
+        otherwise the first rack keeps its channel. With firstRackId set, only that rack takes `stereo`:
+        the others keep their own mono/stereo width and the numbering advances by 1 or 2 for each. */
     void setConsecutiveInputs (const juce::Array<int>& rackIds, bool stereo, int startChannel = -1, int firstRackId = -1);
     void setConsecutiveOutputs (const juce::Array<int>& rackIds, bool stereo, int startChannel = -1, int firstRackId = -1);
 
@@ -109,7 +115,41 @@ public:
     bool isDirty() const noexcept                   { return dirty; }
     void markDirty();
 
+    //==============================================================================
+    /** Undo/redo of the edits made in StageRack (racks, plugins added/removed/moved, routing,
+        gains, mutes, groups, slot views, scenes). Each markDirty() is a step. A step stores no
+        plugin state: instances taken out are parked alive (see retirePlugin), so undo puts the
+        very same instance back, with its state, without loading anything. Changes made inside a
+        plugin's own editor are the plugin's business (its own undo). History clears on new/open. */
+    bool canUndo() const noexcept                   { return ! undoStack.empty() && *pendingLoads == 0; }
+    bool canRedo() const noexcept                   { return ! redoStack.empty() && *pendingLoads == 0; }
+    bool undo();
+    bool redo();
+    int getNumUndoSteps() const noexcept            { return (int) undoStack.size(); }
+
 private:
+    struct UndoState
+    {
+        juce::ValueTree tree;          // racks, slots (instance tokens), globals
+        std::vector<Scene> scenes;     // shares the scene trees (no copy)
+        int currentScene = -1;
+        bool sameAs (const UndoState&) const;
+    };
+    UndoState captureUndoState() const;
+    void applyUndoState (const UndoState&);
+    void recordUndoStep();             // markDirty(): the state changed by a user edit
+    void amendUndoState();             // same edit, completed later (plugin arrived, scene recalled)
+    void resetUndoHistory();
+    void pluginReplaced (juce::AudioPluginInstance* oldOne, juce::AudioPluginInstance* newOne);
+    juce::AudioPluginInstance* takeInstance (juce::int64 token, std::map<juce::int64, std::unique_ptr<juce::AudioPluginInstance>>& pool);
+    std::vector<UndoState> undoStack, redoStack;
+    UndoState undoCurrent;
+    std::map<juce::int64, juce::int64> replacedTokens;   // live re-spread: old instance -> its twin
+    bool applyingUndo = false;
+    static constexpr size_t maxUndoSteps = 200;
+
+    juce::ValueTree rackSettingsToTree (const Rack&) const;
+    void applyRackSettings (Rack&, const juce::ValueTree&);
     juce::ValueTree captureSceneData() const;
     void buildRack (Rack&, const juce::ValueTree& rackTree);
     void applySceneData (const juce::ValueTree&);

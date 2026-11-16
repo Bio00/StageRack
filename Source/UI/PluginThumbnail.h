@@ -46,6 +46,9 @@ public:
 
     static bool looksBlank (const juce::Image&);
 
+    /** Diagnostics: JUCE class and native view classes inside an editor (to spot generic fallbacks). */
+    static juce::String describeEditor (juce::Component&);
+
 private:
     class OffscreenCapture;
 

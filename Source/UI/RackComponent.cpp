@@ -847,6 +847,7 @@ private:
         for (auto& [r, n] : edit.linkedSlots (rack, index, mods))
             r->getSlot (n).bypassed = state;
 
+        session.markDirty();   // saved with the session, and an undo step
         repaint();
     }
 
@@ -1164,6 +1165,31 @@ RackComponent::RackComponent (Session& s, EditController& e, Rack& r, int i)
     gain.onDragEnd = [this] { gainDragging = false; session.markDirty(); };
     addAndMakeVisible (gain);
 
+    // input trim, at the start of the rack (same editing rules as the output gain)
+    inputGain.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    inputGain.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 54, 14);
+    inputGain.setRange (Rack::minInputGainDb, Rack::maxInputGainDb, 0.1);
+    inputGain.setDoubleClickReturnValue (true, 0.0, {});
+    inputGain.setVelocityModeParameters (1.0, 1, 0.0, false);
+    inputGain.textFromValueFunction = [] (double v) { return "IN " + juce::String (v, 1); };
+    inputGain.valueFromTextFunction = [] (const juce::String& t) { return t.retainCharacters ("-+.0123456789").getDoubleValue(); };
+    inputGain.setColour (juce::Slider::rotarySliderFillColourId, rack.colour);
+    inputGain.setValue (rack.inputGainDb.load(), juce::dontSendNotification);
+    inputGain.updateText();
+    inputGain.onDragStart = [this] { inGainDragMods = juce::ModifierKeys::getCurrentModifiers(); inGainDragging = true; };
+    inputGain.onValueChange = [this]
+    {
+        const auto v = (float) inputGain.getValue();
+        const auto delta = v - rack.inputGainDb.load();
+        const auto mods = inGainDragging ? inGainDragMods : juce::ModifierKeys::getCurrentModifiers();
+        rack.inputGainDb = v;
+
+        for (auto* r : edit.linkedRacks (rack, mods))
+            r->inputGainDb = mods.isShiftDown() ? juce::jlimit (Rack::minInputGainDb, Rack::maxInputGainDb, r->inputGainDb.load() + delta) : v;
+    };
+    inputGain.onDragEnd = [this] { inGainDragging = false; session.markDirty(); };
+    addAndMakeVisible (inputGain);
+
     auto setupToggle = [this] (juce::TextButton& b, juce::Colour on, std::atomic<bool> Rack::* flag)
     {
         b.setClickingTogglesState (true);
@@ -1190,7 +1216,9 @@ RackComponent::RackComponent (Session& s, EditController& e, Rack& r, int i)
     muteButton.setTooltip ("Mute rack  (Alt: all selected racks)");
     soloButton.setTooltip ("Solo rack  (Alt: all selected racks)");
     bypassButton.setTooltip ("Bypass whole rack  (Alt: all selected racks)");
-    gain.setTooltip ("Rack gain  (Alt: same on all selected racks, Alt+Shift: relative)");
+    gain.setTooltip ("Output gain, after the plugins  (Alt: same on all selected racks, Alt+Shift: relative)");
+    inputGain.setTooltip ("Input gain, before the plugins (" + juce::String ((int) Rack::minInputGainDb) + ".. +"
+                          + juce::String ((int) Rack::maxInputGainDb) + " dB, double-click = 0)  (Alt: same on all selected racks, Alt+Shift: relative)");
     inputBox.setTooltip ("Input  (Alt: same on all selected, Alt+Shift: consecutive from here)");
     outputBox.setTooltip ("Output  (Alt: same on all selected, Alt+Shift: consecutive from here)");
 
@@ -1319,10 +1347,12 @@ void RackComponent::refresh()
 {
     nameLabel.setText (rack.name, juce::dontSendNotification);
     gain.setValue (rack.gainDb.load(), juce::dontSendNotification);
+    inputGain.setValue (rack.inputGainDb.load(), juce::dontSendNotification);
     muteButton.setToggleState (rack.muted.load(), juce::dontSendNotification);
     soloButton.setToggleState (rack.solo.load(), juce::dontSendNotification);
     bypassButton.setToggleState (rack.bypassed.load(), juce::dontSendNotification);
     gain.setColour (juce::Slider::rotarySliderFillColourId, rack.colour);
+    inputGain.setColour (juce::Slider::rotarySliderFillColourId, rack.colour);
     fillRoutingBoxes();
 
     for (auto* s : slots)
@@ -1387,6 +1417,9 @@ void RackComponent::updateMeters()
     // values changed from elsewhere (Alt on another rack, MIDI, scenes) show up here
     if (! gain.isMouseButtonDown() && std::abs ((float) gain.getValue() - rack.gainDb.load()) > 0.001f)
         gain.setValue (rack.gainDb.load(), juce::dontSendNotification);
+
+    if (! inputGain.isMouseButtonDown() && std::abs ((float) inputGain.getValue() - rack.inputGainDb.load()) > 0.001f)
+        inputGain.setValue (rack.inputGainDb.load(), juce::dontSendNotification);
 
     muteButton.setToggleState (rack.muted.load(), juce::dontSendNotification);
     soloButton.setToggleState (rack.solo.load(), juce::dontSendNotification);
@@ -1510,7 +1543,10 @@ void RackComponent::resized()
         inputBox.setBounds (r.removeFromTop (21));
         r.removeFromTop (3);
         outputBox.setBounds (r.removeFromTop (21));
-        r.removeFromTop (6);
+        r.removeFromTop (4);
+        inputGain.setTextBoxStyle (juce::Slider::TextBoxRight, false, 64, 16);
+        inputGain.setBounds (r.removeFromTop (40).withTrimmedLeft (26));
+        r.removeFromTop (4);
 
         infoLabel.setBounds (r.removeFromBottom (42));
 
@@ -1577,6 +1613,9 @@ void RackComponent::resized()
     }
 
     r.removeFromLeft (8);
+    inputGain.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 54, 14);
+    inputGain.setBounds (r.removeFromLeft (58));
+    r.removeFromLeft (6);
     infoLabel.setBounds (r.removeFromRight (104).reduced (4, 0));
 
     auto buttons = r.removeFromRight (28);

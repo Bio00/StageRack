@@ -38,9 +38,9 @@ AudioEngine::~AudioEngine()
     clearRacks();
 }
 
-void AudioEngine::initialiseDevice (const juce::XmlElement* savedState)
+void AudioEngine::initialiseDevice (const juce::XmlElement* savedState, bool selectDefaultOnFailure)
 {
-    const auto error = deviceManager.initialise (64, 64, savedState, true);
+    const auto error = deviceManager.initialise (64, 64, savedState, selectDefaultOnFailure);
 
     if (error.isNotEmpty())
         DBG ("Audio device error: " << error);
@@ -546,6 +546,8 @@ void AudioEngine::setWorkerThreads (int numWorkers)
 //==============================================================================
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
+    outputsBlocked = isDeviceAllowed != nullptr && ! isDeviceAllowed();
+
     setChannelMaps (device->getActiveInputChannels(), device->getInputChannelNames().size(),
                     device->getActiveOutputChannels(), device->getOutputChannelNames().size());
     prepare (device->getCurrentSampleRate(), device->getCurrentBufferSizeSamples(), device->getWorkgroup());
@@ -835,7 +837,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
     }
 
     // master gain + meters on the main pair
-    masterGain.setTargetValue (juce::Decibels::decibelsToGain (masterGainDb.load (std::memory_order_relaxed), -100.0f));
+    masterGain.setTargetValue (masterMuted.load (std::memory_order_relaxed)
+                                   ? 0.0f : juce::Decibels::decibelsToGain (masterGainDb.load (std::memory_order_relaxed), -100.0f));
 
     if (masterGain.isSmoothing() || masterGain.getTargetValue() != 1.0f)
     {
@@ -850,6 +853,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
                 view.applyGainRamp (0, 0, numSamples, start, end);
             }
     }
+
+    if (outputsBlocked.load (std::memory_order_relaxed))
+        for (int ch = 0; ch < numOutputs; ++ch)
+            if (outputs[ch] != nullptr)
+                juce::FloatVectorOperations::clear (outputs[ch], numSamples);
 
     const auto elapsed = juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - t0);
     const auto budget = numSamples / juce::jmax (1.0, sampleRate);

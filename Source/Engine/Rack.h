@@ -156,6 +156,8 @@ public:
     //==============================================================================
     // Realtime parameters
     std::atomic<float> gainDb { 0.0f };
+    std::atomic<float> inputGainDb { 0.0f };   // trim before the first plugin
+    static constexpr float minInputGainDb = -24.0f, maxInputGainDb = 24.0f;
     std::atomic<bool> muted { false }, bypassed { false }, solo { false };
     std::atomic<int> inputChannel { 0 };    // first device input channel, -1 = none
     std::atomic<bool> stereoInput { true };
@@ -264,7 +266,7 @@ private:
     std::vector<std::unique_ptr<juce::AudioPluginInstance>> discarded;   // message thread, see takeDiscarded()
     void dropTwin (Slot&);                 // processLock held
     juce::MidiBuffer midi;
-    juce::LinearSmoothedValue<float> gain { 1.0f };
+    juce::LinearSmoothedValue<float> gain { 1.0f }, inGain { 1.0f };
     double sampleRate = 48000.0;
     int deviceBlockSize = 512, pluginBlockSize = 512;
     bool hasAudio = false;

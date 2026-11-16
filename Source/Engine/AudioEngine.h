@@ -23,7 +23,7 @@ public:
     AudioEngine();
     ~AudioEngine() override;
 
-    void initialiseDevice (const juce::XmlElement* savedState);
+    void initialiseDevice (const juce::XmlElement* savedState, bool selectDefaultOnFailure = true);
     juce::AudioDeviceManager& getDeviceManager() noexcept   { return deviceManager; }
 
     //==============================================================================
@@ -85,6 +85,14 @@ public:
     int getWakeAssistMode() const noexcept                   { return wakeAssistMode; }
 
     std::atomic<float> masterGainDb { 0.0f };
+    /** Silences every device output (20 ms ramp); the racks keep running. Not saved: always off at start. */
+    std::atomic<bool> masterMuted { false };
+
+    /** Asked (message thread) whenever a device starts: false = it was not chosen by the user
+        (e.g. the Mac's speakers after the interface went away), so its outputs stay silent until
+        DeviceGuard closes it. No callback set = everything allowed (test modes). */
+    std::function<bool()> isDeviceAllowed;
+    std::atomic<bool> outputsBlocked { false };
 
     /** Automixer (Dugan-style gain sharing) on/off for all groups. Off = every rack at unity. */
     std::atomic<bool> automixEnabled { true };

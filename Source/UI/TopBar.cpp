@@ -44,6 +44,12 @@ TopBar::TopBar (Session& s) : session (s)
     };
     addAndMakeVisible (automixButton);
 
+    masterMuteButton.setClickingTogglesState (true);
+    masterMuteButton.setColour (juce::TextButton::buttonOnColourId, theme::red);
+    masterMuteButton.setTooltip ("Master mute: silences every output (the racks keep running). Cmd+Shift+M");
+    masterMuteButton.onClick = [this] { session.getEngine().masterMuted = masterMuteButton.getToggleState(); };
+    addAndMakeVisible (masterMuteButton);
+
     automixViewButton.setTooltip ("Automixer window: input level and automix gain of every mic, weight, group");
     automixViewButton.onClick = [this] { if (onAutomixView) onAutomixView(); };
     addAndMakeVisible (automixViewButton);
@@ -53,6 +59,7 @@ void TopBar::lookAndFeelChanged()
 {
     storeButton.setColour (juce::TextButton::buttonColourId, theme::accent.withAlpha (0.25f));
     automixButton.setColour (juce::TextButton::buttonOnColourId, theme::green.withAlpha (0.8f));
+    masterMuteButton.setColour (juce::TextButton::buttonOnColourId, theme::red);
 }
 
 void TopBar::setVerticalLayout (bool v)
@@ -89,6 +96,12 @@ void TopBar::updateMeters()
 
     automixButton.setToggleState (engine.automixEnabled.load(), juce::dontSendNotification);
     automixButton.setAlpha (anyAutomix ? 1.0f : 0.4f);
+
+    // master mute: blinks while on, so a silent PA is never a mystery
+    const bool muted = engine.masterMuted.load();
+    masterMuteButton.setToggleState (muted, juce::dontSendNotification);
+    blink = muted ? (blink + 1) % 30 : 0;
+    masterMuteButton.setColour (juce::TextButton::buttonOnColourId, blink < 15 ? theme::red : theme::red.darker (0.6f));
 
     repaint (cpuArea);
     repaint (deviceArea);
@@ -177,6 +190,20 @@ void TopBar::paint (juce::Graphics& g)
         auto& dm = session.getEngine().getDeviceManager();
         juce::String line1 = "No audio device", line2;
 
+        const auto problem = deviceStatus != nullptr ? deviceStatus() : juce::String();
+
+        if (problem.isNotEmpty() && coreaudio::isReady())
+        {
+            g.setColour (theme::amber);
+            g.setFont (theme::font (12.0f, true));
+            g.drawText (problem, deviceArea.withHeight (18), juce::Justification::centredLeft, true);
+            g.setColour (theme::textDim);
+            g.setFont (theme::font (11.0f));
+            g.drawText (problem.startsWith ("Waiting") ? "reconnects by itself, outputs off meanwhile" : "choose one in SETTINGS",
+                        deviceArea.withTrimmedTop (18).withHeight (16), juce::Justification::centredLeft, true);
+            return;
+        }
+
         if (! coreaudio::isReady())
         {
             line1 = "Waiting for CoreAudio...";
@@ -230,6 +257,8 @@ void TopBar::resized()
     settingsButton.setBounds (bottom.removeFromLeft (w3).reduced (2, 0));
     layoutButton.setBounds (bottom.reduced (2, 0));
 
+    r.removeFromRight (8);
+    masterMuteButton.setBounds (r.removeFromRight (78).reduced (0, 2));
     r.removeFromRight (8);
     {
         auto am = r.removeFromRight (84);
