@@ -37,7 +37,16 @@ juce_add_gui_app(StageRack
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "StageRack needs audio input access to process live audio."
     # Lets Finder show "requires macOS 11" instead of a launch failure on older systems.
-    PLIST_TO_MERGE "<plist><dict><key>LSMinimumSystemVersion</key><string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string></dict></plist>")
+    # The app icon is a ready-made .icns (scripts/make-icon.sh builds it from the SVGs in
+    # Resources/Icon): JUCE's ICON_BIG would crop away the transparent macOS margin.
+    # Local builds show AppIcon-Dev (yellow "DEV" band) so they can't be mistaken for the
+    # installed app in the Dock; scripts/package.sh switches the shipped bundle to AppIcon.
+    PLIST_TO_MERGE "<plist><dict><key>LSMinimumSystemVersion</key><string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string><key>CFBundleIconFile</key><string>AppIcon-Dev</string></dict></plist>")
+
+set(STAGERACK_ICONS "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/AppIcon.icns"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/AppIcon-Dev.icns")
+set_source_files_properties(${STAGERACK_ICONS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+target_sources(StageRack PRIVATE ${STAGERACK_ICONS})
 
 juce_generate_juce_header(StageRack)
 

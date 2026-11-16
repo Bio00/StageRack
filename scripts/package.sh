@@ -19,6 +19,10 @@ cmake --build "$BUILD"
 rm -rf "$DIST" && mkdir -p "$DIST"
 ditto "$APP" "$DIST/StageRack.app"
 
+# Local builds carry the "DEV" icon; the shipped app gets the plain one (before signing).
+/usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$DIST/StageRack.app/Contents/Info.plist"
+rm -f "$DIST/StageRack.app/Contents/Resources/AppIcon-Dev.icns"
+
 # Seal the whole bundle (the linker signature alone does not cover Info.plist/resources,
 # and a quarantined copy could then be reported as "damaged").
 # No hardened runtime: it would block loading third-party plugins without extra entitlements.

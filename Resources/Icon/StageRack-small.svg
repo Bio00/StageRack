@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Simplified StageRack icon for 16/32 px: fewer, bigger ticks and a thicker pointer. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g transform="translate(100,100) scale(6.866667)">
+    <rect x="0" y="0" width="120" height="120" rx="27" ry="27" fill="#1b1e25"/>
+    <circle cx="27.0" cy="88.0" r="5" fill="#3ddc84"/>
+    <circle cx="18.0" cy="55.0" r="5" fill="#3ddc84"/>
+    <circle cx="34.0" cy="26.0" r="5" fill="#3ddc84"/>
+    <circle cx="86.0" cy="26.0" r="5" fill="#3a404d"/>
+    <circle cx="102.0" cy="55.0" r="5" fill="#3a404d"/>
+    <circle cx="93.0" cy="88.0" r="5" fill="#3a404d"/>
+    <circle cx="60" cy="14" r="6.5" fill="#ff7a1a"/>
+    <circle cx="60" cy="64" r="32" fill="#2f3440"/>
+    <line x1="60" y1="64" x2="60" y2="40" stroke="#ff7a1a" stroke-width="10" stroke-linecap="round"/>
+  </g>
+</svg>

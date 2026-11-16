@@ -1,3 +1,5 @@
+<img src="Resources/Icon/StageRack-1024.png" width="128" alt="Icona di StageRack">
+
 # StageRack
 
 > **Beta 0.6.0** — versione di prova. Usala in prova prima di portarla su un palco vero.
@@ -305,6 +307,10 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 L'app viene creata in `build/StageRack_artefacts/Release/StageRack.app`: è **universale** (arm64 + x86_64) e richiede **macOS 11+** (impostati in `CMakeLists.txt`, prima di `project()`; il minimo 11 viene da `std::atomic::wait` e dagli Audio Workgroup).
+
+### Icona
+L'icona (una manopola ferma esattamente sullo zero: latenza zero aggiunta) è disegnata in `Resources/Icon/StageRack.svg`, con una versione semplificata per 16-32 px in `StageRack-small.svg`. Dopo averle modificate, `scripts/make-icon.sh` rigenera `AppIcon.icns` (tutte le misure, 16-1024 px) e l'anteprima `StageRack-1024.png`; la build la copia nel bundle.
+Rigenera anche `AppIcon-Dev.icns`, la stessa icona con una fascia gialla **DEV**: la usano le build locali (`build/...`), così nel Dock non si confondono con l'app installata. `scripts/package.sh` rimette l'icona normale nell'app distribuita.
 
 ## Usarla su altri Mac
 ```bash

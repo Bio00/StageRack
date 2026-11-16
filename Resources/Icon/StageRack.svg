@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- StageRack app icon: a knob parked exactly at zero (= zero added latency).
+     macOS grid: 1024 canvas, 824 rounded square centred (100 px margin). -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g transform="translate(100,100) scale(6.866667)">
+    <rect x="0" y="0" width="120" height="120" rx="27" ry="27" fill="#1b1e25"/>
+    <circle cx="29.59" cy="90.41" r="2.5" fill="#3ddc84"/>
+    <circle cx="19.10" cy="73.29" r="2.5" fill="#3ddc84"/>
+    <circle cx="17.53" cy="53.27" r="2.5" fill="#3ddc84"/>
+    <circle cx="25.21" cy="34.72" r="2.5" fill="#3ddc84"/>
+    <circle cx="40.48" cy="21.69" r="2.5" fill="#3ddc84"/>
+    <circle cx="79.52" cy="21.69" r="2.5" fill="#3a404d"/>
+    <circle cx="94.79" cy="34.72" r="2.5" fill="#3a404d"/>
+    <circle cx="102.47" cy="53.27" r="2.5" fill="#3a404d"/>
+    <circle cx="100.90" cy="73.29" r="2.5" fill="#3a404d"/>
+    <circle cx="90.41" cy="90.41" r="2.5" fill="#3a404d"/>
+    <circle cx="60" cy="15" r="4" fill="#ff7a1a"/>
+    <circle cx="60" cy="62" r="31" fill="#2f3440"/>
+    <circle cx="60" cy="62" r="25" fill="#262a33"/>
+    <line x1="60" y1="62" x2="60" y2="40" stroke="#ff7a1a" stroke-width="6" stroke-linecap="round"/>
+  </g>
+</svg>
