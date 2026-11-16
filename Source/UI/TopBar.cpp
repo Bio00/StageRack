@@ -28,8 +28,15 @@ TopBar::TopBar (Session& s) : session (s)
     settingsButton.onClick = [this] { if (onSettings) onSettings(); };
     layoutButton.onClick   = [this] { if (onToggleLayout) onToggleLayout(); };
     layoutButton.setTooltip ("Switch racks between horizontal rows and vertical strips");
+    themeButton.onClick    = [this] { if (onToggleTheme) onToggleTheme(); };
+    themeButton.setTooltip ("Light / dark theme");
+    newButton.setTooltip ("New session (Cmd+N)");
+    openButton.setTooltip ("Open a session (Cmd+O)");
+    saveButton.setTooltip ("Save the session (Cmd+S)");
+    pluginsButton.setTooltip ("Plugin manager: scan, formats, latencies");
+    settingsButton.setTooltip ("Audio device, buffer, MIDI and app settings (Cmd+,)");
 
-    for (auto* b : { &prevButton, &nextButton, &storeButton, &newButton, &openButton, &saveButton, &pluginsButton, &settingsButton, &layoutButton })
+    for (auto* b : { &prevButton, &nextButton, &storeButton, &newButton, &openButton, &saveButton, &pluginsButton, &settingsButton, &layoutButton, &themeButton })
         addAndMakeVisible (*b);
 
     storeButton.setColour (juce::TextButton::buttonColourId, theme::accent.withAlpha (0.25f));
@@ -53,6 +60,7 @@ TopBar::TopBar (Session& s) : session (s)
     automixViewButton.setTooltip ("Automixer window: input level and automix gain of every mic, weight, group");
     automixViewButton.onClick = [this] { if (onAutomixView) onAutomixView(); };
     addAndMakeVisible (automixViewButton);
+    themeButton.setButtonText (theme::light ? "DARK" : "LIGHT");
 }
 
 void TopBar::lookAndFeelChanged()
@@ -60,6 +68,7 @@ void TopBar::lookAndFeelChanged()
     storeButton.setColour (juce::TextButton::buttonColourId, theme::accent.withAlpha (0.25f));
     automixButton.setColour (juce::TextButton::buttonOnColourId, theme::green.withAlpha (0.8f));
     masterMuteButton.setColour (juce::TextButton::buttonOnColourId, theme::red);
+    themeButton.setButtonText (theme::light ? "DARK" : "LIGHT");
 }
 
 void TopBar::setVerticalLayout (bool v)
@@ -70,7 +79,43 @@ void TopBar::setVerticalLayout (bool v)
 void TopBar::refresh()
 {
     storeButton.setColour (juce::TextButton::buttonColourId, theme::accent.withAlpha (0.25f));
+    themeButton.setButtonText (theme::light ? "DARK" : "LIGHT");
     repaint();
+}
+
+juce::Rectangle<float> TopBar::groupPill (int group) const
+{
+    // 4 x 2 grid, A-D on top
+    const auto a = groupsArea.toFloat();
+    const float w = (a.getWidth() - 3 * 3.0f) / 4.0f, h = (a.getHeight() - 4.0f) / 2.0f;
+    const int i = group - 1;
+    return { a.getX() + (float) (i % 4) * (w + 3.0f), a.getY() + (float) (i / 4) * (h + 4.0f), w, h };
+}
+
+void TopBar::mouseDown (const juce::MouseEvent& e)
+{
+    // edit groups: click = suspend / resume
+    for (int g = 1; g <= Rack::maxEditGroups; ++g)
+        if (groupPill (g).contains (e.position) && session.numRacksInEditGroup (g) > 0)
+        {
+            session.setEditGroupActive (g, ! session.isEditGroupActive (g));
+            if (auto* p = getParentComponent()) p->repaint();
+            return;
+        }
+}
+
+void TopBar::mouseMove (const juce::MouseEvent& e)
+{
+    juce::String tip;
+
+    if (groupsArea.contains (e.getPosition()))
+        tip = "Edit groups (Pro Tools style): racks of an active group follow each other's gain, mute/solo/bypass and plugins. "
+              "Click a letter to suspend / resume it, Cmd+Shift+G = all. Racks join a group from the rack menu > Edit group.";
+    else if (logoArea.contains (e.getPosition()))
+        tip = session.getFile() == juce::File() ? juce::String ("Untitled session") : session.getFile().getFullPathName();
+
+    if (tip != getTooltip())
+        setTooltip (tip);
 }
 
 void TopBar::updateMeters()
@@ -113,18 +158,44 @@ void TopBar::paint (juce::Graphics& g)
     g.setColour (theme::outline);
     g.drawHorizontalLine (getHeight() - 1, 0.0f, (float) getWidth());
 
-    // logo
-    g.setColour (theme::text);
-    g.setFont (theme::font (19.0f, true));
-    g.drawText ("STAGE", 16, 14, 80, 24, juce::Justification::centredLeft);
-    g.setColour (theme::accent);
-    g.drawText ("RACK", 82, 14, 70, 24, juce::Justification::centredLeft);
+    for (auto x : separators)
+    {
+        g.setColour (theme::outline.withAlpha (0.7f));
+        g.drawVerticalLine (x, 12.0f, (float) getHeight() - 12.0f);
+    }
 
-    g.setColour (theme::textDim);
-    g.setFont (theme::font (10.5f));
-    auto f = session.getFile();
-    g.drawText ((f == juce::File() ? juce::String ("Untitled") : f.getFileNameWithoutExtension()) + (session.isDirty() ? " *" : ""),
-                16, 40, 150, 16, juce::Justification::centredLeft, true);
+    // logo + session file (top row of the session section)
+    {
+        auto row = logoArea;
+        g.setColour (theme::text);
+        g.setFont (theme::font (16.0f, true));
+        g.drawText ("STAGE", row.removeFromLeft (52), juce::Justification::centredLeft);
+        g.setColour (theme::accent);
+        g.drawText ("RACK", row.removeFromLeft (44), juce::Justification::centredLeft);
+
+        g.setColour (session.isDirty() ? theme::amber : theme::textDim);
+        g.setFont (theme::font (11.0f, true));
+        auto f = session.getFile();
+        g.drawText ((f == juce::File() ? juce::String ("Untitled") : f.getFileNameWithoutExtension()) + (session.isDirty() ? " *" : ""),
+                    row, juce::Justification::centredLeft, true);
+    }
+
+    // edit groups A-H: filled = active, outlined = suspended, faint = unused
+    for (int grp = 1; grp <= Rack::maxEditGroups && ! groupsArea.isEmpty(); ++grp)
+    {
+        const auto pill = groupPill (grp);
+        const auto c = theme::groupColour (grp);
+        const auto used = session.numRacksInEditGroup (grp) > 0;
+        const auto on = used && session.isEditGroupActive (grp);
+
+        g.setColour (on ? c : (used ? c.withAlpha (0.12f) : theme::meterBg));
+        g.fillRoundedRectangle (pill, 3.0f);
+        g.setColour (used ? c : theme::outline);
+        if (! on) g.drawRoundedRectangle (pill.reduced (0.5f), 3.0f, 1.0f);
+        g.setColour (on ? juce::Colour (0xff101214) : (used ? c : theme::textDim.withAlpha (0.5f)));
+        g.setFont (theme::font (10.5f, true));
+        g.drawText (theme::groupLetter (grp), pill, juce::Justification::centred, false);
+    }
 
     // scene display
     {
@@ -138,18 +209,22 @@ void TopBar::paint (juce::Graphics& g)
         const auto num = cur >= 0 ? juce::String (cur + 1).paddedLeft ('0', 2) : juce::String ("--");
         const auto name = cur >= 0 ? session.getScene (cur).name : juce::String ("No scene");
 
+        const bool small = r.getWidth() < 200.0f;   // narrow window: smaller number, more room for the name
+        const float numW = small ? 36.0f : 60.0f;
+        auto inner = r.reduced (small ? 8.0f : 12.0f, 0.0f);
+
         g.setColour (theme::accent);
-        g.setFont (theme::font (30.0f, true));
-        g.drawText (num, r.reduced (12, 0).removeFromLeft (56), juce::Justification::centredLeft);
+        g.setFont (theme::font (small ? 22.0f : 30.0f, true));
+        g.drawText (num, inner.removeFromLeft (numW), juce::Justification::centredLeft);
 
         g.setColour (theme::text);
-        g.setFont (theme::font (19.0f, true));
-        g.drawText (name, r.reduced (12, 0).withTrimmedLeft (60).withTrimmedBottom (12), juce::Justification::centredLeft, true);
+        g.setFont (theme::font (small ? 16.0f : 19.0f, true));
+        g.drawFittedText (name, inner.withTrimmedBottom (12.0f).toNearestInt(), juce::Justification::centredLeft, 1, 0.75f);
 
         g.setColour (theme::textDim);
         g.setFont (theme::font (10.5f));
         const auto nextName = cur + 1 < session.getNumScenes() ? "NEXT: " + session.getScene (cur + 1).name : juce::String ("END OF LIST");
-        g.drawText (nextName, r.reduced (12, 0).withTrimmedLeft (60).withTrimmedTop (30), juce::Justification::centredLeft, true);
+        g.drawText (nextName, inner.withTrimmedTop (30.0f), juce::Justification::centredLeft, true);
     }
 
     // DSP per-core meters
@@ -162,7 +237,10 @@ void TopBar::paint (juce::Graphics& g)
 
         const auto wg = session.getEngine().hasWorkgroup();
         g.setColour (wg ? theme::green : theme::textDim);
-        g.drawText (wg ? (WorkerPool::hasPerformanceLevels() ? "P-CORE WORKGROUP" : "AUDIO WORKGROUP") : "NO WORKGROUP", head, juce::Justification::centredRight);
+        const bool roomy = head.getWidth() >= 170;
+        g.drawText (wg ? (WorkerPool::hasPerformanceLevels() ? (roomy ? "P-CORE WORKGROUP" : "P-CORE WG") : (roomy ? "AUDIO WORKGROUP" : "WG"))
+                       : (roomy ? "NO WORKGROUP" : "NO WG"),
+                    head, juce::Justification::centredRight);
 
         r.removeFromTop (4);
         auto bars = r.removeFromTop (34);
@@ -231,44 +309,81 @@ void TopBar::paint (juce::Graphics& g)
 void TopBar::resized()
 {
     auto r = getLocalBounds().reduced (10, 10);
-    r.removeFromLeft (160);
+    separators.clearQuick();
+    const int gap = 12, rowH = (r.getHeight() - 4) / 2;
 
-    // scene section
-    auto scene = r.removeFromLeft (juce::jlimit (380, 440, r.getWidth() / 3));
-    prevButton.setBounds (scene.removeFromLeft (38).reduced (0, 6));
-    scene.removeFromLeft (6);
-    storeButton.setBounds (scene.removeFromRight (64).reduced (0, 6));
-    scene.removeFromRight (6);
-    nextButton.setBounds (scene.removeFromRight (38).reduced (0, 6));
-    scene.removeFromRight (6);
-    sceneArea = scene;
+    // minimum widths of the flexible parts; what is left goes to the scene, device and DSP areas
+    const int sessionMin = 172, sceneMin = 270, cpuMin = 72, deviceMin = 92;
+    const int liveW = 68 + 4 + 84 + 6 + 78, engineButtonsW = 80, viewW = 80;
+    const int fixed = sessionMin + liveW + engineButtonsW + viewW + 4 * gap + 2 * 6 + sceneMin + cpuMin + deviceMin;
+    const int extra = juce::jmax (0, r.getWidth() - fixed);
 
-    r.removeFromLeft (16);
+    const int sceneExtra   = juce::jmin (330, extra / 2);
+    const int sessionExtra = juce::jmin (50, (extra - sceneExtra) / 4);
+    const int cpuExtra     = juce::jmin (140, (extra - sceneExtra - sessionExtra) / 3);   // the rest goes to the device info
 
-    // right: buttons
-    auto buttons = r.removeFromRight (330);
-    auto top = buttons.removeFromTop (buttons.getHeight() / 2).reduced (0, 2);
-    auto bottom = buttons.reduced (0, 2);
-    const int w3 = top.getWidth() / 3;
-    newButton.setBounds (top.removeFromLeft (w3).reduced (2, 0));
-    openButton.setBounds (top.removeFromLeft (w3).reduced (2, 0));
-    saveButton.setBounds (top.reduced (2, 0));
-    pluginsButton.setBounds (bottom.removeFromLeft (w3).reduced (2, 0));
-    settingsButton.setBounds (bottom.removeFromLeft (w3).reduced (2, 0));
-    layoutButton.setBounds (bottom.reduced (2, 0));
-
-    r.removeFromRight (8);
-    masterMuteButton.setBounds (r.removeFromRight (78).reduced (0, 2));
-    r.removeFromRight (8);
+    auto separator = [this, &r, gap]
     {
-        auto am = r.removeFromRight (84);
-        automixButton.setBounds (am.removeFromTop (am.getHeight() / 2).reduced (0, 2));
-        automixViewButton.setBounds (am.reduced (0, 2));
-    }
-    r.removeFromRight (12);
+        separators.add (r.getX() + gap / 2);
+        r.removeFromLeft (gap);
+    };
 
-    cpuArea = r.removeFromLeft (juce::jmin (220, r.getWidth() / 2));
-    r.removeFromLeft (12);
+    auto stacked = [rowH] (juce::Rectangle<int> col, juce::Button& top, juce::Button& bottom)
+    {
+        top.setBounds (col.removeFromTop (rowH));
+        bottom.setBounds (col.removeFromBottom (rowH));
+    };
+
+    // --- session: logo + file name, NEW / OPEN / SAVE
+    {
+        auto sec = r.removeFromLeft (sessionMin + sessionExtra);
+        logoArea = sec.removeFromTop (rowH);
+        auto row = sec.removeFromBottom (rowH);
+        const int w3 = (row.getWidth() - 8) / 3;
+        newButton.setBounds (row.removeFromLeft (w3));
+        row.removeFromLeft (4);
+        openButton.setBounds (row.removeFromLeft (w3));
+        row.removeFromLeft (4);
+        saveButton.setBounds (row);
+    }
+    separator();
+
+    // --- scenes
+    {
+        auto scene = r.removeFromLeft (sceneMin + sceneExtra);
+        prevButton.setBounds (scene.removeFromLeft (30).reduced (0, 6));
+        scene.removeFromLeft (4);
+        storeButton.setBounds (scene.removeFromRight (58).reduced (0, 6));
+        scene.removeFromRight (4);
+        nextButton.setBounds (scene.removeFromRight (30).reduced (0, 6));
+        scene.removeFromRight (4);
+        sceneArea = scene;
+    }
+    separator();
+
+    // --- live: master mute, automixer, edit groups
+    {
+        auto sec = r.removeFromLeft (liveW);
+        masterMuteButton.setBounds (sec.removeFromLeft (68));
+        sec.removeFromLeft (4);
+        stacked (sec.removeFromLeft (84), automixButton, automixViewButton);
+        sec.removeFromLeft (6);
+        groupsArea = sec;
+    }
+    separator();
+
+    // --- view (rightmost), then the audio engine in between
+    {
+        auto view = r.removeFromRight (viewW);
+        stacked (view, layoutButton, themeButton);
+        separators.add (r.getRight() - gap / 2);
+        r.removeFromRight (gap);
+    }
+
+    stacked (r.removeFromRight (engineButtonsW), pluginsButton, settingsButton);
+    r.removeFromRight (gap);
+    cpuArea = r.removeFromLeft (cpuMin + cpuExtra);
+    r.removeFromLeft (gap);
     deviceArea = r.withSizeKeepingCentre (r.getWidth(), 36);
 }
 

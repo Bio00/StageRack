@@ -166,6 +166,11 @@ public:
 
     float uiSize = 1.0f;                     // rack height (horizontal) / width (vertical) factor
 
+    // Edit group (Pro Tools style, message thread only): racks of the same group (1..8 = A..H,
+    // 0 = none) follow each other's edits while the group is active (Session::isEditGroupActive).
+    int editGroup = 0;
+    static constexpr int maxEditGroups = 8;
+
     // Chaining: input from another rack's output instead of the device (-1 = device).
     // Set through AudioEngine::setRackInputSource (it rebuilds the processing stages).
     std::atomic<int> inputRackId { -1 };

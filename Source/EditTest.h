@@ -265,6 +265,113 @@ inline int runEditSelfTest()
         }
     }
 
+    // --- Shift on a slot of a selected rack: plugin on/off on all selected racks (like Alt)
+    using Link = EditController::Link;
+    const juce::ModifierKeys shift (juce::ModifierKeys::shiftModifier | juce::ModifierKeys::leftButtonModifier);
+    paintAll();
+    slotB = slotOf (*rcB, 0);
+
+    if (slotB != nullptr)
+    {
+        const juce::Point<float> power (2.0f + 5.0f + 9.0f, 2.0f + 4.0f + 9.0f);
+        setMods (shift);
+        mouse (*slotB, power, power, shift, 0);
+        check (b.getSlot (0).bypassed && c.getSlot (0).bypassed && ! a.getSlot (0).bypassed && ! d.getSlot (0).bypassed,
+               "Shift-click plugin power on B: off in B and C");
+        mouse (*slotB, power, power, shift, 0);
+        check (! b.getSlot (0).bypassed && ! c.getSlot (0).bypassed, "Shift-click again: back on");
+    }
+
+    check (edit.linkedSlots (b, 0, shift, Link::plugin).size() == 1 && edit.linkedSlots (b, 0, shift, Link::mix).empty(),
+           "Shift links plugin insert/remove/on-off only (not gain or parameters: Shift = fine there)");
+
+    // --- edit groups: A and D in group A, nothing selected
+    setMods ({});
+    edit.clearSelection();
+    a.editGroup = d.editGroup = 1;
+    a.muted = d.muted = false;
+    a.gainDb = 0.0f; d.gainDb = -3.0f;
+    paintAll();
+    auto* gainA = dynamic_cast<juce::Slider*> (findChild (*comps[0], [] (auto& ch) { return dynamic_cast<juce::Slider*> (&ch) != nullptr; }));
+    gainA->setValue (0.0, juce::dontSendNotification);
+    gainA->setValue (-5.0, juce::sendNotificationSync);
+    check (std::abs (a.gainDb - -5.0f) < 0.01f && std::abs (d.gainDb - -8.0f) < 0.01f && std::abs (b.gainDb - -20.0f) < 0.01f,
+           "group gain: D follows relatively (-3 -> " + juce::String (d.gainDb.load(), 1) + "), B untouched");
+
+    press (button (*comps[0], "M"), plain);
+    check (a.muted && d.muted && ! b.muted, "group mute: A and D");
+    press (button (*comps[0], "M"), plain);
+
+    const auto dIn = d.inputChannel.load();
+    auto* inA = dynamic_cast<juce::ComboBox*> (findChild (*comps[0], [] (auto& ch) { return dynamic_cast<juce::ComboBox*> (&ch) != nullptr; }));
+    inA->setSelectedId (1, juce::dontSendNotification);
+    inA->onChange();
+    check (a.inputChannel < 0 && d.inputChannel == dIn, "group never re-routes: input of A only");
+
+    if (auto* slotA = slotOf (*comps[0], 0))
+    {
+        const juce::Point<float> power (2.0f + 5.0f + 9.0f, 2.0f + 4.0f + 9.0f);
+        mouse (*slotA, power, power, plain, 0);
+        check (a.getSlot (0).bypassed && d.getSlot (0).bypassed && ! b.getSlot (0).bypassed, "group plugin power: A and D off");
+        mouse (*slotA, power, power, plain, 0);
+    }
+
+    session.setEditGroupActive (1, false);
+    press (button (*comps[0], "M"), plain);
+    check (a.muted && ! d.muted, "group suspended: mute A only");
+    press (button (*comps[0], "M"), plain);
+    session.setEditGroupActive (1, true);
+
+    {
+        const auto t = session.toTree();
+        bool saved = false;
+        for (const auto& rt : t.getChildWithName ("RACKS"))
+            saved = saved || (int) rt["editGroup"] == 1;
+        check (saved && t.hasProperty ("groupsOff"), "edit groups saved with the session");
+    }
+
+    // a parameter moved in A's plugin window (not on the rack): D's AUDelay follows
+    {
+        auto* pa = a.getPlugin (0);
+        auto* pdd = d.getPlugin (0);
+        auto* pbb = b.getPlugin (0);
+        int idx = -1;
+        for (int n = 0; n < pa->getParameters().size() && idx < 0; ++n)
+            if (pa->getParameters()[n]->isAutomatable())
+                idx = n;
+
+        edit.syncGroupParameters();   // first look: snapshots
+        const auto bBefore = pbb->getParameters()[idx]->getValue();
+        const auto target = pa->getParameters()[idx]->getValue() > 0.5f ? 0.2f : 0.8f;
+        pa->getParameters()[idx]->setValueNotifyingHost (target);
+        edit.syncGroupParameters();
+        check (std::abs (pdd->getParameters()[idx]->getValue() - pa->getParameters()[idx]->getValue()) < 0.001f
+                 && std::abs (pbb->getParameters()[idx]->getValue() - bBefore) < 0.001f,
+               "plugin window edit on A (" + pa->getParameters()[idx]->getName (24) + "): D follows, B (other group) untouched");
+
+        // both changed at once (e.g. a scene): nothing is mirrored
+        pa->getParameters()[idx]->setValueNotifyingHost (0.3f);
+        pdd->getParameters()[idx]->setValueNotifyingHost (0.6f);
+        edit.syncGroupParameters();
+        check (std::abs (pa->getParameters()[idx]->getValue() - pdd->getParameters()[idx]->getValue()) > 0.1f,
+               "two instances changed together: left alone");
+
+        // suspended group: no mirroring
+        session.setEditGroupActive (1, false);
+        edit.syncGroupParameters();
+        pa->getParameters()[idx]->setValueNotifyingHost (0.9f);
+        edit.syncGroupParameters();
+        check (std::abs (pdd->getParameters()[idx]->getValue() - 0.6f) < 0.01f, "suspended group: plugin window edits stay on A");
+        session.setEditGroupActive (1, true);
+    }
+
+    // delete the selected slot of A: D's AUDelay goes too, in one undo step
+    edit.selectSlot (a.getId(), 0);
+    edit.deleteSelection();
+    check (a.getPlugin (0) == nullptr && d.getPlugin (0) == nullptr && b.getPlugin (0) != nullptr, "group remove: A and D, B kept");
+    session.undo();
+    check (a.getPlugin (0) != nullptr && d.getPlugin (0) != nullptr, "one undo brings both back");
+
     setMods ({});
     std::cout << (failures == 0 ? "ALL PASSED" : juce::String (failures) + " FAILED") << std::endl;
     std::fflush (nullptr);

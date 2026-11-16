@@ -748,7 +748,14 @@ void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int n
         else
         {
             copyIn (0, inCh);
-            copyIn (1, stereoIn ? inCh + 1 : inCh);
+
+            // stereo input whose second channel the device does not have (e.g. the Mac's mono
+            // microphone on "IN 1-2"): both sides get the first one rather than one side silent
+            if (const int right = stereoIn ? inCh + 1 : inCh;
+                stereoIn && ! (juce::isPositiveAndBelow (right, numDeviceInputs) && deviceInputs[right] != nullptr))
+                buffer.copyFrom (1, 0, buffer, 0, 0, numSamples);
+            else
+                copyIn (1, right);
         }
 
         // input trim (before the plugins, so the meter shows what they get)

@@ -165,7 +165,29 @@ public:
                 r.automixGroup = i < 3 ? 1 : 0;
             }
             engine.getRack (2).automixWeightDb = -6.0f;
+            engine.getRack (0).editGroup = engine.getRack (1).editGroup = 1;   // group A active
+            engine.getRack (2).editGroup = 2;                                   // group B suspended
+            session.setEditGroupActive (2, false);
             engine.prepare (48000.0, 64, {});
+
+            // a few real plugins (Apple's), so the slots show names and parameters
+            for (auto [rackIndex, slot, id] : { std::tuple { 0, 0, "AudioUnit:Effects/aufx,dely,appl" },
+                                                std::tuple { 0, 1, "AudioUnit:Effects/aufx,dcmp,appl" },
+                                                std::tuple { 1, 0, "AudioUnit:Effects/aufx,dcmp,appl" },
+                                                std::tuple { 3, 2, "AudioUnit:Effects/aufx,dely,appl" } })
+            {
+                juce::OwnedArray<juce::PluginDescription> found;
+                for (auto* f : pm->getFormatManager().getFormats())
+                    if (f->getName() == "AudioUnit")
+                        f->findAllTypesForFile (found, id);
+                juce::String err;
+                if (! found.isEmpty())
+                    if (auto p = pm->getFormatManager().createPluginInstance (*found[0], 48000.0, 64, err))
+                    {
+                        Rack::configurePlugin (*p, 48000.0, 64);
+                        engine.getRack (rackIndex).setPlugin (slot, std::move (p));
+                    }
+            }
 
             // rack 1 talks loud, rack 2 softer, rack 3 only noise
             juce::AudioBuffer<float> in (4, 64), out (2, 64);
@@ -189,10 +211,15 @@ public:
                 theme::LookAndFeel lnf;
                 juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
 
-                for (bool vertical : { false, true })
+                for (int variant : { 0, 1, 2, 3 })   // horizontal, vertical, short horizontal, narrow vertical
                 {
+                    const bool vertical = variant == 1 || variant == 3;
+                    const float size = variant >= 2 ? (vertical ? 0.55f : 0.5f) : 1.0f;
+                    for (int i = 0; i < 4; ++i)
+                        engine.getRack (i).uiSize = size;
+                    const int rw = juce::roundToInt (RackComponent::baseWidth * size), rh = juce::roundToInt (RackComponent::baseHeight * size);
                     juce::Component window;
-                    const int w = vertical ? 4 * RackComponent::baseWidth : 1400, h = vertical ? 700 : 4 * RackComponent::baseHeight + 76;
+                    const int w = vertical ? 4 * rw : 1400, h = vertical ? 700 : 4 * rh + 76;
                     window.setBounds (0, 0, w, h);
                     TopBar bar (session);
                     if (! vertical) { bar.setBounds (0, 0, w, TopBar::preferredHeight); window.addAndMakeVisible (bar); }
@@ -202,8 +229,8 @@ public:
                     {
                         auto* rc = comps.add (new RackComponent (session, edit, engine.getRack (i), i));
                         rc->setVertical (vertical);
-                        rc->setBounds (vertical ? juce::Rectangle<int> (i * RackComponent::baseWidth, 0, RackComponent::baseWidth, h)
-                                                : juce::Rectangle<int> (0, TopBar::preferredHeight + i * RackComponent::baseHeight, w, RackComponent::baseHeight));
+                        rc->setBounds (vertical ? juce::Rectangle<int> (i * rw, 0, rw, h)
+                                                : juce::Rectangle<int> (0, TopBar::preferredHeight + i * rh, w, rh));
                         window.addAndMakeVisible (rc);
                         rc->updateMeters();
                     }
@@ -214,7 +241,21 @@ public:
                     g.fillAll (theme::bg);
                     window.paintEntireComponent (g, true);
                     juce::PNGImageFormat png;
-                    juce::FileOutputStream os (dir.getChildFile (juce::String ("racks-") + (vertical ? "v-" : "h-") + (light ? "light.png" : "dark.png")));
+                    juce::FileOutputStream os (dir.getChildFile (juce::String ("racks-") + (vertical ? "v-" : "h-") + (variant >= 2 ? "small-" : "") + (light ? "light.png" : "dark.png")));
+                    os.setPosition (0); os.truncate();
+                    png.writeImageToStream (img, os);
+                }
+
+                for (int width : { 1100, 1300, 1700 })   // top bar at the minimum window width and wider
+                {
+                    TopBar bar (session);
+                    bar.setBounds (0, 0, width, TopBar::preferredHeight);
+                    bar.updateMeters();
+                    juce::Image img (juce::Image::ARGB, width, TopBar::preferredHeight, true);
+                    juce::Graphics g (img);
+                    bar.paintEntireComponent (g, true);
+                    juce::PNGImageFormat png;
+                    juce::FileOutputStream os (dir.getChildFile ("topbar-" + juce::String (width) + (light ? "-light.png" : "-dark.png")));
                     os.setPosition (0); os.truncate();
                     png.writeImageToStream (img, os);
                 }

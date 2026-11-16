@@ -617,6 +617,23 @@ inline int runSelfTest()
         e.audioDeviceStopped();
     }
 
+    // 5c: stereo rack on a one-channel device (Mac microphone): both sides get channel 1
+    {
+        AudioEngine e;
+        auto& r = e.addRack();
+        r.inputChannel = 0; r.stereoInput = true; r.outputChannel = 0;
+        e.prepare (sr, bs, {});
+        for (int k = 0; k < 20; ++k)
+        {
+            in.clear();
+            for (int i = 0; i < bs; ++i) in.setSample (0, i, 0.5f);
+            e.audioDeviceIOCallbackWithContext (in.getArrayOfReadPointers(), 1, out.getArrayOfWritePointers(), 4, bs, ctx);
+        }
+        check (std::abs (out.getSample (0, bs - 1) - 0.5f) < 0.01f && std::abs (out.getSample (1, bs - 1) - 0.5f) < 0.01f,
+               "stereo rack on a mono device: L and R both carry channel 1");
+        e.audioDeviceStopped();
+    }
+
     // 0: updater version order (semver: release > beta.2 > beta.1 > beta > alpha)
     {
         using update::compareVersions;

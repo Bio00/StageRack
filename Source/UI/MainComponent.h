@@ -81,6 +81,7 @@ private:
     std::unique_ptr<TopBar> topBar;
     std::unique_ptr<SceneListComponent> sceneList;
     juce::Viewport rackViewport;
+    void mouseDown (const juce::MouseEvent&) override;   // click on empty space = deselect
     juce::Component rackContainer;
     juce::OwnedArray<RackComponent> rackComponents;
     /** "+ ADD RACK": click adds one, right-click offers several at once (consecutive inputs). */

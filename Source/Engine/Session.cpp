@@ -345,13 +345,13 @@ void Session::removeRack (Rack& rack)
 }
 
 void Session::loadPlugin (Rack& rack, int slot, const juce::PluginDescription& desc,
-                          std::function<void (const juce::String&)> done)
+                          std::function<void (const juce::String&)> done, std::shared_ptr<bool> sharedUndoStep)
 {
     const auto rackId = rack.getId();
     const auto sr = rack.getSampleRate();
     const auto bs = rack.getBlockSize();
 
-    plugins.createPlugin (desc, sr, bs, [this, rackId, slot, done] (std::unique_ptr<juce::AudioPluginInstance> p, const juce::String& error)
+    plugins.createPlugin (desc, sr, bs, [this, rackId, slot, done, sharedUndoStep] (std::unique_ptr<juce::AudioPluginInstance> p, const juce::String& error)
     {
         auto* target = engine.findRack (rackId);
 
@@ -373,7 +373,19 @@ void Session::loadPlugin (Rack& rack, int slot, const juce::PluginDescription& d
         retirePlugin (target->setPlugin (slot, std::move (p))); // previous plugin is parked
         target->getSlot (slot).hopCalls = hopCalls;
         target->getSlot (slot).hopPhase = hopPhase;
-        markDirty();
+
+        if (sharedUndoStep != nullptr && *sharedUndoStep)
+        {
+            dirty = true;
+            amendUndoState();   // same insert on several racks: one undo step
+            notify();
+        }
+        else
+        {
+            if (sharedUndoStep != nullptr)
+                *sharedUndoStep = true;
+            markDirty();
+        }
 
         if (done) done ({});
     });
@@ -386,6 +398,15 @@ void Session::removePlugin (Rack& rack, int slot)
 
     retirePlugin (rack.setPlugin (slot, nullptr));
     markDirty();
+}
+
+void Session::removePlugins (const std::vector<std::pair<Rack*, int>>& where)
+{
+    for (auto& [r, slot] : where)
+        retirePlugin (r->setPlugin (slot, nullptr));   // retirePlugin closes the editor
+
+    if (! where.empty())
+        markDirty();
 }
 
 void Session::retirePlugin (std::unique_ptr<juce::AudioPluginInstance> p)
@@ -514,6 +535,7 @@ void Session::recallScene (int index)
     if (! juce::isPositiveAndBelow (index, getNumScenes()))
         return;
 
+    ++recallCount;
     applySceneData (scenes[(size_t) index].data);
     currentScene = index;
     amendUndoState();   // a recall is not an edit: undo never jumps back across it
@@ -566,6 +588,16 @@ void Session::moveScene (int from, int to)
 }
 
 //==============================================================================
+int Session::numRacksInEditGroup (int group) const
+{
+    int n = 0;
+
+    for (int i = 0; i < engine.getNumRacks(); ++i)
+        n += engine.getRack (i).editGroup == group ? 1 : 0;
+
+    return n;
+}
+
 void Session::newSession()
 {
     ++*loadGeneration;
@@ -584,6 +616,7 @@ void Session::newSession()
     engine.masterGainDb = 0.0f;
     engine.automixEnabled = true;
     engine.automixOverlap = 0;
+    editGroupsOff = 0;
     engine.addRack();
     dirty = false;
     ++documentGeneration;
@@ -649,6 +682,7 @@ juce::ValueTree Session::rackSettingsToTree (const Rack& r) const
       .setProperty ("size", r.uiSize, nullptr)
       .setProperty ("inRack", r.inputRackId.load(), nullptr)
       .setProperty ("latGroup", r.latencyGroup.load(), nullptr)
+      .setProperty ("editGroup", r.editGroup, nullptr)
       .setProperty ("amGroup", r.automixGroup.load(), nullptr)
       .setProperty ("amWeight", r.automixWeightDb.load(), nullptr);
     return rt;
@@ -678,6 +712,7 @@ void Session::applyRackSettings (Rack& r, const juce::ValueTree& rt)
     r.uiSize = rt.hasProperty ("size") ? (float) rt["size"] : 1.0f;
     r.inputRackId = rt.hasProperty ("inRack") ? (int) rt["inRack"] : -1;
     r.latencyGroup = (int) rt["latGroup"];
+    r.editGroup = juce::jlimit (0, Rack::maxEditGroups, (int) rt["editGroup"]);
     r.automixGroup = juce::jlimit (0, Rack::maxAutomixGroups, (int) rt["amGroup"]);
     r.automixWeightDb = (float) rt["amWeight"];
 }
@@ -912,7 +947,8 @@ juce::ValueTree Session::toTree() const
         .setProperty ("master", engine.masterGainDb.load(), nullptr)
         .setProperty ("currentScene", currentScene, nullptr)
         .setProperty ("automix", engine.automixEnabled.load(), nullptr)
-        .setProperty ("amOverlap", engine.automixOverlap.load(), nullptr);
+        .setProperty ("amOverlap", engine.automixOverlap.load(), nullptr)
+        .setProperty ("groupsOff", editGroupsOff, nullptr);
 
     juce::ValueTree racksTree (idRacks);
 
@@ -973,6 +1009,7 @@ void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bo
     engine.masterGainDb = 0.0f;   // no master fader any more: old sessions play at unity
     engine.automixEnabled = root.hasProperty ("automix") ? (bool) root["automix"] : true;
     engine.automixOverlap = juce::jlimit (0, 2, (int) root["amOverlap"]);
+    editGroupsOff = (int) root["groupsOff"];
     ++*loadGeneration;
 
     for (const auto& rt : root.getChildWithName (idRacks))
@@ -1022,7 +1059,8 @@ Session::UndoState Session::captureUndoState() const
     UndoState u;
     u.tree = juce::ValueTree ("UNDO");
     u.tree.setProperty ("automix", engine.automixEnabled.load(), nullptr)
-          .setProperty ("amOverlap", engine.automixOverlap.load(), nullptr);
+          .setProperty ("amOverlap", engine.automixOverlap.load(), nullptr)
+          .setProperty ("groupsOff", editGroupsOff, nullptr);
 
     for (int i = 0; i < engine.getNumRacks(); ++i)
     {
@@ -1162,6 +1200,7 @@ void Session::applyUndoState (const UndoState& u)
 
     engine.automixEnabled = (bool) u.tree["automix"];
     engine.automixOverlap = juce::jlimit (0, 2, (int) u.tree["amOverlap"]);
+    editGroupsOff = (int) u.tree["groupsOff"];
 
     // target instance of every (rack, slot)
     std::map<std::pair<int, int>, juce::int64> wanted;

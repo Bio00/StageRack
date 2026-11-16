@@ -15,6 +15,7 @@ MainComponent::MainComponent()
 {
     auto& settings = pluginManager.getSettings();
     theme::setLight (settings.getBoolValue ("lightTheme", false));
+    theme::tintRacks = settings.getBoolValue ("tintRacks", true);
     lnf.applyColours();
     juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
 
@@ -53,6 +54,7 @@ MainComponent::MainComponent()
     topBar->onSettings = [this] { openSettings(); };
     topBar->onToggleLayout = [this] { setVerticalLayout (! verticalLayout); };
     topBar->onAutomixView = [this] { openAutomixer(); };
+    topBar->onToggleTheme = [this] { toggleLightTheme(); };
     topBar->deviceStatus = [this] { return deviceGuard != nullptr ? deviceGuard->getStatus() : juce::String(); };
     addAndMakeVisible (*topBar);
 
@@ -66,6 +68,7 @@ MainComponent::MainComponent()
     rackViewport.setScrollBarsShown (true, false);
     rackViewport.setScrollBarThickness (8);
     addAndMakeVisible (rackViewport);
+    rackViewport.addMouseListener (this, true);   // clicks on the empty space around the racks
 
     lookAndFeelChanged();
     addRackButton.setButtonText ("+  ADD RACK");
@@ -92,6 +95,17 @@ void MainComponent::openAutomixer()
         automixerWindow = std::make_unique<AutomixerWindow> (*session);
     automixerWindow->setVisible (true);
     automixerWindow->toFront (true);
+}
+
+void MainComponent::mouseDown (const juce::MouseEvent& e)
+{
+    // a click on empty space (not on a rack, a slot or a control) drops the selection
+    auto* c = e.eventComponent;
+    const bool empty = c == this || c == &rackViewport || c == &rackContainer
+                    || c == rackContainer.getParentComponent();   // the viewport's content holder
+
+    if (empty && ! e.mods.isPopupMenu())
+        edit->clearSelection();
 }
 
 void MainComponent::toggleLightTheme()
@@ -224,6 +238,7 @@ void MainComponent::commonConstructorTail()
 
 MainComponent::~MainComponent()
 {
+    rackViewport.removeMouseListener (this);
     prepareToQuit();
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
 }
@@ -453,6 +468,7 @@ void MainComponent::timerCallback()
     }
 
     topBar->updateMeters();
+    edit->syncGroupParameters();   // a knob turned in a plugin window: same knob in its edit group
 
     for (auto* rc : rackComponents)
         if (rc->isShowing())
@@ -489,6 +505,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress ('z', cmd, 0))         { session->undo(); return true; }
     if (key == juce::KeyPress ('z', cmd | shift, 0)) { session->redo(); return true; }
     if (key == juce::KeyPress ('m', cmd | shift, 0)) { engine.masterMuted = ! engine.masterMuted.load(); topBar->updateMeters(); return true; }
+    if (key == juce::KeyPress ('g', cmd | shift, 0)) { commands.invokeDirectly (cmd::editGroupsOn, false); return true; }
     if (key == juce::KeyPress ('c', cmd, 0)) { edit->copy(); return true; }
     if (key == juce::KeyPress ('v', cmd, 0)) { edit->paste(); return true; }
     if (key == juce::KeyPress ('d', cmd, 0)) { edit->duplicate(); return true; }
@@ -718,17 +735,17 @@ juce::PopupMenu MainComponent::AppMenu::getMenuForIndex (int index, const juce::
         case 1:  return owner.commandItems ({ cmd::undo, cmd::redo, 0, cmd::copy, cmd::paste, cmd::duplicate, cmd::deleteSelection, 0,
                                               cmd::selectAll, cmd::deselect, 0,
                                               cmd::consecutiveInMono, cmd::consecutiveInStereo, cmd::consecutiveOutMono, cmd::consecutiveOutStereo });
-        case 2:  return owner.commandItems ({ cmd::addRack, cmd::addRacks, 0, cmd::biggerRacks, cmd::smallerRacks });
+        case 2:  return owner.commandItems ({ cmd::addRack, cmd::addRacks, 0, cmd::biggerRacks, cmd::smallerRacks, 0, cmd::editGroupsOn });
         case 3:  return owner.commandItems ({ cmd::nextScene, cmd::prevScene, 0, cmd::storeScene, cmd::addScene });
         case 4:  return owner.commandItems ({ cmd::masterMute, cmd::automixOnOff, 0, cmd::audioSettings, cmd::pluginManager });
-        case 5:  return owner.commandItems ({ cmd::toggleLayout, cmd::toggleScenes, cmd::automixerWindow, 0, cmd::lightTheme });
+        case 5:  return owner.commandItems ({ cmd::toggleLayout, cmd::toggleScenes, cmd::automixerWindow, 0, cmd::lightTheme, cmd::tintRacks });
         default: return {};
     }
 }
 
 void MainComponent::getAllCommands (juce::Array<juce::CommandID>& ids)
 {
-    for (juce::CommandID id = cmd::newSession; id <= cmd::lightTheme; ++id)
+    for (juce::CommandID id = cmd::newSession; id <= cmd::lastCommand; ++id)
         ids.add (id);
 }
 
@@ -777,6 +794,17 @@ void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommand
         case cmd::toggleScenes:        set ("Scene List", "View", 'l', c); info.setTicked (! scenesCollapsed); break;
         case cmd::automixerWindow:     set ("Automixer Window", "View"); break;
         case cmd::lightTheme:          set ("Light Theme", "View"); info.setTicked (theme::light); break;
+        case cmd::tintRacks:           set ("Tinted Racks", "View"); info.setTicked (theme::tintRacks); break;
+        case cmd::editGroupsOn:
+        {
+            bool anyUsed = false, anyOn = false;
+            for (int g = 1; g <= Rack::maxEditGroups; ++g)
+                if (session->numRacksInEditGroup (g) > 0) { anyUsed = true; anyOn = anyOn || session->isEditGroupActive (g); }
+            set ("Edit Groups Active", "Rack", 'g', c | s);
+            info.setActive (anyUsed);
+            info.setTicked (anyOn);
+            break;
+        }
         default: break;
     }
 }
@@ -828,6 +856,23 @@ bool MainComponent::perform (const InvocationInfo& info)
         case cmd::toggleScenes:        setScenesCollapsed (! scenesCollapsed); break;
         case cmd::automixerWindow:     openAutomixer(); break;
         case cmd::lightTheme:          toggleLightTheme(); break;
+        case cmd::tintRacks:
+            theme::tintRacks = ! theme::tintRacks;
+            pluginManager.getSettings().setValue ("tintRacks", theme::tintRacks);
+            repaint();
+            for (auto* c : getChildren()) c->repaint();
+            break;
+        case cmd::editGroupsOn:
+        {
+            // suspend all groups (one click before a solo edit) / resume them
+            bool anyOn = false;
+            for (int g = 1; g <= Rack::maxEditGroups; ++g)
+                anyOn = anyOn || (session->numRacksInEditGroup (g) > 0 && session->isEditGroupActive (g));
+            for (int g = 1; g <= Rack::maxEditGroups; ++g)
+                if (session->numRacksInEditGroup (g) > 0 && session->isEditGroupActive (g) == anyOn)
+                    session->setEditGroupActive (g, ! anyOn);
+            break;
+        }
         default:                       return false;
     }
 

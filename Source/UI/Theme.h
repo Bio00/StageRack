@@ -21,6 +21,29 @@ namespace stagerack::theme
     inline juce::Colour meterBg     { 0xff0c0d0f };
     inline juce::Colour display     { 0xff0e1013 };   // scene display in the top bar
     inline bool light = false;
+    inline bool tintRacks = true;   // whole rack tinted with its colour (View > Tinted Racks)
+
+    /** A rack surface (panel, slot) tinted with the rack colour: greyish in dark, pastel in light. */
+    inline juce::Colour tinted (juce::Colour base, juce::Colour rackColour, float amount)
+    {
+        if (! tintRacks)
+            return base;
+
+        return base.interpolatedWith (rackColour.withMultipliedSaturation (light ? 0.85f : 0.7f), amount);
+    }
+
+    /** Edit group colours, A..H. */
+    inline juce::Colour groupColour (int group)
+    {
+        static const juce::uint32 c[] = { 0xff5b8cff, 0xffff9f43, 0xff2ed573, 0xffd980fa,
+                                          0xff1dd1a1, 0xffff6b81, 0xfffeca57, 0xff9aa5b1 };
+        return juce::Colour (c[(size_t) juce::jlimit (0, 7, group - 1)]);
+    }
+
+    inline juce::String groupLetter (int group)
+    {
+        return juce::String::charToString ((juce::juce_wchar) ('A' + juce::jlimit (0, 25, group - 1)));
+    }
 
     inline void setLight (bool shouldBeLight)
     {

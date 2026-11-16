@@ -27,8 +27,10 @@ public:
     PluginManager& getPluginManager() noexcept  { return plugins; }
 
     //==============================================================================
-    void loadPlugin (Rack&, int slot, const juce::PluginDescription&, std::function<void (const juce::String& error)> done = {});
+    void loadPlugin (Rack&, int slot, const juce::PluginDescription&, std::function<void (const juce::String& error)> done = {},
+                     std::shared_ptr<bool> sharedUndoStep = {});   // several loads, one undo step (first arrival records it)
     void removePlugin (Rack&, int slot);
+    void removePlugins (const std::vector<std::pair<Rack*, int>>&);   // one undo step
     void removeRack (Rack&);
     Rack& addRack();
     /** Adds `count` racks in one edit (one undo step). Inputs: consecutive, after the highest
@@ -111,8 +113,16 @@ public:
     int getPendingLoads() const noexcept            { return *pendingLoads; }
     /** Changes whenever the document is replaced or saved (new, open, save). */
     int getDocumentGeneration() const noexcept      { return documentGeneration; }
+    int getLoadGeneration() const noexcept          { return *loadGeneration; }   // new/opened session
+    int getRecallCount() const noexcept             { return recallCount; }       // scenes recalled so far
     juce::File getFile() const                      { return file; }
     bool isDirty() const noexcept                   { return dirty; }
+
+    /** Edit groups (Rack::editGroup 1..8): active ones link edits across their racks.
+        Saved with the session; switching one on/off is an undo step. */
+    bool isEditGroupActive (int group) const noexcept { return group > 0 && (editGroupsOff & (1 << group)) == 0; }
+    void setEditGroupActive (int group, bool active)  { editGroupsOff = active ? (editGroupsOff & ~(1 << group)) : (editGroupsOff | (1 << group)); markDirty(); }
+    int numRacksInEditGroup (int group) const;
     void markDirty();
 
     //==============================================================================
@@ -161,9 +171,10 @@ private:
     int currentScene = -1;
     juce::File file;
     bool dirty = false;
+    int editGroupsOff = 0;   // bit g set = group g suspended
     std::shared_ptr<int> loadGeneration = std::make_shared<int> (0);
     std::shared_ptr<int> pendingLoads = std::make_shared<int> (0);
-    int documentGeneration = 0;
+    int documentGeneration = 0, recallCount = 0;
 
     class LiveRespreader;
     std::unique_ptr<LiveRespreader> respreader;

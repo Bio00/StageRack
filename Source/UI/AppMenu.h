@@ -16,7 +16,8 @@ namespace cmd
         addRack, addRacks, biggerRacks, smallerRacks,
         nextScene, prevScene, storeScene, addScene,
         masterMute, automixOnOff, audioSettings, pluginManager,
-        toggleLayout, toggleScenes, automixerWindow, lightTheme
+        toggleLayout, toggleScenes, automixerWindow, lightTheme, tintRacks, editGroupsOn,
+        lastCommand = editGroupsOn
     };
 
     /** Editing commands act on the racks only while the main window has the keyboard: the same

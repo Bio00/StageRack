@@ -30,14 +30,30 @@ public:
     /** Racks a command applies to: the selection, or the slot's rack. */
     juce::Array<int> targetRacks() const;
 
-    /** "Alt = all selected": with Alt held on a control of a rack that is part of the selection,
-        the change also goes to the other selected racks. Returns those other racks (rack order),
-        or nothing (no Alt, or the rack is not selected). */
-    juce::Array<Rack*> linkedRacks (const Rack& origin, const juce::ModifierKeys&) const;
+    /** What an edit touches, for linking:
+        mix     = gain, M/S/B, plugin parameters/view: Alt on a selected rack, or its active edit group;
+        routing = IN/OUT: Alt on a selected rack only (a group never re-routes);
+        plugin  = insert/remove/on-off: Alt or Shift on a selected rack, or its active edit group. */
+    enum class Link { mix, routing, plugin };
 
-    /** Same, for a plugin slot: the slots of the other selected racks holding the same plugin
-        (same format/identifier). */
-    std::vector<std::pair<Rack*, int>> linkedSlots (const Rack& origin, int slot, const juce::ModifierKeys&) const;
+    /** The other racks an edit on `origin` also goes to (rack order), or nothing. */
+    juce::Array<Rack*> linkedRacks (const Rack& origin, const juce::ModifierKeys&, Link = Link::mix) const;
+
+    /** True when `other` is linked to `origin` through the selection (Alt), false when only through
+        an edit group: group members follow gain changes relatively (they keep their offsets). */
+    bool linkedBySelection (const Rack& origin, const Rack& other, const juce::ModifierKeys&) const;
+
+    /** Same, for a plugin slot: in each linked rack, the slot holding the same plugin
+        (same format/identifier), preferring the same slot number. One per rack. */
+    std::vector<std::pair<Rack*, int>> linkedSlots (const Rack& origin, int slot, const juce::ModifierKeys&,
+                                                    Link = Link::mix) const;
+
+    /** Edit groups and plugin editors: a parameter moved in one plugin's own window (or by MIDI
+        learn, or anything else) is copied to the same plugin in the other racks of its active
+        edit group. Polls the grouped plugins (~30x/s from the main timer, message thread): when exactly
+        one instance of a linked set changed a parameter since the last look, the others follow.
+        Several changing together (scene recall, Alt edits) are left alone; meters are skipped. */
+    void syncGroupParameters();
 
     //==============================================================================
     // Commands
@@ -65,6 +81,14 @@ private:
     juce::Array<int> selectedRacks;
     int anchorRack = -1;
     int slotRack = -1, slotIndex = -1;
+
+    struct ParamSnapshot
+    {
+        juce::Array<float> values;
+        juce::BigInteger skip;        // meters / read-only parameters
+    };
+    std::map<const juce::AudioPluginInstance*, ParamSnapshot> paramSnapshots;
+    int snapshotLoadGeneration = -1, snapshotRecallCount = -1;
 
     enum class ClipType { none, plugin, racks };
     ClipType clipType = ClipType::none;

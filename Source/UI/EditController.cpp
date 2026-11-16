@@ -1,4 +1,5 @@
 #include "EditController.h"
+#include "PluginMeters.h"
 
 namespace stagerack
 {
@@ -79,23 +80,32 @@ juce::Array<int> EditController::targetRacks() const
     return {};
 }
 
-juce::Array<Rack*> EditController::linkedRacks (const Rack& origin, const juce::ModifierKeys& mods) const
+juce::Array<Rack*> EditController::linkedRacks (const Rack& origin, const juce::ModifierKeys& mods, Link kind) const
 {
     juce::Array<Rack*> result;
-
-    if (! mods.isAltDown() || ! selectedRacks.contains (origin.getId()))
-        return result;
-
     auto& engine = session.getEngine();
 
+    const bool bySelection = selectedRacks.contains (origin.getId())
+                          && (mods.isAltDown() || (kind == Link::plugin && mods.isShiftDown()));
+    const int group = kind != Link::routing && session.isEditGroupActive (origin.editGroup) ? origin.editGroup : 0;
+
+    if (! bySelection && group == 0)
+        return result;
+
     for (int i = 0; i < engine.getNumRacks(); ++i)
-        if (auto& r = engine.getRack (i); &r != &origin && selectedRacks.contains (r.getId()))
+        if (auto& r = engine.getRack (i); &r != &origin
+              && ((bySelection && selectedRacks.contains (r.getId())) || (group > 0 && r.editGroup == group)))
             result.add (&r);
 
     return result;
 }
 
-std::vector<std::pair<Rack*, int>> EditController::linkedSlots (const Rack& origin, int slot, const juce::ModifierKeys& mods) const
+bool EditController::linkedBySelection (const Rack& origin, const Rack& other, const juce::ModifierKeys& mods) const
+{
+    return mods.isAltDown() && selectedRacks.contains (origin.getId()) && selectedRacks.contains (other.getId());
+}
+
+std::vector<std::pair<Rack*, int>> EditController::linkedSlots (const Rack& origin, int slot, const juce::ModifierKeys& mods, Link kind) const
 {
     std::vector<std::pair<Rack*, int>> result;
     auto* p = origin.getPlugin (slot);
@@ -104,13 +114,156 @@ std::vector<std::pair<Rack*, int>> EditController::linkedSlots (const Rack& orig
         return result;
 
     const auto ident = p->getPluginDescription().createIdentifierString();
+    auto holds = [&ident] (Rack& r, int s)
+    {
+        auto* other = r.getPlugin (s);
+        return other != nullptr && other->getPluginDescription().createIdentifierString() == ident;
+    };
 
-    for (auto* r : linkedRacks (origin, mods))
+    for (auto* r : linkedRacks (origin, mods, kind))
+    {
+        if (holds (*r, slot))
+        {
+            result.push_back ({ r, slot });
+            continue;
+        }
+
         for (int s = 0; s < Rack::maxSlots; ++s)
-            if (auto* other = r->getPlugin (s); other != nullptr && other->getPluginDescription().createIdentifierString() == ident)
+            if (holds (*r, s))
+            {
                 result.push_back ({ r, s });
+                break;
+            }
+    }
 
     return result;
+}
+
+//==============================================================================
+void EditController::syncGroupParameters()
+{
+    auto& engine = session.getEngine();
+
+    // a new session frees plugins (their addresses can come back): start over
+    if (snapshotLoadGeneration != session.getLoadGeneration())
+    {
+        paramSnapshots.clear();
+        snapshotLoadGeneration = session.getLoadGeneration();
+    }
+
+    // a scene recall sets every instance on its own: never mirror those changes
+    const bool recalled = snapshotRecallCount != session.getRecallCount();
+    snapshotRecallCount = session.getRecallCount();
+
+    std::map<const juce::AudioPluginInstance*, ParamSnapshot> seen;
+
+    for (int group = 1; group <= Rack::maxEditGroups; ++group)
+    {
+        if (! session.isEditGroupActive (group))
+            continue;
+
+        // linked sets: the k-th instance of the same plugin in each rack of the group
+        std::map<std::pair<juce::String, int>, juce::Array<juce::AudioPluginInstance*>> sets;
+
+        for (int i = 0; i < engine.getNumRacks(); ++i)
+        {
+            auto& r = engine.getRack (i);
+
+            if (r.editGroup != group)
+                continue;
+
+            std::map<juce::String, int> count;
+
+            for (int s = 0; s < Rack::maxSlots; ++s)
+                if (auto* p = r.getPlugin (s))
+                {
+                    const auto ident = p->getPluginDescription().createIdentifierString();
+                    sets[{ ident, count[ident]++ }].add (p);
+                }
+        }
+
+        for (auto& [key, instances] : sets)
+        {
+            // snapshots (new instances: just remember them)
+            std::vector<ParamSnapshot*> snaps;
+            bool allKnown = true;
+
+            for (auto* p : instances)
+            {
+                auto it = paramSnapshots.find (p);
+
+                if (it == paramSnapshots.end() || it->second.values.size() != p->getParameters().size())
+                {
+                    ParamSnapshot snap;
+                    const auto& params = p->getParameters();
+
+                    for (int n = 0; n < params.size(); ++n)
+                    {
+                        snap.values.add (params[n]->getValue());
+                        const auto cat = params[n]->getCategory();
+                        if (! params[n]->isAutomatable() || (cat != juce::AudioProcessorParameter::genericParameter
+                                                             && cat != juce::AudioProcessorParameter::inputGain
+                                                             && cat != juce::AudioProcessorParameter::outputGain))
+                            snap.skip.setBit (n);
+                    }
+
+                    for (auto& m : findMeters (*p))
+                        if (m.paramIndex >= 0)
+                            snap.skip.setBit (m.paramIndex);
+
+                    it = paramSnapshots.insert_or_assign (p, std::move (snap)).first;
+                    allKnown = false;
+                }
+
+                snaps.push_back (&it->second);
+            }
+
+            if (instances.size() > 1 && allKnown && ! recalled)
+            {
+                const int numParams = instances.getFirst()->getParameters().size();
+
+                for (int n = 0; n < numParams; ++n)
+                {
+                    int changed = -1, numChanged = 0;
+
+                    for (int k = 0; k < instances.size(); ++k)
+                        if (n < instances[k]->getParameters().size() && ! snaps[(size_t) k]->skip[n]
+                              && std::abs (instances[k]->getParameters()[n]->getValue() - snaps[(size_t) k]->values[n]) > 1.0e-6f)
+                        {
+                            changed = k;
+                            ++numChanged;
+                        }
+
+                    if (numChanged != 1)
+                        continue;
+
+                    const auto v = instances[changed]->getParameters()[n]->getValue();
+
+                    for (int k = 0; k < instances.size(); ++k)
+                        if (k != changed && n < instances[k]->getParameters().size())
+                            if (auto* prm = instances[k]->getParameters()[n]; std::abs (prm->getValue() - v) > 1.0e-6f)
+                            {
+                                prm->beginChangeGesture();
+                                prm->setValueNotifyingHost (v);
+                                prm->endChangeGesture();
+                            }
+                }
+            }
+
+            // look again next time from what they hold now
+            for (size_t k = 0; k < snaps.size(); ++k)
+            {
+                const auto& params = instances[(int) k]->getParameters();
+                for (int n = 0; n < params.size() && n < snaps[k]->values.size(); ++n)
+                    snaps[k]->values.set (n, params[n]->getValue());
+            }
+
+            for (auto* p : instances)
+                seen[p] = std::move (paramSnapshots[p]);
+        }
+    }
+
+    paramSnapshots = std::move (seen);   // instances that left a group are forgotten
 }
 
 //==============================================================================
@@ -211,7 +364,12 @@ void EditController::deleteSelection()
     if (hasSlotSelection())
     {
         if (auto* r = engine.findRack (slotRack); r != nullptr && r->getPlugin (slotIndex) != nullptr)
-            session.removePlugin (*r, slotIndex);
+        {
+            // the same plugin goes from the other racks of an active edit group too
+            auto where = linkedSlots (*r, slotIndex, {}, Link::plugin);
+            where.insert (where.begin(), { r, slotIndex });
+            session.removePlugins (where);
+        }
         return;
     }
 

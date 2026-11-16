@@ -306,7 +306,9 @@ public:
         const bool bypassed = sl.bypassed.load();
         const bool selected = edit.isSlotSelected (rack.getId(), index);
 
-        g.setColour (dragOver ? theme::accent.withAlpha (0.25f) : (isMouseOver (true) ? theme::slotHover : theme::slot));
+        const auto slotColour = theme::tinted (theme::slot, rack.colour, 0.09f);
+        g.setColour (dragOver ? theme::accent.withAlpha (0.25f)
+                              : (isMouseOver (true) ? theme::tinted (theme::slotHover, rack.colour, 0.09f) : slotColour));
         g.fillRoundedRectangle (b, 5.0f);
 
         if (p == nullptr)
@@ -321,7 +323,7 @@ public:
 
         // --- header: power button, name, view toggle
         const auto header = headerArea();
-        const bool narrowHeader = header.getWidth() < 64;
+        const bool narrowHeader = header.getWidth() < 90;
 
         powerArea = header.withWidth (18.0f).reduced (1.0f);
         g.setColour (bypassed ? theme::outline : theme::green);
@@ -335,9 +337,9 @@ public:
         }
 
         g.setColour (bypassed ? theme::textDim : theme::text);
-        g.setFont (theme::font (12.0f, true));
+        g.setFont (theme::font (narrowHeader ? 11.0f : 12.0f, true));
         auto nameArea = header.withTrimmedLeft (21.0f).withTrimmedRight (viewArea.isEmpty() ? 0.0f : 20.0f);
-        g.drawFittedText (p->getName(), nameArea.toNearestInt(), juce::Justification::centredLeft, 1, 0.7f);
+        g.drawFittedText (p->getName(), nameArea.toNearestInt(), juce::Justification::centredLeft, 1, narrowHeader ? 0.55f : 0.7f);
 
         // --- body
         const auto body = bodyArea();
@@ -367,7 +369,7 @@ public:
         if (bypassed)
         {
             // dim everything but the header while the plugin is off
-            g.setColour (theme::slot.withAlpha (0.55f));
+            g.setColour (slotColour.withAlpha (0.55f));
             g.fillRect (body);
             g.setColour (theme::amber);
             g.setFont (theme::font (9.0f, true));
@@ -512,12 +514,17 @@ public:
         const bool onPower = p != nullptr && powerArea.expanded (3).contains (e.position);
         const bool onView = p != nullptr && ! viewArea.isEmpty() && viewArea.expanded (3).contains (e.position);
 
-        // Alt on power/view of a selected rack: same change on that plugin in all selected racks.
-        // The rack selection is kept, so it can be repeated.
-        if ((onPower || onView) && ! e.mods.isPopupMenu() && e.mods.isAltDown() && edit.isRackSelected (rack.getId()))
+        // Alt or Shift on a slot of a selected rack: the same change on all selected racks
+        // (power, view, insert on an empty slot, the right-click menu). The rack selection is kept,
+        // so it can be repeated. An active edit group links the same changes without modifiers.
+        if ((e.mods.isAltDown() || e.mods.isShiftDown()) && edit.isRackSelected (rack.getId()))
         {
-            if (onPower) toggleBypass (e.mods);
-            else         toggleView (e.mods);
+            const auto mods = e.mods.withoutMouseButtons();
+
+            if (e.mods.isPopupMenu()) showMenu (mods);
+            else if (p == nullptr)    openBrowser (mods);
+            else if (onPower)         toggleBypass (mods);
+            else if (onView)          toggleView (mods);
             return;
         }
 
@@ -844,7 +851,7 @@ private:
         const bool state = ! s.bypassed.load();
         s.bypassed = state;
 
-        for (auto& [r, n] : edit.linkedSlots (rack, index, mods))
+        for (auto& [r, n] : edit.linkedSlots (rack, index, mods, EditController::Link::plugin))
             r->getSlot (n).bypassed = state;
 
         session.markDirty();   // saved with the session, and an undo step
@@ -863,20 +870,50 @@ private:
         refreshStats();
     }
 
-    void openBrowser()
+    /** Insert from the browser into this slot, and (Alt/Shift on a selected rack, or an active edit
+        group) into the other linked racks: same slot number if free, else their first free slot. */
+    void openBrowser (const juce::ModifierKeys& mods = {}, bool linked = true)
     {
+        juce::Array<int> others;
+
+        if (linked && rack.getPlugin (index) == nullptr)
+            for (auto* r : edit.linkedRacks (rack, mods, EditController::Link::plugin))
+                others.add (r->getId());
+
         auto browser = std::make_unique<PluginBrowser> (session.getPluginManager(),
-            [safe = juce::Component::SafePointer<SlotComponent> (this)] (const juce::PluginDescription& d)
+            [safe = juce::Component::SafePointer<SlotComponent> (this), others] (const juce::PluginDescription& d)
             {
                 if (safe == nullptr)
                     return;
 
-                safe->session.loadPlugin (safe->rack, safe->index, d, [d] (const juce::String& error)
+                auto& session = safe->session;
+                auto report = [d] (const juce::String& error)
                 {
                     if (error.isNotEmpty())
                         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
                                                                 "Could not load " + d.name, error);
-                });
+                };
+
+                const auto slotIndex = safe->index;
+                auto oneStep = std::make_shared<bool> (false);
+                session.loadPlugin (safe->rack, slotIndex, d, report, oneStep);
+
+                for (auto id : others)
+                {
+                    auto* r = session.getEngine().findRack (id);
+
+                    if (r == nullptr)
+                        continue;
+
+                    int target = r->getPlugin (slotIndex) == nullptr ? slotIndex : -1;
+
+                    for (int n = 0; n < Rack::maxSlots && target < 0; ++n)
+                        if (r->getPlugin (n) == nullptr)
+                            target = n;
+
+                    if (target >= 0)   // a full rack is skipped: nothing is ever replaced this way
+                        session.loadPlugin (*r, target, d, report, oneStep);
+                }
             });
 
         // Open inside the main window: a desktop call-out closes itself whenever the app loses focus.
@@ -884,10 +921,16 @@ private:
         juce::CallOutBox::launchAsynchronously (std::move (browser), top->getLocalArea (this, getLocalBounds()), top);
     }
 
-    void showMenu()
+    void showMenu (const juce::ModifierKeys mods = {})
     {
         auto* p = rack.getPlugin (index);
         juce::PopupMenu m;
+        using Link = EditController::Link;
+
+        // how many other racks the plugin commands reach (Alt/Shift selection or edit group)
+        const auto numLinked = p != nullptr ? (int) edit.linkedSlots (rack, index, mods, Link::plugin).size()
+                                            : edit.linkedRacks (rack, mods, Link::plugin).size();
+        const auto onAll = numLinked > 0 ? "  (" + juce::String (numLinked + 1) + " racks)" : juce::String();
 
         // Menu actions run later: never capture `this` or the plugin raw, the UI may have
         // been rebuilt (scene recall, plugin loaded, device change) by the time one is picked.
@@ -897,7 +940,7 @@ private:
         if (p != nullptr)
         {
             m.addItem ("Open editor", act ([] (SlotComponent& s) { s.openEditor(); }));
-            m.addItem ("Plugin on", true, ! rack.getSlot (index).bypassed.load(), act ([] (SlotComponent& s) { s.toggleBypass(); }));
+            m.addItem ("Plugin on" + onAll, true, ! rack.getSlot (index).bypassed.load(), act ([mods] (SlotComponent& s) { s.toggleBypass (mods); }));
             {
                 juce::PopupMenu views;
                 const auto mode = rack.getSlot (index).viewMode;
@@ -916,7 +959,7 @@ private:
             m.addItem (menuItem ("Copy", "\xe2\x8c\x98" "C", act ([] (SlotComponent& s) { s.edit.copy(); })));
             m.addItem (menuItem ("Paste", "\xe2\x8c\x98V", act ([] (SlotComponent& s) { s.edit.paste(); })));
             m.addItem (menuItem ("Duplicate", "\xe2\x8c\x98" "D", act ([] (SlotComponent& s) { s.edit.duplicate(); })));
-            m.addItem ("Replace...", act ([] (SlotComponent& s) { s.openBrowser(); }));
+            m.addItem ("Replace...", act ([] (SlotComponent& s) { s.openBrowser ({}, false); }));
             m.addSeparator();
             m.addItem ("Latency: " + juce::String (p->getLatencySamples()) + " samples ("
                          + juce::String (1000.0 * p->getLatencySamples() / juce::jmax (1.0, rack.getSampleRate()), 1) + " ms)",
@@ -964,11 +1007,16 @@ private:
             m.addSubMenu ("Parameters on rack", params);
             m.addSeparator();
 
-            m.addItem (menuItem ("Remove", "\xe2\x8c\xab", act ([] (SlotComponent& s) { s.session.removePlugin (s.rack, s.index); })));
+            m.addItem (menuItem ("Remove" + onAll, "\xe2\x8c\xab", act ([mods] (SlotComponent& s)
+            {
+                auto where = s.edit.linkedSlots (s.rack, s.index, mods, Link::plugin);
+                where.insert (where.begin(), { &s.rack, s.index });
+                s.session.removePlugins (where);   // may rebuild this component: nothing after this
+            })));
         }
         else
         {
-            m.addItem ("Insert plugin...", act ([] (SlotComponent& s) { s.openBrowser(); }));
+            m.addItem ("Insert plugin..." + onAll, act ([mods] (SlotComponent& s) { s.openBrowser (mods); }));
             m.addItem (menuItem ("Paste", "\xe2\x8c\x98V", act ([] (SlotComponent& s) { s.edit.paste(); })));
         }
 
@@ -1068,7 +1116,7 @@ RackComponent::RackComponent (Session& s, EditController& e, Rack& r, int i)
     {
         const auto id = inputBox.getSelectedId();
         const auto mods = juce::ModifierKeys::getCurrentModifiers();
-        const auto linked = edit.linkedRacks (rack, mods);
+        const auto linked = edit.linkedRacks (rack, mods, EditController::Link::routing);
         auto& engine = session.getEngine();
 
         if (id >= 3000)
@@ -1112,7 +1160,7 @@ RackComponent::RackComponent (Session& s, EditController& e, Rack& r, int i)
     {
         const auto id = outputBox.getSelectedId();
         const auto mods = juce::ModifierKeys::getCurrentModifiers();
-        const auto linked = edit.linkedRacks (rack, mods);
+        const auto linked = edit.linkedRacks (rack, mods, EditController::Link::routing);
         const int ch = id == 1 ? -1 : (id >= 2000 ? id - 2000 : id - 1000);
         const bool stereo = id < 2000;
 
@@ -1159,8 +1207,10 @@ RackComponent::RackComponent (Session& s, EditController& e, Rack& r, int i)
         const auto mods = gainDragging ? gainDragMods : juce::ModifierKeys::getCurrentModifiers();
         rack.gainDb = v;
 
+        // Alt: same value (Alt+Shift: relative); edit-group members always follow relatively
         for (auto* r : edit.linkedRacks (rack, mods))
-            r->gainDb = mods.isShiftDown() ? juce::jlimit (-60.0f, 12.0f, r->gainDb.load() + delta) : v;
+            r->gainDb = mods.isShiftDown() || ! edit.linkedBySelection (rack, *r, mods)
+                          ? juce::jlimit (-60.0f, 12.0f, r->gainDb.load() + delta) : v;
     };
     gain.onDragEnd = [this] { gainDragging = false; session.markDirty(); };
     addAndMakeVisible (gain);
@@ -1185,7 +1235,8 @@ RackComponent::RackComponent (Session& s, EditController& e, Rack& r, int i)
         rack.inputGainDb = v;
 
         for (auto* r : edit.linkedRacks (rack, mods))
-            r->inputGainDb = mods.isShiftDown() ? juce::jlimit (Rack::minInputGainDb, Rack::maxInputGainDb, r->inputGainDb.load() + delta) : v;
+            r->inputGainDb = mods.isShiftDown() || ! edit.linkedBySelection (rack, *r, mods)
+                               ? juce::jlimit (Rack::minInputGainDb, Rack::maxInputGainDb, r->inputGainDb.load() + delta) : v;
     };
     inputGain.onDragEnd = [this] { inGainDragging = false; session.markDirty(); };
     addAndMakeVisible (inputGain);
@@ -1288,21 +1339,24 @@ void RackComponent::fillRoutingBoxes()
             if (! activeOuts[c]) outs.set (c, {});
     }
 
+    // narrow racks: "IN 1-2" / "IN 1" (the dash says stereo)
+    const juce::String st = compactRouting ? "" : " st", mono = compactRouting ? "" : " mono";
+
     inputBox.addItem ("IN: none", 1);
     for (int c = 0; c + 1 < ins.size(); c += 2)
         if (ins[c].isNotEmpty() && ins[c + 1].isNotEmpty())
-            inputBox.addItem ("IN " + juce::String (c + 1) + "-" + juce::String (c + 2) + " st", 1000 + c);
+            inputBox.addItem ("IN " + juce::String (c + 1) + "-" + juce::String (c + 2) + st, 1000 + c);
     for (int c = 0; c < ins.size(); ++c)
         if (ins[c].isNotEmpty())
-            inputBox.addItem ("IN " + juce::String (c + 1) + " mono", 2000 + c);
+            inputBox.addItem ("IN " + juce::String (c + 1) + mono, 2000 + c);
 
     outputBox.addItem ("OUT: none", 1);
     for (int c = 0; c + 1 < outs.size(); c += 2)
         if (outs[c].isNotEmpty() && outs[c + 1].isNotEmpty())
-            outputBox.addItem ("OUT " + juce::String (c + 1) + "-" + juce::String (c + 2) + " st", 1000 + c);
+            outputBox.addItem ("OUT " + juce::String (c + 1) + "-" + juce::String (c + 2) + st, 1000 + c);
     for (int c = 0; c < outs.size(); ++c)
         if (outs[c].isNotEmpty())
-            outputBox.addItem ("OUT " + juce::String (c + 1) + " mono", 2000 + c);
+            outputBox.addItem ("OUT " + juce::String (c + 1) + mono, 2000 + c);
 
     // other racks as sources (chaining); those that would create a loop are disabled
     auto& engine = session.getEngine();
@@ -1333,14 +1387,17 @@ void RackComponent::fillRoutingBoxes()
     else
         inputBox.setSelectedId (in < 0 ? 1 : (rack.stereoInput.load() ? 1000 + in : 2000 + in), juce::dontSendNotification);
 
-    if (inputBox.getSelectedId() == 0 && rack.inputRackId < 0)
-        inputBox.setText ("IN " + juce::String (in + 1) + (rack.stereoInput.load() ? " st" : " mono") + " (off)", juce::dontSendNotification);
+    if (inputBox.getSelectedId() == 0 && rack.inputRackId < 0 && rack.stereoInput.load()
+        && juce::isPositiveAndBelow (in, ins.size()) && ins[in].isNotEmpty())
+        inputBox.setText ("IN " + juce::String (in + 1) + (compactRouting ? " (m)" : " (mono device)"), juce::dontSendNotification);   // L copied to R
+    else if (inputBox.getSelectedId() == 0 && rack.inputRackId < 0)
+        inputBox.setText ("IN " + juce::String (in + 1) + (rack.stereoInput.load() ? st : mono) + " (off)", juce::dontSendNotification);
 
     const auto out = rack.outputChannel.load();
     outputBox.setSelectedId (out < 0 ? 1 : (rack.stereoOutput.load() ? 1000 + out : 2000 + out), juce::dontSendNotification);
 
     if (outputBox.getSelectedId() == 0)
-        outputBox.setText ("OUT " + juce::String (out + 1) + (rack.stereoOutput.load() ? " st" : " mono") + " (off)", juce::dontSendNotification);
+        outputBox.setText ("OUT " + juce::String (out + 1) + (rack.stereoOutput.load() ? st : mono) + " (off)", juce::dontSendNotification);
 }
 
 void RackComponent::refresh()
@@ -1402,7 +1459,8 @@ void RackComponent::updateMeters()
         statusLabel.setText ({}, juce::dontSendNotification);
     }
 
-    repaint (meterArea);
+    repaint (inMeterArea);
+    repaint (outMeterArea);
 
     if ((rack.automixGroup.load() > 0) == automixArea.isEmpty())
         resized();   // group changed elsewhere (scene, Alt on another rack)
@@ -1448,21 +1506,48 @@ void RackComponent::paint (juce::Graphics& g)
     const bool active = ! rack.muted.load() && ! rack.bypassed.load();
     const bool selected = edit.isRackSelected (rack.getId());
 
-    g.setColour (selected ? theme::panelLight : theme::panel);
+    // the whole rack in its colour (greyish in the dark theme), less when muted/bypassed
+    g.setColour (theme::tinted (selected ? theme::panelLight : theme::panel, rack.colour,
+                                (active ? 1.0f : 0.4f) * (theme::light ? 0.2f : 0.16f)));
     g.fillRoundedRectangle (b, 6.0f);
+
+    // active edit group: the whole rack is framed in the group colour, so it is clear at a glance
+    // that touching this rack also changes the others (suspended group = no frame)
+    const bool groupLinked = rack.editGroup > 0 && session.isEditGroupActive (rack.editGroup);
+
+    if (groupLinked)
+    {
+        g.setColour (theme::groupColour (rack.editGroup));
+        g.drawRoundedRectangle (b.reduced (1.25f), 6.0f, 2.5f);
+    }
 
     if (selected)
     {
         g.setColour (theme::accent);
-        g.drawRoundedRectangle (b.reduced (1.0f), 6.0f, 2.0f);
+        g.drawRoundedRectangle (b.reduced (groupLinked ? 4.0f : 1.0f), groupLinked ? 4.0f : 6.0f, 2.0f);
     }
 
     g.setColour (active ? rack.colour : rack.colour.withSaturation (0.1f).darker (0.4f));
     g.fillRoundedRectangle (vertical ? b.removeFromTop (6.0f) : b.removeFromLeft (6.0f), 3.0f);
 
     g.setColour (theme::textDim);
-    g.setFont (theme::font (11.0f, true));
+    g.setFont (theme::font (isNarrow() ? 10.0f : 11.0f, true));
     g.drawText (juce::String (index + 1).paddedLeft ('0', 2), indexArea, juce::Justification::centredLeft);
+
+    // edit group: letter in the group colour, filled while the group links edits, outlined when suspended
+    if (const auto group = rack.editGroup; group > 0 && ! groupArea.isEmpty())
+    {
+        const bool on = session.isEditGroupActive (group);
+        const auto c = theme::groupColour (group);
+        auto a = groupArea.toFloat();
+        g.setColour (on ? c : c.withAlpha (0.12f));
+        g.fillRoundedRectangle (a, 3.0f);
+        g.setColour (c);
+        if (! on) g.drawRoundedRectangle (a.reduced (0.5f), 3.0f, 1.0f);
+        g.setColour (on ? juce::Colour (0xff101214) : c);
+        g.setFont (theme::font (10.5f, true));
+        g.drawText ((a.getWidth() > 30.0f ? "GRP " : "") + theme::groupLetter (group), a, juce::Justification::centred, false);
+    }
 
     // automix: group letter + the gain the automixer gives this rack right now (0 .. -40 dB)
     if (const auto group = rack.automixGroup.load(); group > 0 && ! automixArea.isEmpty())
@@ -1478,18 +1563,25 @@ void RackComponent::paint (juce::Graphics& g)
 
         g.setColour (theme::text);
         g.setFont (theme::font (9.5f, true));
-        g.drawText ("AM " + juce::String::charToString ((juce::juce_wchar) ('A' + group - 1))
+        g.drawText ((a.getWidth() < 70.0f ? "" : "AM ") + juce::String::charToString ((juce::juce_wchar) ('A' + group - 1))
                       + (on ? "  " + (automixDb <= -59.5f ? juce::String ("-inf") : juce::String (automixDb, 1)) : juce::String ("  off")),
                     a.reduced (4.0f, 0.0f), juce::Justification::centredLeft, false);
     }
 
-    // meters: in L/R, out L/R
-    auto m = meterArea.toFloat();
-    const float w = (m.getWidth() - 6) / 4.0f;
-    theme::drawMeter (g, { m.getX(),                 m.getY(), w - 1, m.getHeight() }, inLevel[0]);
-    theme::drawMeter (g, { m.getX() + w,             m.getY(), w - 1, m.getHeight() }, inLevel[1]);
-    theme::drawMeter (g, { m.getX() + 2 * w + 6,     m.getY(), w - 1, m.getHeight() }, outLevel[0]);
-    theme::drawMeter (g, { m.getX() + 3 * w + 6,     m.getY(), w - 1, m.getHeight() }, outLevel[1]);
+    // meters: input (after the input gain) next to the IN knob, output next to the output gain
+    auto drawPair = [&g] (juce::Rectangle<int> area, const float* level)
+    {
+        if (area.isEmpty())
+            return;
+
+        auto m = area.toFloat();
+        const float w = (m.getWidth() - 1.0f) / 2.0f;
+        theme::drawMeter (g, m.withWidth (w), level[0]);
+        theme::drawMeter (g, m.withTrimmedLeft (w + 1.0f), level[1]);
+    };
+
+    drawPair (inMeterArea, inLevel);
+    drawPair (outMeterArea, outLevel);
 
     // automix gain meter (0 dB = full, -40 dB = empty), in the colour of the group
     if (const auto group = rack.automixGroup.load(); group > 0 && ! automixMeterArea.isEmpty())
@@ -1526,50 +1618,96 @@ void RackComponent::paintOverChildren (juce::Graphics& g)
 
 void RackComponent::resized()
 {
-    if (vertical)
+    groupArea = {};
+    automixArea = {};
+    automixMeterArea = {};
+    const bool inGroup = rack.editGroup > 0;
+    const bool automixed = rack.automixGroup.load() > 0;
+
+    if (const bool narrow = isNarrow(); narrow != compactRouting)
     {
-        resizeHandle->setBounds (getWidth() - 5, 0, 5, getHeight());
-        auto r = getLocalBounds().reduced (8, 6).withTrimmedTop (8).withTrimmedRight (2);
+        compactRouting = narrow;
+        fillRoutingBoxes();
+    }
 
-        auto nameRow = r.removeFromTop (20);
-        indexArea = nameRow.removeFromLeft (22);
-        menuButton.setBounds (nameRow.removeFromRight (28));
-        nameLabel.setBounds (nameRow);
-        {
-            auto statusRow = r.removeFromTop (16);
-            automixArea = rack.automixGroup.load() > 0 ? statusRow.removeFromRight (statusRow.getWidth() / 2).reduced (0, 2) : juce::Rectangle<int>();
-            statusLabel.setBounds (statusRow);
-        }
-        inputBox.setBounds (r.removeFromTop (21));
-        r.removeFromTop (3);
-        outputBox.setBounds (r.removeFromTop (21));
-        r.removeFromTop (4);
-        inputGain.setTextBoxStyle (juce::Slider::TextBoxRight, false, 64, 16);
-        inputGain.setBounds (r.removeFromTop (40).withTrimmedLeft (26));
-        r.removeFromTop (4);
-
-        infoLabel.setBounds (r.removeFromBottom (42));
-
-        auto controls = r.removeFromBottom (78);
-        r.removeFromBottom (6);
-        auto buttons = controls.removeFromRight (28);
+    auto layoutButtons = [this] (juce::Rectangle<int> buttons)
+    {
         const int bh = (buttons.getHeight() - 4) / 3;
         muteButton.setBounds (buttons.removeFromTop (bh));
         buttons.removeFromTop (2);
         soloButton.setBounds (buttons.removeFromTop (bh));
         buttons.removeFromTop (2);
         bypassButton.setBounds (buttons.removeFromTop (bh));
-        controls.removeFromRight (4);
-        meterArea = controls.removeFromLeft (26).reduced (0, 2);
-        automixMeterArea = {};
+    };
 
-        if (rack.automixGroup.load() > 0)
+    if (vertical)
+    {
+        resizeHandle->setBounds (getWidth() - 5, 0, 5, getHeight());
+        const bool narrow = isNarrow();
+        auto r = getLocalBounds().reduced (narrow ? 5 : 8, 6).withTrimmedTop (8).withTrimmedRight (2);
+
+        // name row: the name gets all the room; on narrow racks the number moves to the row below
+        auto nameRow = r.removeFromTop (20);
+        menuButton.setBounds (nameRow.removeFromRight (28));
+        if (! narrow) indexArea = nameRow.removeFromLeft (22);
+        nameLabel.setFont (theme::font (narrow ? 13.0f : 14.0f, true));
+        nameLabel.setBounds (nameRow);
+
         {
-            controls.removeFromLeft (3);
-            automixMeterArea = controls.removeFromLeft (11).reduced (0, 2);
+            auto statusRow = r.removeFromTop (16);
+            if (narrow) indexArea = statusRow.removeFromLeft (18);
+
+            if (inGroup)
+            {
+                groupArea = statusRow.removeFromLeft (narrow ? 18 : 40).reduced (0, 1);
+                statusRow.removeFromLeft (4);
+            }
+
+            if (automixed)
+                automixArea = (narrow ? statusRow : statusRow.removeFromRight (statusRow.getWidth() / 2)).reduced (0, 2);
+
+            statusLabel.setBounds (narrow ? juce::Rectangle<int>() : statusRow);
         }
 
-        controls.removeFromLeft (4);
+        r.removeFromTop (2);
+        inputBox.setBounds (r.removeFromTop (21));
+        r.removeFromTop (3);
+        outputBox.setBounds (r.removeFromTop (21));
+        r.removeFromTop (4);
+
+        // input gain with its meter
+        {
+            auto row = r.removeFromTop (narrow ? 54 : 40);
+            inMeterArea = row.removeFromLeft (12).reduced (0, 2);
+            row.removeFromLeft (4);
+
+            if (narrow) inputGain.setTextBoxStyle (juce::Slider::TextBoxBelow, false, row.getWidth(), 14);
+            else        inputGain.setTextBoxStyle (juce::Slider::TextBoxRight, false, 64, 16);
+
+            inputGain.setBounds (row);
+        }
+        r.removeFromTop (4);
+
+        infoLabel.setFont (theme::font (narrow ? 9.5f : 10.5f));
+        infoLabel.setBounds (r.removeFromBottom (narrow ? 38 : 42));
+
+        if (narrow)
+            statusLabel.setBounds (r.removeFromBottom (14));
+
+        auto controls = r.removeFromBottom (78);
+        r.removeFromBottom (6);
+        layoutButtons (controls.removeFromRight (narrow ? 22 : 28));
+        controls.removeFromRight (narrow ? 2 : 4);
+        outMeterArea = controls.removeFromLeft (12).reduced (0, 2);
+
+        if (automixed)
+        {
+            controls.removeFromLeft (2);
+            automixMeterArea = controls.removeFromLeft (narrow ? 8 : 11).reduced (0, 2);
+        }
+
+        controls.removeFromLeft (narrow ? 1 : 4);
+        gain.setTextBoxStyle (juce::Slider::TextBoxBelow, false, juce::jmax (40, controls.getWidth()), 14);
         gain.setBounds (controls);
 
         layoutSlots (r);
@@ -1584,17 +1722,24 @@ void RackComponent::resized()
     auto header = r.removeFromLeft (290);
     auto nameRow = header.removeFromTop (compact ? 18 : 20);
     indexArea = nameRow.removeFromLeft (22);
+
+    if (inGroup)
+    {
+        groupArea = nameRow.removeFromLeft (20).reduced (0, 2);
+        nameRow.removeFromLeft (4);
+    }
+
     menuButton.setBounds (nameRow.removeFromRight (28));
     nameRow.removeFromRight (4);
-    statusLabel.setBounds (nameRow.removeFromRight (rack.automixGroup.load() > 0 ? 60 : 96));
-    automixArea = {};
+    statusLabel.setBounds (nameRow.removeFromRight (automixed ? 60 : 96));
 
-    if (rack.automixGroup.load() > 0)
+    if (automixed)
     {
         automixArea = nameRow.removeFromRight (78).reduced (0, 3);
         nameRow.removeFromRight (4);
     }
 
+    nameLabel.setFont (theme::font (14.0f, true));
     nameLabel.setBounds (nameRow);
     header.removeFromTop (3);
 
@@ -1612,32 +1757,30 @@ void RackComponent::resized()
         outputBox.setBounds (header.removeFromTop (21));
     }
 
+    // input gain + its meter, then the plugins, then output meter + gain
     r.removeFromLeft (8);
     inputGain.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 54, 14);
     inputGain.setBounds (r.removeFromLeft (58));
-    r.removeFromLeft (6);
+    r.removeFromLeft (2);
+    inMeterArea = r.removeFromLeft (12).reduced (0, 2);
+    r.removeFromLeft (8);
+
+    infoLabel.setFont (theme::font (10.5f));
     infoLabel.setBounds (r.removeFromRight (104).reduced (4, 0));
-
-    auto buttons = r.removeFromRight (28);
-    const int bh = (buttons.getHeight() - 4) / 3;
-    muteButton.setBounds (buttons.removeFromTop (bh));
-    buttons.removeFromTop (2);
-    soloButton.setBounds (buttons.removeFromTop (bh));
-    buttons.removeFromTop (2);
-    bypassButton.setBounds (buttons.removeFromTop (bh));
+    layoutButtons (r.removeFromRight (28));
 
     r.removeFromRight (4);
+    gain.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 54, 14);
     gain.setBounds (r.removeFromRight (58));
-    r.removeFromRight (4);
-    automixMeterArea = {};
+    r.removeFromRight (2);
 
-    if (rack.automixGroup.load() > 0)
+    if (automixed)
     {
         automixMeterArea = r.removeFromRight (11).reduced (0, 2);
         r.removeFromRight (3);
     }
 
-    meterArea = r.removeFromRight (26).reduced (0, 2);
+    outMeterArea = r.removeFromRight (12).reduced (0, 2);
     r.removeFromRight (8);
 
     layoutSlots (r);
@@ -1715,6 +1858,14 @@ void RackComponent::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    if (rack.editGroup > 0 && groupArea.contains (e.getEventRelativeTo (this).getPosition()))
+    {
+        // click: suspend / resume the group (all its racks), like Pro Tools' group list
+        session.setEditGroupActive (rack.editGroup, ! session.isEditGroupActive (rack.editGroup));
+        if (auto* p = getParentComponent()) p->repaint();
+        return;
+    }
+
     if ((automixArea.contains (e.getEventRelativeTo (this).getPosition()) || automixMeterArea.contains (e.getEventRelativeTo (this).getPosition()))
         && rack.automixGroup.load() > 0)
     {
@@ -1774,6 +1925,96 @@ void RackComponent::itemDropped (const SourceDetails& d)
     const auto rackId = d.description.toString().fromFirstOccurrenceOf ("rack:", false, false).getIntValue();
     const auto target = session.getEngine().indexOf (rack) + (dropsAfter (d.localPosition) ? 1 : 0);
     edit.dropRack (rackId, target, altDown());
+}
+
+juce::PopupMenu RackComponent::editGroupMenu()
+{
+    // Pro Tools style edit groups: the selected racks (or this one) join a group; while the group is
+    // active, gain (relative), mute/solo/bypass, plugin parameters, insert/remove/on-off follow.
+    juce::Component::SafePointer<RackComponent> safe (this);
+    juce::PopupMenu m;
+    m.addSectionHeader ("Racks of a group follow each other");
+
+    for (int g = 0; g <= Rack::maxEditGroups; ++g)
+    {
+        const auto n = g > 0 ? session.numRacksInEditGroup (g) : 0;
+        juce::PopupMenu::Item item (g == 0 ? juce::String ("None")
+                                           : "Group " + theme::groupLetter (g) + (n > 0 ? "  (" + juce::String (n) + " racks)" : juce::String()));
+        item.setTicked (rack.editGroup == g);
+        if (g > 0) item.setColour (theme::groupColour (g));
+        item.setAction ([safe, g]
+        {
+            if (safe == nullptr) return;
+
+            for (auto id : safe->edit.targetRacks())
+                if (auto* r = safe->session.getEngine().findRack (id))
+                    r->editGroup = g;
+
+            if (g > 0 && ! safe->session.isEditGroupActive (g))
+                safe->session.setEditGroupActive (g, true);
+
+            safe->session.markDirty();
+            if (safe->onResized) safe->onResized();   // the group badge appears / disappears
+        });
+        m.addItem (item);
+    }
+
+    if (const auto g = rack.editGroup; g > 0)
+    {
+        m.addSeparator();
+        m.addItem (juce::PopupMenu::Item ("Group " + theme::groupLetter (g) + " active  (click the badge)")
+                       .setTicked (session.isEditGroupActive (g))
+                       .setAction ([safe, g]
+                       {
+                           if (safe == nullptr) return;
+                           safe->session.setEditGroupActive (g, ! safe->session.isEditGroupActive (g));
+                       }));
+    }
+
+    return m;
+}
+
+void RackComponent::showColourPicker()
+{
+    // free colour for the selected racks (or this one), applied while dragging
+    class Picker final : public juce::ColourSelector, private juce::ChangeListener, private juce::Timer
+    {
+    public:
+        Picker (Session& s, juce::Array<int> ids, juce::Colour start)
+            : juce::ColourSelector (juce::ColourSelector::showColourspace | juce::ColourSelector::showSliders),
+              session (s), racks (std::move (ids))
+        {
+            setCurrentColour (start, juce::dontSendNotification);
+            setSize (260, 300);
+            addChangeListener (this);
+        }
+
+        ~Picker() override { removeChangeListener (this); }   // no session access here: it may be closing
+
+    private:
+        void timerCallback() override { stopTimer(); session.markDirty(); }   // one undo step per pause
+        void changeListenerCallback (juce::ChangeBroadcaster*) override
+        {
+            for (auto id : racks)
+                if (auto* r = session.getEngine().findRack (id))
+                    r->colour = getCurrentColour().withAlpha (1.0f);
+
+            if (auto* top = getTopLevelComponent())
+                top->repaint();
+
+            startTimer (400);
+        }
+
+        Session& session;
+        juce::Array<int> racks;
+    };
+
+    auto ids = edit.targetRacks();
+    if (ids.isEmpty()) ids.add (rack.getId());
+
+    auto* top = getTopLevelComponent();
+    juce::CallOutBox::launchAsynchronously (std::make_unique<Picker> (session, ids, rack.colour),
+                                            top->getLocalArea (this, menuButton.getBounds()), top);
 }
 
 juce::PopupMenu RackComponent::automixMenu()
@@ -1892,15 +2133,20 @@ void RackComponent::showRackMenu()
                                 rc.session.getEngine().updateLatencyCompensation();
                                 rc.session.markDirty();
                             })));
+    m.addSubMenu ("Edit group", editGroupMenu());
     m.addSubMenu ("Latency group", groups);
     m.addSubMenu ("Automix", automixMenu());
 
     juce::PopupMenu colours;
-    const juce::Colour palette[] = { juce::Colour (0xff31c4f3), juce::Colour (0xff7ed957), juce::Colour (0xffffb341),
-                                     juce::Colour (0xffff5f6d), juce::Colour (0xffb98cff), juce::Colour (0xff45e0c0),
-                                     juce::Colour (0xfff26fd1), juce::Colour (0xffe8e35a) };
-    for (auto c : palette)
-        colours.addItem (juce::PopupMenu::Item (juce::String::repeatedString (juce::String::charToString (0x25A0), 5))
+    const std::pair<const char*, juce::uint32> palette[] = {
+        { "Blue", 0xff31c4f3 }, { "Green", 0xff7ed957 }, { "Orange", 0xffffb341 }, { "Red", 0xffff5f6d },
+        { "Purple", 0xffb98cff }, { "Teal", 0xff45e0c0 }, { "Pink", 0xfff26fd1 }, { "Yellow", 0xffe8e35a },
+        { "Indigo", 0xff6c7cff }, { "Lime", 0xffc0f05a }, { "Brown", 0xffc08a5a }, { "Grey", 0xff9aa3ad } };
+
+    for (auto& [name, argb] : palette)
+    {
+        const juce::Colour c (argb);
+        colours.addItem (juce::PopupMenu::Item (juce::String::repeatedString (juce::String::charToString (0x25A0), 4) + "  " + name)
                              .setColour (c)
                              .setTicked (rack.colour == c)
                              .setAction (act ([c] (RackComponent& rc)
@@ -1910,6 +2156,10 @@ void RackComponent::showRackMenu()
                                          r->colour = c;
                                  rc.session.markDirty();
                              })));
+    }
+
+    colours.addSeparator();
+    colours.addItem ("Custom...", act ([] (RackComponent& rc) { rc.showColourPicker(); }));
 
     m.addSubMenu ("Colour", colours);
     m.addSeparator();

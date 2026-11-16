@@ -48,6 +48,9 @@ private:
 
     void showRackMenu();
     juce::PopupMenu automixMenu();
+    juce::PopupMenu editGroupMenu();
+    void showColourPicker();
+    bool isNarrow() const noexcept   { return vertical && getWidth() < 150; }
     void showAutomixMenu();
     void fillRoutingBoxes();
     void layoutSlots (juce::Rectangle<int>);
@@ -66,7 +69,8 @@ private:
     juce::TextButton menuButton { juce::String::fromUTF8 ("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2") };
     std::unique_ptr<ResizeHandle> resizeHandle;
 
-    juce::Rectangle<int> meterArea, indexArea, automixArea, automixMeterArea;
+    juce::Rectangle<int> inMeterArea, outMeterArea, indexArea, groupArea, automixArea, automixMeterArea;
+    bool compactRouting = false;    // short IN/OUT texts ("IN 1-2") on narrow racks
     float inLevel[2] {}, outLevel[2] {}, peakLoad = 0.0f, automixDb = 0.0f;
     bool vertical = false, gainDragging = false, inGainDragging = false;
     juce::ModifierKeys gainDragMods, inGainDragMods;

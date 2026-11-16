@@ -209,7 +209,7 @@ Automixer integrato per microfoni parlato (conferenze, culto, teatro, panel), se
 - **VERTICAL / HORIZONTAL** nella barra in alto: rack in righe (stile SuperRack) o strisce verticali stile mixer.
 - **Colonna delle scene richiudibile**: la striscia con la freccia a sinistra dei rack (o ⌘L) la chiude e la riapre; lo stato viene ricordato.
 - **Dimensione dei rack**: trascina il bordo inferiore (orizzontale) o destro (verticale), oppure ⌘= / ⌘- sui rack selezionati (o su tutti). Da piccoli i rack passano a un layout compatto.
-- **Selezione**: click sul rack, ⌘-click per aggiungere, ⇧-click per un intervallo, ⌘A per tutti, Esc per deselezionare. Click su uno slot per selezionare il plugin.
+- **Selezione**: click sul rack, ⌘-click per aggiungere, ⇧-click per un intervallo, ⌘A per tutti, Esc o un **click a vuoto** (fuori dai rack) per deselezionare. Click su uno slot per selezionare il plugin.
 - **Trascina** un plugin su un qualsiasi slot di un qualsiasi rack per spostarlo (se lo slot è occupato si scambiano); **con ⌥ (Alt)** ne fai una copia con lo stesso stato.
 - **Trascina un rack** (dal nome o dallo sfondo) per riordinarlo; **con ⌥** lo duplichi in quella posizione.
 - **⌘C / ⌘V / ⌘D / ⌫**: copia, incolla, duplica, elimina. Agiscono sul plugin selezionato o sui rack selezionati. L'eliminazione dei rack chiede conferma.
@@ -225,7 +225,16 @@ Automixer integrato per microfoni parlato (conferenze, culto, teatro, panel), se
   | Icona vista dello slot | stessa vista sullo stesso plugin | — |
   | Parametro sul rack (trascina, rotella, doppio click, on/off) | stesso valore sullo stesso parametro dello stesso plugin | — |
 
+  | Slot vuoto (click) | inserisce lo stesso plugin in tutti i rack selezionati: stesso slot se libero, altrimenti il primo libero (un rack pieno viene saltato, niente viene sostituito); un solo passo di annullamento | — |
+  | Tasto destro su uno slot | il menu dice "(N racks)": Plugin on, Remove, Insert plugin valgono per tutti | — |
+
+  **⇧ (Shift) fa lo stesso di ⌥ per inserimento, rimozione e on/off dei plugin** (LED, slot vuoto, tasto destro). Sul gain e sui parametri ⇧ resta la regolazione fine, quindi lì serve ⌥.
+
   Senza ⌥ il controllo agisce solo sul suo rack, e ⌥ su un rack **non** selezionato agisce solo su quello: niente modifiche di massa per sbaglio. Il ⌥-click su LED/vista non cambia la selezione, così puoi ripeterlo. Latency group e colore dal menu ••• valgono già per tutti i selezionati. (Il ⌥-click sul gain non lo azzera più: per lo 0 dB c'è il doppio click.)
+- **Gruppi di modifica (stile Pro Tools)**: menu ••• → **Edit group** → A…H mette i rack selezionati in un gruppo. Mentre il gruppo è **attivo**, senza tasti modificatori, i rack del gruppo si seguono: gain e Gain In (**relativi**: ognuno tiene la sua differenza), M/S/B, LED e viste dei plugin, parametri dei plugin (sia dalle barre sul rack sia **dalla finestra del plugin**: muovi una manopola nell'editor di un rack e lo stesso plugin negli altri rack del gruppo la segue, entro ~30 ms), inserimento/rimozione dei plugin (anche ⌫ sullo slot selezionato). Se un rack ha due istanze dello stesso plugin, la prima segue la prima e la seconda la seconda. I meter dei plugin e i richiami di scena non vengono copiati (le scene possono tenere valori diversi per rack). **Non** seguono IN/OUT (un gruppo non cambia mai il routing). Il gruppo si vede: quando è **attivo** tutto il rack è **incorniciato nel colore del gruppo** (così sai che toccandolo cambi anche gli altri) e il badge con la lettera vicino al numero è pieno; quando è **sospeso** la cornice sparisce e il badge resta solo contornato; click sul badge (o sulle lettere A–H nella barra in alto) sospende/riattiva il gruppo, ⌘⇧G (menu Rack → Edit Groups Active) sospende/riattiva tutti. Salvati con la sessione, annullabili.
+- **Colori dei rack**: tutto il rack prende una tinta del suo colore (grigiastra nel tema scuro, pastello nel chiaro; meno intensa se il rack è in mute/bypass). Menu ••• → **Colour**: 12 colori con nome o **Custom...** (selettore libero), per tutti i rack selezionati. View → **Tinted Racks** per tornare ai rack grigi.
+- **Rack stretti**: sotto ~150 px di larghezza (verticale) il rack passa a un layout ridotto: nome su tutta la riga, numero/gruppo/automix sulla riga sotto, IN/OUT abbreviati ("IN 1-2" = stereo, "IN 1" = mono), manopole con il valore sotto, nomi dei plugin rimpiccioliti invece di troncati.
+- **Meter**: quello d'ingresso (dopo il Gain In) sta accanto alla manopola **IN**, quello d'uscita accanto al gain d'uscita.
 - **Uscita mono**: nel menu OUT scegli "OUT n mono", che manda (L+R)/2 su un solo canale.
 - Tutto è disponibile anche dal menu **•••** o dal tasto destro sul rack.
 
@@ -240,8 +249,11 @@ Automixer integrato per microfoni parlato (conferenze, culto, teatro, panel), se
 - **Latenza a colpo d'occhio**: pallino **verde** = 0 latenza, **giallo** = sotto 5 ms, **grigio** = 5 ms o più, cerchio vuoto = non ancora misurata; a destra il valore in ms.
 - Le latenze si imparano da sole ogni volta che un plugin viene caricato in un rack; il pulsante **Measure latency (N)** misura tutti gli altri in background, caricandoli in processi separati (a 48 kHz, 3 alla volta, timeout 30 s; un plugin che crasha viene segnato "?" senza toccare l'app). Esempi misurati: De-Feedback 0, L4 1.5 ms, AUPeakLimiter 2 ms, Pro-L 2 65 ms. Cache in `~/Library/Application Support/StageRack/latency.xml`. Nota: la latenza di alcuni plugin cambia con le impostazioni (es. modalità lineari): il valore è quello di default o dell'ultimo caricamento.
 
+## Barra in alto
+Divisa per funzione, separata da linee sottili: **sessione** (logo, nome del file in ambra se non salvato, NEW/OPEN/SAVE) · **scene** (◀, display, ▶, STORE) · **live** (MUTE ALL, AUTOMIX/AM METERS, gruppi di modifica A–H) · **motore audio** (DSP per core, scheda audio, PLUGINS/SETTINGS) · **vista** (VERTICAL/HORIZONTAL, LIGHT/DARK). Ogni sezione ha una larghezza minima: tutto resta visibile anche alla larghezza minima della finestra (1100 px); lo spazio in più va prima al display delle scene, poi a DSP e scheda. `--render-racks <dir>` disegna anche `topbar-1100/1300/1700-*.png`.
+
 ## Tema chiaro
-- SETTINGS → **Light theme**: palette chiara per palchi all'aperto/di giorno; si applica subito a tutte le finestre e viene ricordata.
+- SETTINGS → **Light theme**, oppure **LIGHT/DARK** nella barra in alto: palette chiara per palchi all'aperto/di giorno; si applica subito a tutte le finestre e viene ricordata.
 
 ## Funzioni live
 - **Scene**: salvano lo stato di tutti i plugin, gain, mute, solo e bypass. Si richiamano con click, frecce ←/→, Spazio, tasti 1–9, **MIDI Program Change** e CC next/prev (configurabili, default CC80/81).
@@ -280,7 +292,7 @@ Diagnostica UI: `--meters <descrizione.xml>` elenca i meter trovati in un plugin
 ```bash
 build/StageRack_artefacts/Release/StageRack.app/Contents/MacOS/StageRack --edit-selftest
 ```
-Prova le modifiche con ⌥ sui componenti veri dei rack (finestra fuori schermo, eventi mouse e tasti modificatori simulati, 4 rack con AUDelay di Apple): gain uguale/relativo, M/S/B, IN "From rack"/none, consecutivi da un rack in mezzo, LED e parametri del plugin su più rack, rack non selezionati intatti.
+Prova le modifiche con ⌥ sui componenti veri dei rack (finestra fuori schermo, eventi mouse e tasti modificatori simulati, 4 rack con AUDelay di Apple): gain uguale/relativo, M/S/B, IN "From rack"/none, consecutivi da un rack in mezzo, LED e parametri del plugin su più rack, rack non selezionati intatti; ⇧ su LED/slot, gruppi di modifica (gain relativo, mute, LED, sospensione, routing escluso, rimozione con un solo undo, salvataggio).
 
 Verifica: guadagni lungo una catena, canali disattivati nel setup della scheda (il callback li riceve compattati), latenza zero anche con la sorgente più in basso nella lista, rifiuto dei cicli, ritardo di compensazione esatto al campione, uscita mono, gruppo di latenza con un plugin reale (Smooth Operator Pro, 1536 campioni) ed eredità della latenza a monte.
 
