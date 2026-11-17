@@ -162,6 +162,34 @@ De-Feedback 1.1.4 (Alpha Labs) può corrompere la memoria in rari casi quando un
 - Il numero di istanze parcheggiate compare accanto allo stato del Re-spread (SETTINGS).
 - Stress test: `--stress-lifecycle VST3 <plugin> <istanze vive> <cicli> [--audio] [--keep] [--hold s]`. Crea e distrugge istanze mentre altre elaborano audio; si può lanciare anche con Guard Malloc (`DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib`). Risultato: 0 crash in 60 cicli con Guard Malloc e in 250 cicli normali. Il bug è raro e non si riproduce a comando.
 
+### Stabilità dal vivo: dropout, crash, carico in background (2026-11-17)
+**Confronto con la 0.5.1** (stesso Mac M4 Pro, Altoparlanti, 32 campioni, 0.5.1 ricompilata dal suo tag):
+
+| De-Feedback | motore (`--bench-device`) 0.5.1 / attuale | app completa con interfaccia, 30 s, 0.5.1 / attuale |
+|---|---|---|
+| 4 | 0 / 0 persi, media 0.151 / 0.156 ms | — |
+| 8 | 1 / 0 persi | 0 / 0 oltre budget, CPU processo ~145% in entrambe |
+| 12 | 1 / 0 persi | 0 / 0 |
+| 16 | 0 / 1 persi | 0 / 0, CPU ~260% in entrambe |
+
+Il calcolo non è peggiorato: lo scheduling (worker, wake assist, HopAligner) è lo stesso codice della 0.5.1 e le funzioni nuove costano pochi µs per callback.
+
+**Il problema vero era un crash**: con 12 De-Feedback a 16 campioni la versione attuale crashava in ~20 s (2 su 2), la 0.5.1 no. L'hop watch (dalla 0.6) crea un gemello per spostare un hop; se poi il gemello non serviva (hop già nella fase giusta) veniva **distrutto subito**, mentre i thread di calcolo di De-Feedback lavoravano ancora (heap danneggiato, crash in `cblas_sgemm`). Succedeva anche a ogni accensione di EverClean che collideva. Ora i gemelli non usati vengono parcheggiati come tutte le altre istanze: 5 run su 5 senza crash.
+
+**Carico in background** (8-16 De-Feedback @32, misurato): 24 processi che saturano tutti i core, 48 thread a priorità user-interactive (come le app in primo piano), 12 thread Accelerate/AMX (stessa unità che usa De-Feedback): **0 callback persi**, anzi hop più veloci (core svegli, clock alto). Il motore e i thread di De-Feedback girano in tempo reale (priorità 97, sopra tutte le app) nel workgroup di CoreAudio. Restano fuori dal nostro controllo: Risparmio energetico, surriscaldamento, memoria piena, driver della scheda.
+
+**Cosa fa l'app ora**:
+- **Contatore dropout** sotto i meter DSP nella barra in alto: "0 dropouts" in verde, "N DROPOUTS · x s ago" in rosso. Conta i callback oltre budget, i callback **saltati** da CoreAudio (ricavati dagli orari dei buffer: il conteggio di overload di CoreAudio restava a 0 anche con callback saltati) e i blocchi muti mentre si modificano i rack. Riparte da 0 quando la sessione ha finito di caricarsi e allinearsi. Clic = azzera / mostra il log; tooltip = dettaglio.
+- **`dropouts.log`** nella cartella dati: ora al millisecondo, tipo, rack più pesante in quel momento, stato del Mac. Utile per capire un click sentito durante lo show.
+- **Avvisi di sistema** nella stessa riga: LOW POWER MODE, HOT/OVERHEATING, LOW MEMORY.
+- **Attività "latency critical"** per tutta la durata dell'app: niente App Nap, timer precisi, niente sleep di sistema (lo schermo può spegnersi).
+
+Per misurare un altro Mac (es. M3 base) dal Terminale, con l'app installata:
+```bash
+/Applications/StageRack.app/Contents/MacOS/StageRack --bench-device VST3 /Library/Audio/Plug-Ins/VST3/Defeedback.vst3 8 32 Speakers --multicore-only
+```
+(`Altoparlanti` su un Mac in italiano; `--threads` elenca i thread con priorità e CPU). Variabili per i test: `STAGERACK_DATA_DIR` = cartella dati separata (prove accanto a un'app aperta), `STAGERACK_WATCHLOG=1` stampa le decisioni dell'hop watch.
+
 ## Concatenamento e gruppi di latenza
 - **Rack concatenati**: nel menu IN di un rack, sotto "From rack", scegli un altro rack come sorgente. Il rack riceve l'uscita dell'altro (dopo gain e mute). Con OUT: none il rack sorgente alimenta solo la catena. Il motore elabora i rack a **stadi** (prima i rack che leggono dalla scheda, poi quelli che leggono da altri rack, ognuno in parallelo), sempre **nello stesso callback, quindi senza latenza aggiunta**. Le catene circolari sono rifiutate.
 - **Gruppi di latenza** (come SuperRack): menu del rack → Latency group A-H. Ogni rack del gruppo viene ritardato fino alla latenza più alta del gruppo, compresa quella ereditata dai rack a monte, così restano allineati in fase. Il badge "LG A +x ms" mostra il ritardo applicato. Le latenze vengono ricontrollate due volte al secondo, perché un plugin può cambiarle.
@@ -169,13 +197,13 @@ De-Feedback 1.1.4 (Alpha Labs) può corrompere la memoria in rari casi quando un
 ## Bus e send (stile Ableton, attivabili per sessione)
 - **On/off**: menu Rack → **Buses and Sends** (o menu ••• del rack → Bus → "Buses and sends in this session"). È salvato nella sessione e si annulla con ⌘Z. **Spento** = tutto suona esattamente come prima: i rack bus leggono il loro IN, i send e le uscite "verso bus" sono ignorati (ma restano memorizzati per quando lo riaccendi). Le sessioni nuove partono spente.
 - **Bus** = un rack il cui ingresso è la somma di quello che gli altri rack gli mandano (rientro effetti, sottogruppo, master bus). Fino a 8: **Bus A-H**. Si crea con tasto destro su **+ ADD RACK → Add Bus**, menu Rack → **Add Bus** (⌘⇧B), o trasformando un rack esistente (••• → Bus → Bus A-H). Un bus ha i suoi 8 slot, fader, M/S/B, trim IN, badge "BUS A"; il menu IN mostra "IN: bus".
-- **Send** (come Ableton): con i bus attivi ogni rack ha una sezione SEND, un controllo per bus, tra i plugin e il fader (rack verticali: sopra il fader, come su un mixer). **Manopole** con la lettera del bus quando il rack è largo (da 100 px), **barre** quando è stretto. Manopola: trascina su/giù; barra: sinistra/destra (−∞…+6 dB, ⇧ fine). Doppio click = off/0 dB, ⌥-click = off, ⌘ = fine, tasto destro = **post-fader** (default: segue fader, mute e automixer) o **pre-fader** (dopo i plugin, prima del fader e dell'automixer; un rack in mute non manda nulla), 0/−6 dB/off. ⌥ = tutti i rack selezionati (⌥⇧ relativo), i gruppi di modifica seguono in modo relativo. I livelli dei send sono nelle **scene**.
+- **Send** (come Ableton): con i bus attivi ogni rack ha una sezione SEND, un controllo per bus, tra i plugin e il fader (rack verticali: sopra il fader, come su un mixer). **Manopole** con la lettera del bus; nei rack stretti (sotto 100 px) **manopoline** (nome del bus sotto, valore al passaggio del mouse, pre-fader = puntino ambra). Trascina su/giù (−∞…+6 dB, ⇧ fine). Doppio click = off/0 dB, ⌥-click = off, ⌘ = fine, tasto destro = **post-fader** (default: segue fader, mute e automixer) o **pre-fader** (dopo i plugin, prima del fader e dell'automixer; un rack in mute non manda nulla), 0/−6 dB/off. ⌥ = tutti i rack selezionati (⌥⇧ relativo), i gruppi di modifica seguono in modo relativo. I livelli dei send sono nelle **scene**.
 - **Tendine del rack** (ognuna vale **solo per quel rack**, salvate nella sessione, doppio click = automatico):
   - tra plugin e send (la tacca sopra le manopole; nei rack orizzontali a sinistra dei send): tirata **fino in cima** il rack mostra **solo i send**, **fino in fondo** solo i plugin (si aggancia agli estremi). Vale anche alla larghezza minima.
   - sopra gli slot (rack verticali): altezza della sezione **IN** (meter + trim). Compatta = manopolina come prima; da 64 px in su = **meter grande con scala in dB + fader verticale** del trim; tutta in su = sezione nascosta.
   - sopra la sezione **OUT** (rack verticali): altezza di meter + gain + M/S/B. Compatta = manopola; da 130 px in su = **meter grande con scala + fader** stile console (M/S/B in alto a destra). I fader non saltano dove clicchi: si prendono e si trascinano (⇧ fine, doppio click 0 dB).
   - uno slot con plugin ingrandito (bordo inferiore dello slot) resta grande anche quando send o sezioni IN/OUT tolgono spazio: gli slot scorrono invece di schiacciarlo.
-  - se i send hanno più spazio del necessario le **manopole si ingrandiscono** (meno colonne, manopole fino a ~110 px, lettera e valore più grandi); le barre si allargano fino a 22 px.
+  - se i send hanno più spazio del necessario le **manopole si ingrandiscono** (meno colonne, manopole fino a ~110 px, lettera e valore più grandi).
   - Send e plugin che non ci stanno si **scorrono con la rotella o con due dita** (barra sottile a lato); la rotella sui parametri dei plugin li modifica solo quando non c'è niente da scorrere.
 - **Meter "bloccati in rosso"**: un solo campione infinito/NaN (da scheda o plugin) restava per sempre nel meter (∞ × 0.82 = ∞), anche cambiando ingresso o scheda. Ora un blocco con valori non finiti viene **azzerato** (in ingresso e dopo i plugin: non arriva a uscite, bus, linee di ritardo né meter) e il meter non può più restare infinito.
 - **Rack più stretti**: i rack verticali scendono fino a ~61 px (prima 95). Sotto i 96 px M/S/B vanno in fila sotto il fader, IN/OUT diventano "IN 1" / "▶ B" con una freccia piccola, nome e numeri più piccoli. I rack orizzontali restano almeno a metà altezza.
@@ -329,6 +357,7 @@ Qualsiasi controller MIDI può muovere i valori di StageRack e dei plugin dal vi
 - **Finestra MIDI** (pulsante MIDI, ⌘⌥M): controller (uso, uscita LED automatica o scelta, **QUICK SETUP** per quelli conosciuti), tabella delle mappature con valore attuale, **Min/Max** (min > max = invertito), **modo** (Auto, Absolute, Toggle, Momentary, Trigger, 3 tipi di encoder relativi), **takeover** (*Pick-up*: il fader non fa saltare il valore finché non lo "raggiunge", ▲▼ ambra nella colonna Now; *Value scaling*; *None*), **LED** (valori on/off e indirizzo LED separato), **Layer** (sempre / senza SHIFT / con SHIFT), monitor di quello che arriva e cosa ha fatto, **preset** (`.stagerackmidi` in `~/Library/Application Support/StageRack/MIDI Maps`, uno può essere il default delle sessioni nuove). Le mappature si salvano con la sessione e hanno undo per i movimenti dei rack (un passo per gesto).
 - **LED del controller**: seguono la funzione, non il tasto: mute acceso se il rack è muto (anche se lo muti col mouse, da una scena o da un altro controllo), solo, bypass, bank ◀▶ accesi solo se si può andare in quella direzione, scena, automix, MUTE ALL. Inviati a 50 Hz solo quando cambiano.
 - **Akai MIDImix** (riconosciuto dal nome, QUICK SETUP = 59 mappature sulle 8 strisce del banco): fader = gain (pick-up), manopola alta = trim IN, manopole centrale e bassa = send ai bus A e B, MUTE = mute, **SOLO (tenuto) + MUTE = solo** (LED dei mute mostrano i solo mentre lo tieni), REC ARM = bypass del rack, BANK LEFT/RIGHT = banco, master fader libero. Korg **nanoKONTROL2** riconosciuto (nomi dei controlli; per i LED va messo in "External LED mode" col suo editor).
+- **Parametri in sync** (es. Arturia Delay TAPE-201, "Repeat Rate Left" in ms e "Repeat Rate Left Sync" in 1/8, 1/4.t...): molti plugin hanno due parametri per la stessa manopola e un interruttore Sync, e in sync ignorano quello in ms. StageRack li riconosce dal nome: la mappatura e la riga sul rack muovono sempre quello in uso (la finestra MIDI scrive "now ... Sync"); i valori a scatti si agganciano entro mezzo scatto. `--param-probe <formato> <plugin> [--set Nome=Valore] [--sweep Nome]` elenca i parametri e il gemello in uso.
 - Un messaggio usato da una mappatura non fa più anche il Program Change/CC delle scene; i messaggi non mappati funzionano come prima.
 - Misurato con un MIDImix virtuale in un processo separato via CoreMIDI (`--midi-loop-test`): pulsante → mute nel rack **mediana 0.12 ms, massimo < 0.3 ms** su 20 pressioni; LED di ritorno e banco verificati. Test logici in `--selftest` (44 controlli), render `--render-racks <dir> --midi`.
 

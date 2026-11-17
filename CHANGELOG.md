@@ -11,6 +11,18 @@ Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note
 - **Banco di rack** per controller a 8 strisce, rack controllati evidenziati.
 - **Akai MIDImix**: QUICK SETUP pronto (fader, manopole, mute, SOLO+mute = solo, rec = bypass, bank). Korg nanoKONTROL2 riconosciuto.
 
+### Plugin e rack
+- **Parametri in sync** (es. Arturia **Delay TAPE-201**: tempo in ms o 1/8, 1/4.t...): il plugin ha due parametri distinti e in sync ignora quello in ms. Ora la riga sul rack e il controller MIDI muovono sempre quello in uso; la finestra MIDI mostra quale ("now ... Sync").
+- **Send nei rack stretti**: manopoline invece delle barre.
+
+## 0.8.3-beta — 2026-11-17
+
+### Stabilità
+- **Corretto un crash con molte istanze di De-Feedback** (e alle accensioni di EverClean): l'app spostava gli hop creando un'istanza gemella e, se non serviva, la distruggeva mentre il plugin stava ancora calcolando. Con 12 De-Feedback a 16 campioni crashava in pochi secondi; ora no.
+- **Contatore dei dropout** nella barra in alto, sotto i meter DSP: verde "0 dropouts", rosso con il numero e da quanto tempo. Conta anche i callback saltati da CoreAudio. Clic per azzerarlo o aprire `dropouts.log`, che registra ora, tipo e rack più pesante di ogni dropout.
+- **Avvisi**: Risparmio energetico attivo, Mac surriscaldato, memoria in esaurimento (rallentano l'audio).
+- Mentre StageRack è aperto, macOS non mette in pausa l'app (App Nap) e non manda il Mac in stop.
+
 ## 0.8.2-beta — 2026-11-17
 
 ### Correzioni

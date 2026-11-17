@@ -168,8 +168,19 @@ private:
     {
         auto* rack = session.engine.findRack (current.rackId);
 
+        // A twin that is not used is parked like every instance removed while the session is
+        // open, never destroyed here: it has just run (alignment), and destroying a De-Feedback
+        // instance right after it ran corrupts the heap (crash in its helper's cblas_sgemm,
+        // reproduced with 12 instances @16 samples).
+        auto skip = [this, &twin]
+        {
+            if (twin != nullptr)
+                session.retirePlugin (std::move (twin));
+            next();
+        };
+
         if (twin == nullptr || rack == nullptr || rack->getPlugin (current.slot) != current.original)
-            return next();
+            return skip();
 
         auto& slot = rack->getSlot (current.slot);
         Rack::configurePlugin (*twin, rack->getSampleRate(), rack->getBlockSize());
@@ -182,14 +193,14 @@ private:
 
         // no periodic hop, or already where it should be: nothing to move
         if (hop == 0 || (slot.hopCalls == hop && slot.hopPhase == phase))
-            return next();
+            return skip();
 
         copyParameters (*current.original, *twin);   // in case they moved during the measurement
         auto* raw = twin.get();
         const auto sr = rack->getSampleRate();
 
         if (! rack->beginHandover (current.slot, twin, hop, phase, firstCallback, (int) (warmSeconds * sr), (int) (fadeSeconds * sr)))
-            return next();
+            return skip();   // beginHandover leaves the twin with us when it refuses
 
         twinPtr = raw;
         state = State::handingOver;

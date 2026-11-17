@@ -8,6 +8,7 @@
 #include "TempoEngine.h"
 #include "OscInput.h"
 #include "TempoOutput.h"
+#include "DropoutMonitor.h"
 
 namespace stagerack
 {
@@ -120,6 +121,9 @@ public:
     void realignRack (Rack&);
 
     juce::uint64 getCallbackCount() const noexcept           { return callbackCount.load (std::memory_order_relaxed); }
+
+    /** Live dropout counters and events (late callbacks, skipped callbacks). */
+    DropoutMonitor dropouts;
 
     /** Core wake assist (see CoreWakeAssist): 0 = auto (around plugin hops), 1 = always, 2 = off. */
     void setWakeAssistMode (int mode);

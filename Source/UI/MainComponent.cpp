@@ -32,6 +32,8 @@ MainComponent::MainComponent()
     engine.osc.setEnabled (settings.getBoolValue ("oscIn", false), settings.getIntValue ("oscPort", OscInput::defaultPort));
     Rack::asyncSafetyMs = (float) settings.getDoubleValue ("asyncSafetyMs", 3.0);
     engine.hopAlignEnabled = settings.getBoolValue ("hopAlign", true);
+    engine.logWatch = std::getenv ("STAGERACK_WATCHLOG") != nullptr;   // diagnostics: print the hop watch decisions
+    if (engine.logWatch) std::setvbuf (stdout, nullptr, _IOLBF, 0);
     engine.setWakeAssistMode (settings.getIntValue ("wakeAssist", 0));
 
     if (settings.containsKey ("workers"))
@@ -130,6 +132,9 @@ MainComponent::MainComponent()
     addChildComponent (*midiOverlay);
 
     autosave = std::make_unique<Autosave> (*session);
+    dropoutLog = std::make_unique<DropoutLog> (engine, PluginManager::getDataDirectory().getChildFile ("dropouts.log"));
+    systemhealth::beginLiveActivity();   // no App Nap, no idle sleep, precise timers while we run
+    systemhealth::memoryPressure();      // starts listening
     commonConstructorTail();
 
     if (audioReady)
@@ -730,6 +735,30 @@ void MainComponent::timerCallback()
     {
         engine.updateLatencyCompensation();
         session->watchHops();
+    }
+
+    // dropouts of the audio thread -> dropouts.log (with what the Mac was doing then)
+    dropoutLog->poll ([this] (int id) { auto* r = engine.findRack (id); return r != nullptr ? r->name : juce::String (id); },
+                      [this]
+                      {
+                          juce::String c = session->getFile().getFileName();
+                          if (auto* dev = engine.getDeviceManager().getCurrentAudioDevice())
+                              c << "  " << dev->getName() << " " << dev->getCurrentBufferSizeSamples() << " smp";
+                          return c << "  " << engine.getNumRacks() << " racks";
+                      });
+
+    // Opening a session loads and aligns plugins (heavy work, a few glitches are normal and
+    // nothing is playing yet): the counter shown starts once that is over. The log keeps all.
+    {
+        const bool settling = ! audioReady || session->getPendingLoads() > 0 || session->isRespreading();
+        if (settling && ! sessionSettling)
+            dropoutLog->note ("loading / aligning plugins");
+        if (sessionSettling && ! settling)
+        {
+            engine.dropouts.clearCounters();
+            dropoutLog->note ("session ready: counter restarted");
+        }
+        sessionSettling = settling;
     }
 
     engine.tempo.poll();   // audio taps / beat tracking (timestamps are exact: the timer's lag doesn't matter)

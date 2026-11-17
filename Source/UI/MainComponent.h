@@ -3,6 +3,7 @@
 #include "../Engine/Autosave.h"
 #include "../Engine/Session.h"
 #include "../Engine/DeviceGuard.h"
+#include "../Engine/DropoutLog.h"
 #include "Theme.h"
 #include "EditController.h"
 #include "AppMenu.h"
@@ -69,12 +70,14 @@ private:
 
     bool verticalLayout = false;
     int latencyCheckCounter = 0;
+    bool sessionSettling = true;   // plugins loading / aligning: dropouts are logged, the counter restarts after
 
     theme::LookAndFeel lnf;
     PluginManager pluginManager;
     AudioEngine engine;
     std::unique_ptr<Session> session;
     std::unique_ptr<Autosave> autosave;
+    std::unique_ptr<DropoutLog> dropoutLog;
     void openLastSession();
     void offerRecovery (Autosave::Recovered);
     void startAudioDevice();

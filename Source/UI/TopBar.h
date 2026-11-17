@@ -33,6 +33,7 @@ public:
     void resized() override;
     void lookAndFeelChanged() override;
     void mouseMove (const juce::MouseEvent&) override;
+    void mouseDown (const juce::MouseEvent&) override;
 
     static constexpr int preferredHeight = 76;
 
@@ -57,6 +58,10 @@ private:
     juce::Array<int> separators;   // x of the lines between sections
     std::vector<float> threadLoads;
     float totalLoad = 0.0f;
+    juce::String systemProblems;   // low power / heat / memory, refreshed once a second
+    int healthTick = 29;
+    double secondsSinceLastDrop() const;
+    juce::String dropoutTooltip() const;
 };
 
 } // namespace stagerack

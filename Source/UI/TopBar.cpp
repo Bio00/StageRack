@@ -1,3 +1,5 @@
+#include "../Plugins/PluginManager.h"
+#include "../Engine/SystemHealth.h"
 #include "TopBar.h"
 #include "../Engine/MidiControl.h"
 #include "../Engine/CoreAudioProbe.h"
@@ -124,9 +126,51 @@ void TopBar::rebuildTempoCells()
     resized();
 }
 
+double TopBar::secondsSinceLastDrop() const
+{
+    auto& engine = session.getEngine();
+    const auto last = engine.dropouts.getLastDropCallback();
+    if (last == 0)
+        return 1.0e9;
+    return (double) (engine.getCallbackCount() - last) * engine.getBlockSize() / juce::jmax (1.0, engine.getSampleRate());
+}
+
+juce::String TopBar::dropoutTooltip() const
+{
+    const auto& d = session.getEngine().dropouts;
+    juce::String t;
+    t << "Dropouts since start (click to reset or see the log):\n"
+      << "  late (processing longer than the buffer): " << (int) d.getLate() << "\n"
+      << "  skipped (CoreAudio called us late / system stall): " << (int) d.getSkipped() << "\n"
+      << "  silent (blocks lost while racks were changed): " << (int) d.getSilent() << "\n"
+      << "Each one is written with its time and the heaviest rack to dropouts.log.";
+    if (systemProblems.isNotEmpty())
+        t << "\n\nThe Mac now: " << systemProblems
+          << "\nLow Power Mode and heat slow the CPU down; low memory can stall the audio thread.";
+    return t;
+}
+
+void TopBar::mouseDown (const juce::MouseEvent& e)
+{
+    if (! cpuArea.contains (e.getPosition()))
+        return;
+
+    juce::PopupMenu m;
+    m.addItem ("Reset dropout counter", [safe = juce::Component::SafePointer<TopBar> (this)]
+    {
+        if (safe != nullptr) { safe->session.getEngine().dropouts.clearCounters(); safe->repaint (safe->cpuArea); }
+    });
+    const auto log = PluginManager::getDataDirectory().getChildFile ("dropouts.log");
+    m.addItem ("Show dropout log", log.existsAsFile(), false, [log] { log.revealToUser(); });
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withTargetScreenArea (localAreaToGlobal (cpuArea)));
+}
+
 void TopBar::mouseMove (const juce::MouseEvent& e)
 {
     juce::String tip;
+
+    if (cpuArea.contains (e.getPosition()))
+        tip = dropoutTooltip();
 
     if (logoArea.contains (e.getPosition()))
         tip = session.getFile() == juce::File() ? juce::String ("Untitled session") : session.getFile().getFullPathName();
@@ -194,6 +238,9 @@ void TopBar::updateMeters()
 
     // VIEW lit while the racks hide something
     viewButton.setColour (juce::TextButton::buttonColourId, session.getRackView() == Session::RackView() ? theme::slot : theme::accent.withAlpha (0.45f));
+
+    if (++healthTick % 30 == 0)
+        systemProblems = systemhealth::problems();
 
     repaint (cpuArea);
     repaint (deviceArea);
@@ -273,8 +320,9 @@ void TopBar::paint (juce::Graphics& g)
                        : (roomy ? "NO WORKGROUP" : "NO WG"),
                     head, juce::Justification::centredRight);
 
-        r.removeFromTop (4);
-        auto bars = r.removeFromTop (34);
+        r.removeFromTop (3);
+        auto status = r.removeFromBottom (13);
+        auto bars = r.withTrimmedBottom (2);
         const int n = juce::jmax (1, (int) threadLoads.size());
         const float bw = (float) bars.getWidth() / (float) n;
 
@@ -289,9 +337,32 @@ void TopBar::paint (juce::Graphics& g)
             g.fillRoundedRectangle (b.withTrimmedTop (b.getHeight() * (1.0f - l)), 2.0f);
         }
 
-        g.setColour (theme::textDim);
-        g.setFont (theme::font (9.5f));
-        g.drawText (juce::String ((int) threadLoads.size()) + " threads", r, juce::Justification::centredLeft);
+        // dropouts since start / reset, then anything the Mac is doing wrong (low power, heat, memory)
+        const auto drops = session.getEngine().dropouts.getTotal();
+        g.setFont (theme::font (10.0f, drops > 0));
+        juce::String text;
+
+        if (drops > 0)
+        {
+            g.setColour (theme::red);
+            text << (int) drops << (drops == 1 ? " DROPOUT" : " DROPOUTS");
+            if (const auto ago = secondsSinceLastDrop(); ago < 60.0)
+                text << " \xc2\xb7 " << juce::roundToInt (ago) << " s ago";
+        }
+        else
+        {
+            g.setColour (theme::green);
+            text << "0 dropouts";
+        }
+
+        if (systemProblems.isNotEmpty())
+        {
+            if (drops == 0)
+                g.setColour (theme::amber);
+            text << " \xc2\xb7 " << systemProblems;
+        }
+
+        g.drawText (text, status, juce::Justification::centredLeft, true);
     }
 
     // device info

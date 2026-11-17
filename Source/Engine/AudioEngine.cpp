@@ -886,6 +886,7 @@ void AudioEngine::setWorkerThreads (int numWorkers)
 //==============================================================================
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
+    dropouts.reset();   // a new run: no "gap" back to the previous one
     outputsBlocked = isDeviceAllowed != nullptr && ! isDeviceAllowed();
     // read once here: the UI must not ask CoreAudio on every paint (a busy coreaudiod would
     // freeze the window; seen after a Dante device was reopened)
@@ -1070,7 +1071,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
     const juce::SpinLock::ScopedTryLockType sl (racksLock);
 
     if (! sl.isLocked())
+    {
+        dropouts.note (callbackIndex, context.hostTimeNs != nullptr ? *context.hostTimeNs : (juce::uint64) 0, numSamples, sampleRate,
+                       0.0, -1, 0.0f, true);
         return;
+    }
 
     armWakeAssist (callbackIndex);
 
@@ -1289,6 +1294,20 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
     const auto elapsed = juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - t0);
     const auto budget = numSamples / juce::jmax (1.0, sampleRate);
     const auto load = elapsed / budget;
+
+    {
+        int heaviestId = -1;
+        float heaviestMs = 0.0f;
+        for (auto& r : racks)
+            if (const auto ms = r->callbackMs.load (std::memory_order_relaxed); ms > heaviestMs)
+            {
+                heaviestMs = ms;
+                heaviestId = r->getId();
+            }
+
+        dropouts.note (callbackIndex, context.hostTimeNs != nullptr ? *context.hostTimeNs : (juce::uint64) 0,
+                       numSamples, sampleRate, elapsed, heaviestId, heaviestMs);
+    }
     const auto prev = callbackLoad.load (std::memory_order_relaxed);
     callbackLoad.store (load > prev ? load : prev * 0.9 + load * 0.1, std::memory_order_relaxed);
 }
