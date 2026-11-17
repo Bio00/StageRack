@@ -10,6 +10,38 @@
 #include "RoutingTest.h"
 #include <chrono>
 #include <thread>
+#include <mach/mach.h>
+#include <mach/thread_info.h>
+
+namespace stagerack
+{
+// --threads: every thread of the process with its scheduling priority and CPU time
+inline void printThreads (const char* title)
+{
+    thread_act_array_t list = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads (mach_task_self(), &list, &count) != KERN_SUCCESS)
+        return;
+
+    std::cout << "      threads (" << title << "):" << std::endl;
+
+    for (mach_msg_type_number_t i = 0; i < count; ++i)
+    {
+        thread_extended_info_data_t info {};
+        mach_msg_type_number_t n = THREAD_EXTENDED_INFO_COUNT;
+
+        if (thread_info (list[i], THREAD_EXTENDED_INFO, (thread_info_t) &info, &n) == KERN_SUCCESS
+            && (info.pth_user_time + info.pth_system_time) > 20000000)   // > 20 ms of CPU
+            std::cout << "        pri " << info.pth_priority << " (cur " << info.pth_curpri << ", policy " << info.pth_policy
+                      << ")  cpu " << juce::String ((double) (info.pth_user_time + info.pth_system_time) * 1.0e-9, 2) << " s  "
+                      << info.pth_name << std::endl;
+
+        mach_port_deallocate (mach_task_self(), list[i]);
+    }
+
+    vm_deallocate (mach_task_self(), (vm_address_t) list, count * sizeof (thread_act_t));
+}
+}
 
 namespace stagerack
 {
@@ -478,7 +510,12 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
         proxy.cpuOnHop.clear();
         dm.addAudioCallback (&proxy);
 
-        juce::Thread::sleep (12000);
+        // CoreAudio's own overload count (kAudioDeviceProcessorOverload): the real dropouts,
+        // including an IO thread woken late, which the callback's own timing cannot see
+        juce::Thread::sleep (2000);
+        const auto xruns0 = dev->getXRunCount();
+        juce::Thread::sleep (10000);
+        const auto xruns = dev->getXRunCount() - xruns0;
         std::cout << "      rack 1 input peak (last 12 s): " << juce::String (juce::Decibels::gainToDecibels (engine.getRack (0).inMeter[0].readAndReset()), 1)
                   << " dBFS, output peak " << juce::String (juce::Decibels::gainToDecibels (engine.getRack (0).outMeter[0].readAndReset()), 1) << " dBFS" << std::endl;
 
@@ -487,6 +524,8 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
                 std::cout << "      bus " << juce::String::charToString ((juce::juce_wchar) ('A' + k - 1)) << " input peak "
                           << juce::String (juce::Decibels::gainToDecibels (bus->inMeter[0].readAndReset()), 1) << " dBFS (stage "
                           << bus->stage << ")" << std::endl;
+        if (args.contains ("--threads"))
+            printThreads ("while running");
         dm.removeAudioCallback (&proxy);
 
         const int n = juce::jmin ((int) proxy.count.load(), (int) proxy.times.size());
@@ -514,7 +553,7 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
         std::cout << "  " << label << " wake-assist=" << (engine.getWakeAssistMode() == 0 ? "auto" : engine.getWakeAssistMode() == 1 ? "always" : "off") << " workgroup=" << (proxy.workgroup ? "yes" : "no")
                   << "  callbacks " << (n - skip) << "  avg " << juce::String (sum / juce::jmax (1, n - skip), 3)
                   << " ms  worst " << juce::String (worst, 3) << " ms  over budget (" << juce::String (proxy.period, 2)
-                  << " ms): " << late << std::endl;
+                  << " ms): " << late << "  device overloads " << xruns << std::endl;
 
         auto h = proxy.hopCosts;
         if (h.size() > 20)

@@ -92,7 +92,10 @@ PluginManager::PluginManager()
     opts.filenameSuffix = ".settings";
     opts.folderName = "StageRack";
     opts.osxLibrarySubFolder = "Application Support";
-    settings = std::make_unique<juce::PropertiesFile> (opts);
+    // STAGERACK_DATA_DIR: a separate data folder (tests next to a running copy of the app)
+    settings = std::getenv ("STAGERACK_DATA_DIR") != nullptr
+                 ? std::make_unique<juce::PropertiesFile> (getDataDirectory().getChildFile ("StageRack.settings"), opts)
+                 : std::make_unique<juce::PropertiesFile> (opts);
 
     if (auto xml = juce::parseXML (getDataDirectory().getChildFile ("plugins.xml")))
         knownList.recreateFromXml (*xml);
@@ -123,8 +126,10 @@ void PluginManager::saveAll()
 
 juce::File PluginManager::getDataDirectory()
 {
-    auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                   .getChildFile ("Application Support/StageRack");
+    auto dir = std::getenv ("STAGERACK_DATA_DIR") != nullptr
+                 ? juce::File (juce::String::fromUTF8 (std::getenv ("STAGERACK_DATA_DIR")))
+                 : juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                       .getChildFile ("Application Support/StageRack");
     dir.createDirectory();
     return dir;
 }

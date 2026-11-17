@@ -162,6 +162,34 @@ De-Feedback 1.1.4 (Alpha Labs) può corrompere la memoria in rari casi quando un
 - Il numero di istanze parcheggiate compare accanto allo stato del Re-spread (SETTINGS).
 - Stress test: `--stress-lifecycle VST3 <plugin> <istanze vive> <cicli> [--audio] [--keep] [--hold s]`. Crea e distrugge istanze mentre altre elaborano audio; si può lanciare anche con Guard Malloc (`DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib`). Risultato: 0 crash in 60 cicli con Guard Malloc e in 250 cicli normali. Il bug è raro e non si riproduce a comando.
 
+### Stabilità dal vivo: dropout, crash, carico in background (2026-11-17)
+**Confronto con la 0.5.1** (stesso Mac M4 Pro, Altoparlanti, 32 campioni, 0.5.1 ricompilata dal suo tag):
+
+| De-Feedback | motore (`--bench-device`) 0.5.1 / attuale | app completa con interfaccia, 30 s, 0.5.1 / attuale |
+|---|---|---|
+| 4 | 0 / 0 persi, media 0.151 / 0.156 ms | — |
+| 8 | 1 / 0 persi | 0 / 0 oltre budget, CPU processo ~145% in entrambe |
+| 12 | 1 / 0 persi | 0 / 0 |
+| 16 | 0 / 1 persi | 0 / 0, CPU ~260% in entrambe |
+
+Il calcolo non è peggiorato: lo scheduling (worker, wake assist, HopAligner) è lo stesso codice della 0.5.1 e le funzioni nuove costano pochi µs per callback.
+
+**Il problema vero era un crash**: con 12 De-Feedback a 16 campioni la versione attuale crashava in ~20 s (2 su 2), la 0.5.1 no. L'hop watch (dalla 0.6) crea un gemello per spostare un hop; se poi il gemello non serviva (hop già nella fase giusta) veniva **distrutto subito**, mentre i thread di calcolo di De-Feedback lavoravano ancora (heap danneggiato, crash in `cblas_sgemm`). Succedeva anche a ogni accensione di EverClean che collideva. Ora i gemelli non usati vengono parcheggiati come tutte le altre istanze: 5 run su 5 senza crash.
+
+**Carico in background** (8-16 De-Feedback @32, misurato): 24 processi che saturano tutti i core, 48 thread a priorità user-interactive (come le app in primo piano), 12 thread Accelerate/AMX (stessa unità che usa De-Feedback): **0 callback persi**, anzi hop più veloci (core svegli, clock alto). Il motore e i thread di De-Feedback girano in tempo reale (priorità 97, sopra tutte le app) nel workgroup di CoreAudio. Restano fuori dal nostro controllo: Risparmio energetico, surriscaldamento, memoria piena, driver della scheda.
+
+**Cosa fa l'app ora**:
+- **Contatore dropout** sotto i meter DSP nella barra in alto: "0 dropouts" in verde, "N DROPOUTS · x s ago" in rosso. Conta i callback oltre budget, i callback **saltati** da CoreAudio (ricavati dagli orari dei buffer: il conteggio di overload di CoreAudio restava a 0 anche con callback saltati) e i blocchi muti mentre si modificano i rack. Riparte da 0 quando la sessione ha finito di caricarsi e allinearsi. Clic = azzera / mostra il log; tooltip = dettaglio.
+- **`dropouts.log`** nella cartella dati: ora al millisecondo, tipo, rack più pesante in quel momento, stato del Mac. Utile per capire un click sentito durante lo show.
+- **Avvisi di sistema** nella stessa riga: LOW POWER MODE, HOT/OVERHEATING, LOW MEMORY.
+- **Attività "latency critical"** per tutta la durata dell'app: niente App Nap, timer precisi, niente sleep di sistema (lo schermo può spegnersi).
+
+Per misurare un altro Mac (es. M3 base) dal Terminale, con l'app installata:
+```bash
+/Applications/StageRack.app/Contents/MacOS/StageRack --bench-device VST3 /Library/Audio/Plug-Ins/VST3/Defeedback.vst3 8 32 Speakers --multicore-only
+```
+(`Altoparlanti` su un Mac in italiano; `--threads` elenca i thread con priorità e CPU). Variabili per i test: `STAGERACK_DATA_DIR` = cartella dati separata (prove accanto a un'app aperta), `STAGERACK_WATCHLOG=1` stampa le decisioni dell'hop watch.
+
 ## Concatenamento e gruppi di latenza
 - **Rack concatenati**: nel menu IN di un rack, sotto "From rack", scegli un altro rack come sorgente. Il rack riceve l'uscita dell'altro (dopo gain e mute). Con OUT: none il rack sorgente alimenta solo la catena. Il motore elabora i rack a **stadi** (prima i rack che leggono dalla scheda, poi quelli che leggono da altri rack, ognuno in parallelo), sempre **nello stesso callback, quindi senza latenza aggiunta**. Le catene circolari sono rifiutate.
 - **Gruppi di latenza** (come SuperRack): menu del rack → Latency group A-H. Ogni rack del gruppo viene ritardato fino alla latenza più alta del gruppo, compresa quella ereditata dai rack a monte, così restano allineati in fase. Il badge "LG A +x ms" mostra il ritardo applicato. Le latenze vengono ricontrollate due volte al secondo, perché un plugin può cambiarle.
