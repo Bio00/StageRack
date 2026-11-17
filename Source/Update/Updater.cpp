@@ -1,4 +1,5 @@
 #include "Updater.h"
+#include "../UI/ChangelogWindow.h"
 #include <unistd.h>
 
 namespace stagerack::update
@@ -72,6 +73,26 @@ static const char* userAgent()
     return "User-Agent: StageRack-Updater\r\n";
 }
 
+juce::String cleanReleaseNotes (const juce::String& body)
+{
+    // scripts/release.sh puts the install instructions after this marker; older releases
+    // have them in a "### Installazione" section
+    auto text = body.replace ("\r", "").upToFirstOccurrenceOf ("<!-- install -->", false, false);
+    juce::StringArray out;
+    bool skipping = false;
+
+    for (const auto& line : juce::StringArray::fromLines (text))
+    {
+        if (line.startsWith ("#"))
+            skipping = line.startsWithIgnoreCase ("### Installazione") || line.startsWithIgnoreCase ("### Install");
+
+        if (! skipping && ! line.startsWith ("Licenza:") && ! line.startsWith ("**Requisiti:**"))
+            out.add (line.startsWith ("## ") ? "### " + line.substring (3) : line);
+    }
+
+    return out.joinIntoString ("\n").trim();
+}
+
 std::optional<Release> fetchLatest (juce::String& error)
 {
     const juce::URL url ("https://api.github.com/repos/" + juce::String (repository) + "/releases?per_page=30");
@@ -105,6 +126,7 @@ std::optional<Release> fetchLatest (juce::String& error)
     }
 
     std::optional<Release> best;
+    juce::Array<Release> all;
 
     for (const auto& r : *json.getArray())
     {
@@ -118,6 +140,7 @@ std::optional<Release> fetchLatest (juce::String& error)
         rel.notes = r["body"].toString();
         rel.pageUrl = r["html_url"].toString();
         rel.prerelease = (bool) r["prerelease"];
+        rel.publishedDate = r["published_at"].toString().substring (0, 10);
 
         // the macOS app zip (prefer the universal one)
         if (const auto* assets = r["assets"].getArray())
@@ -141,12 +164,30 @@ std::optional<Release> fetchLatest (juce::String& error)
         if (rel.version.isEmpty() || rel.assetUrl.isEmpty())
             continue;
 
+        all.add (rel);
+
         if (! best.has_value() || compareVersions (rel.version, best->version) > 0)
             best = rel;
     }
 
     if (! best.has_value())
+    {
         error = "No release with a macOS download yet.";
+    }
+    else
+    {
+        // what changed since this build: every newer release, newest first
+        std::sort (all.begin(), all.end(), [] (const Release& a, const Release& b) { return compareVersions (a.version, b.version) > 0; });
+        const auto current = currentVersion();
+
+        for (const auto& rel : all)
+            if (compareVersions (rel.version, current) > 0 && compareVersions (rel.version, best->version) <= 0)
+                best->changelog << "## " << rel.version
+                                << (rel.publishedDate.isNotEmpty() ? juce::String::fromUTF8 (" \xe2\x80\x94 ") + rel.publishedDate : juce::String())
+                                << "\n\n" << cleanReleaseNotes (rel.notes) << "\n\n";
+
+        best->changelog = best->changelog.trim();
+    }
 
     return best;
 }
@@ -484,7 +525,7 @@ void Controller::onChecked (std::optional<Release> rel, juce::String error, bool
 
 void Controller::offer (const Release& rel)
 {
-    auto notes = rel.notes.replace ("\r", "").replace ("**", "").replace ("### ", "").trim();
+    auto notes = cleanReleaseNotes (rel.notes).replace ("**", "").replace ("### ", "").trim();
 
     // markdown-ish to plain text, short enough for a dialog
     notes = notes.replace ("`", "").replace ("\n\n", "\n");
@@ -504,6 +545,8 @@ void Controller::offer (const Release& rel)
         w->addTextBlock ("What's new:\n" + notes);
 
     w->addButton ("Download and install", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    if (rel.changelog.isNotEmpty())
+        w->addButton ("What's new", 3);
     w->addButton ("Later", 0, juce::KeyPress (juce::KeyPress::escapeKey));
     w->addButton ("Skip this version", 2);
 
@@ -516,7 +559,20 @@ void Controller::offer (const Release& rel)
             settings.setValue (settingSkip, rel.version);
         else if (result == 1)
             startDownload (rel);
+        else if (result == 3)
+            showChanges (rel);
     }), true);
+}
+
+void Controller::showChanges (const Release& rel)
+{
+    // closing the notes brings the offer back, so the user can still download or skip
+    ChangelogWindow::setOnClose ([token = alive, this, rel]
+    {
+        if (*token)
+            offer (rel);
+    });
+    ChangelogWindow::show ("What's new since " + currentVersion(), rel.changelog);
 }
 
 void Controller::startDownload (const Release& rel)

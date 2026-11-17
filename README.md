@@ -328,12 +328,14 @@ I plugin dei rack ricevono un **tempo host** (BPM e posizione di battuta, transp
 - Il download (con barra e Cancel) viene verificato prima di installare: bundle id, versione uguale a quella della release, firma del codice intatta.
 - **Install and restart**: StageRack chiede se salvare la sessione, si chiude, viene sostituito **nella stessa cartella** (la vecchia app resta finché la nuova non è copiata tutta; se qualcosa va storto viene rimessa la vecchia e al riavvio compare un avviso) e si riapre da solo. Se la cartella non è scrivibile, macOS chiede la password di amministratore. Se l'app gira da una posizione di sola lettura (aperta direttamente dallo zip scaricato, "App Translocation"), la nuova versione viene messa in Download con le istruzioni.
 - L'installazione ferma l'audio per qualche secondo: **non farla durante uno spettacolo**.
-- Diagnostica: `StageRack --check-update` stampa cosa vede su GitHub (`--download` scarica e verifica anche); log dell'installazione in `~/Library/Caches/StageRack/Update/install.log`.
+- **Novità (changelog)**: nel dialogo dell'aggiornamento il pulsante **What's new** apre una finestra con le note di *tutte* le versioni che ti mancano (da GitHub); chiudendola il dialogo torna. Al primo avvio dopo un aggiornamento la finestra compare da sola con le novità rispetto alla versione che usavi (setting `lastSeenVersion`; alla prima installazione no). Sempre disponibile dal menu StageRack → **What's New...** (storia completa, letta da `CHANGELOG.md` dentro l'app, funziona anche offline).
+- Diagnostica: `StageRack --whats-new [versione]` stampa le note che l'app mostrerebbe aggiornando da quella versione; `--render-changelog <dir> [versione]` disegna la finestra in PNG. `StageRack --check-update` stampa cosa vede su GitHub (`--download` scarica e verifica anche); log dell'installazione in `~/Library/Caches/StageRack/Update/install.log`.
 - Verificato da capo a fondo: una copia "finta 0.0.9" ha trovato la 0.1.0-beta su GitHub, l'ha scaricata, verificata, installata al suo posto e si è riaperta.
 
 ### Pubblicare un aggiornamento
-1. In `CMakeLists.txt` alza `project(StageRack VERSION x.y.z)` (e `STAGERACK_VERSION_LABEL`: `"beta"`, oppure `""` per una versione finale), poi commit.
-2. `scripts/release.sh [note.md]`: compila, esegue i test, impacchetta, crea il tag `vx.y.z-beta` e la release GitHub con lo zip. Il tag deve coincidere con la versione dell'app: l'updater confronta le due.
+1. In `CMakeLists.txt` alza `project(StageRack VERSION x.y.z)` (e `STAGERACK_VERSION_LABEL`: `"beta"`, oppure `""` per una versione finale).
+2. In `CHANGELOG.md` aggiungi in cima la sezione `## x.y.z-beta — data` con le novità (in italiano, per chi usa l'app), poi commit.
+3. `scripts/release.sh`: compila, esegue i test, impacchetta, crea il tag `vx.y.z-beta` e la release GitHub con lo zip. Le note della release sono la sezione del CHANGELOG più le istruzioni d'installazione (senza la sezione lo script si ferma); `scripts/release.sh note.md` per note diverse. Il tag deve coincidere con la versione dell'app: l'updater confronta le due.
 
 ## Test
 ```bash

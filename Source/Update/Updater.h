@@ -28,7 +28,12 @@ namespace update
         juce::String tag, version, name, notes, pageUrl, assetName, assetUrl;
         juce::int64 assetSize = 0;
         bool prerelease = false;
+        juce::String publishedDate;   // "2026-11-17"
+        juce::String changelog;       // markdown: notes of every release newer than this build, up to this one
     };
+
+    /** GitHub release body without the install instructions (they only matter on the web page). */
+    juce::String cleanReleaseNotes (const juce::String& body);
 
     /** Version of this build ("0.2.0-beta"); `--fake-version x` overrides it (tests). */
     juce::String currentVersion();
@@ -83,6 +88,7 @@ namespace update
         void startCheck (bool userAsked);
         void onChecked (std::optional<Release>, juce::String error, bool userAsked);
         void offer (const Release&);
+        void showChanges (const Release&);
         void startDownload (const Release&);
         void timerCallback() override;
 

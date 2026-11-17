@@ -20,6 +20,8 @@
 #include "UI/EditGroupsWindow.h"
 #include "Engine/Rack.h"
 #include "Update/Updater.h"
+#include "Update/Changelog.h"
+#include "UI/ChangelogWindow.h"
 #include "Engine/CoreAudioProbe.h"
 
 namespace stagerack
@@ -84,6 +86,42 @@ public:
             const auto result = PluginManager::runLatencyProbeChild (args);
             std::fflush (nullptr);
             std::_Exit (result);
+        }
+
+        if (args.contains ("--whats-new") || args.contains ("--render-changelog"))
+        {
+            // Diagnostics: --whats-new [seenVersion]  prints the notes the app would show after an
+            // update from seenVersion (none = whole history); --render-changelog <dir> [seenVersion]
+            // also draws the window (dark + light) to PNG
+            juce::Process::setDockIconVisible (false);
+            const bool render = args.contains ("--render-changelog");
+            const int at = args.indexOf (render ? "--render-changelog" : "--whats-new");
+            const juce::File dir (render ? args[at + 1] : juce::String());
+            const auto seen = args[at + (render ? 2 : 1)].startsWith ("-") ? juce::String() : args[at + (render ? 2 : 1)];
+            const auto md = update::bundledChangelog();
+            const auto entries = update::parseChangelog (md);
+            std::printf ("current %s, %d versions in the bundled changelog\n", update::currentVersion().toRawUTF8(), entries.size());
+            const auto notes = seen.isNotEmpty() ? update::changesBetween (md, seen, update::currentVersion()) : md;
+            std::printf ("%s\n", notes.toRawUTF8());
+
+            if (render)
+            {
+                for (bool light : { false, true })
+                {
+                    theme::setLight (light);
+                    theme::LookAndFeel lnf;
+                    juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
+                    auto img = ChangelogWindow::render (notes, 620, 640);
+                    juce::PNGImageFormat png;
+                    juce::FileOutputStream out (dir.getChildFile (light ? "changelog-light.png" : "changelog-dark.png"));
+                    out.setPosition (0); out.truncate();
+                    png.writeImageToStream (img, out);
+                    juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
+                }
+            }
+
+            std::fflush (stdout);
+            std::_Exit (md.isNotEmpty() && ! entries.isEmpty() ? 0 : 1);
         }
 
         if (args.contains ("--render-browser"))
@@ -472,6 +510,10 @@ public:
                 std::printf ("latest %s (%s%s) %s, %lld bytes\n%s\n", rel->version.toRawUTF8(), rel->tag.toRawUTF8(),
                              rel->prerelease ? ", pre-release" : "", rel->assetName.toRawUTF8(), (long long) rel->assetSize,
                              newer ? "UPDATE AVAILABLE" : "up to date");
+                if (rel->changelog.isNotEmpty())
+                    std::printf ("what's new: %d versions, %d chars (first: %s)\n",
+                                 update::parseChangelog (rel->changelog).size(),
+                                 rel->changelog.length(), rel->changelog.upToFirstOccurrenceOf ("\n", false, false).toRawUTF8());
                 rc = 0;
 
                 if (args.contains ("--download"))

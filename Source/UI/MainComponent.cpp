@@ -9,6 +9,8 @@
 #include "TempoWindow.h"
 #include "EditGroupsWindow.h"
 #include "../Update/Updater.h"
+#include "../Update/Changelog.h"
+#include "ChangelogWindow.h"
 #include "../Engine/CoreAudioProbe.h"
 
 namespace stagerack
@@ -266,6 +268,7 @@ void MainComponent::commonConstructorTail()
 
    #if JUCE_MAC
     juce::PopupMenu extra;
+    extra.addItem ("What's New...", [] { showWhatsNew (false); });
     extra.addItem ("Check for Updates...", [this] { updater->checkNow(); });
     extra.addSeparator();
     extra.addCommandItem (&commands, cmd::audioSettings, "Settings...");
@@ -274,6 +277,50 @@ void MainComponent::commonConstructorTail()
 
     // not for the command-line test modes (they never build the main window anyway)
     updater->checkAtStartup();
+
+    // first start of a new version: show what changed since the version the user last saw
+    // (a first install shows nothing: there is no "before")
+    const auto current = update::currentVersion();
+    const auto seen = settings.getValue (update::settingSeenVersion);
+
+    if (seen != current)
+    {
+        const bool upgraded = seen.isNotEmpty() ? update::compareVersions (seen, current) < 0
+                                                : settings.containsKey ("lastSession") || settings.containsKey ("verticalLayout");
+        settings.setValue (update::settingSeenVersion, current);
+
+        if (upgraded)
+            juce::Timer::callAfterDelay (1500, [safe = juce::Component::SafePointer<MainComponent> (this), seen]
+            {
+                if (safe != nullptr)
+                    showWhatsNew (true, seen);
+            });
+    }
+}
+
+void MainComponent::showWhatsNew (bool sinceUpdate, const juce::String& seenBefore)
+{
+    const auto md = update::bundledChangelog();
+    const auto current = update::currentVersion();
+
+    if (sinceUpdate)
+    {
+        const auto notes = update::changesBetween (md, seenBefore, current);
+
+        if (notes.isNotEmpty())
+            ChangelogWindow::show ("StageRack " + current + ": what's new", notes);
+        return;
+    }
+
+    // the whole history, from this version back (not the intro above the first version)
+    juce::String all;
+    for (const auto& e : update::parseChangelog (md))
+        if (update::compareVersions (e.version, current) <= 0)
+            all << "## " << e.version << (e.date.isNotEmpty() ? juce::String::fromUTF8 (" \xe2\x80\x94 ") + e.date : juce::String())
+                << "\n\n" << e.body << "\n\n";
+
+    ChangelogWindow::show ("What's New in StageRack",
+                           all.isNotEmpty() ? all.trim() : juce::String ("The release notes are missing from this build."));
 }
 
 MainComponent::~MainComponent()
@@ -296,6 +343,7 @@ void MainComponent::prepareToQuit()
     juce::MenuBarModel::setMacMainMenu (nullptr);
    #endif
     updater = nullptr;
+    ChangelogWindow::closeAll();
     PluginWindow::closeAll();
     pluginWindow = nullptr;
     settingsWindow = nullptr;

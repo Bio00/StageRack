@@ -48,6 +48,10 @@ set(STAGERACK_ICONS "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icon/AppIcon.icns"
 set_source_files_properties(${STAGERACK_ICONS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 target_sources(StageRack PRIVATE ${STAGERACK_ICONS})
 
+# Release notes shown in the app (What's New), from the same file scripts/release.sh publishes
+set_source_files_properties(CHANGELOG.md PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+target_sources(StageRack PRIVATE CHANGELOG.md)
+
 juce_generate_juce_header(StageRack)
 
 target_sources(StageRack PRIVATE
@@ -80,7 +84,9 @@ target_sources(StageRack PRIVATE
     Source/UI/AppMenu.mm
     Source/UI/PluginBrowser.cpp
     Source/UI/PluginManagerWindow.cpp
-    Source/Update/Updater.cpp)
+    Source/Update/Updater.cpp
+    Source/Update/Changelog.cpp
+    Source/UI/ChangelogWindow.cpp)
 
 target_include_directories(StageRack PRIVATE Source libs/clap/include
     libs/JUCE/modules/juce_audio_processors_headless/format_types/VST3_SDK)   # VST3 interfaces only (meter flags)
