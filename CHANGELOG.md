@@ -2,6 +2,11 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.9.1-beta — 2026-11-17
+
+### Rack
+- **Tendine di più rack insieme**: trascinando un divisore (IN, send, OUT) con **⌥** i rack selezionati prendono la stessa misura, con **⇧** si spostano della stessa quantità. ⌥/⇧ + doppio click = tutti automatici.
+
 ## 0.9.0-beta — 2026-11-17
 
 ### Controller MIDI

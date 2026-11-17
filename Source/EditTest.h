@@ -415,6 +415,65 @@ inline int runEditSelfTest()
             b.uiSize = c.uiSize = 1.0f;
         }
 
+        // --- dividers inside the rack (vertical racks: input | plugins): Alt = same length, Shift = same change
+        {
+            for (int i = 0; i < comps.size(); ++i)
+            {
+                comps[i]->setVertical (true);
+                comps[i]->setBounds (i * 200, 0, 190, 900);
+            }
+            paintAll();
+
+            juce::Component* inHandle = nullptr;
+            for (auto* ch : rcB->getChildren())
+                if (auto* tt = dynamic_cast<juce::SettableTooltipClient*> (ch); tt != nullptr && ch->isVisible()
+                    && tt->getTooltip().startsWith ("Drag: room for the input"))
+                    inHandle = ch;
+            check (inHandle != nullptr, "found the input divider of B (vertical)");
+
+            if (inHandle != nullptr)
+            {
+                const juce::Point<float> p0 (2.0f, 2.0f), down (2.0f, 42.0f);
+                auto dragDivider = [&] (juce::ModifierKeys m)
+                {
+                    for (auto* rc : comps) rc->resized();   // lay out the lengths set below
+                    setMods (m);
+                    mouse (*inHandle, p0, p0, m, 0);
+                    mouse (*inHandle, down, p0, m, 1);
+                    mouse (*inHandle, down, p0, m, 2);
+                    setMods ({});
+                };
+
+                b.uiInputV = 50.0f; c.uiInputV = 80.0f; a.uiInputV = d.uiInputV = -1.0f;
+                dragDivider (alt);
+                check (std::abs (b.uiInputV - 90.0f) < 0.5f && std::abs (c.uiInputV - 90.0f) < 0.5f && a.uiInputV < 0.0f && d.uiInputV < 0.0f,
+                       "Alt-drag input divider: C takes B's length (B " + juce::String (b.uiInputV, 0) + ", C " + juce::String (c.uiInputV, 0) + "), A/D untouched");
+
+                b.uiInputV = 50.0f; c.uiInputV = 80.0f;
+                dragDivider (shift);
+                check (std::abs (b.uiInputV - 90.0f) < 0.5f && std::abs (c.uiInputV - 120.0f) < 0.5f,
+                       "Shift-drag input divider: same change on C (B " + juce::String (b.uiInputV, 0) + ", C " + juce::String (c.uiInputV, 0) + ")");
+
+                b.uiInputV = 50.0f; c.uiInputV = 80.0f;
+                dragDivider (plain);
+                check (std::abs (b.uiInputV - 90.0f) < 0.5f && std::abs (c.uiInputV - 80.0f) < 0.5f, "plain drag input divider: B only (B " + juce::String (b.uiInputV, 0) + ", C " + juce::String (c.uiInputV, 0) + ")");
+
+                setMods (alt);
+                inHandle->mouseDoubleClick (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), p0, alt, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                                              inHandle, inHandle, juce::Time::getCurrentTime(), p0, juce::Time::getCurrentTime(), 2, false));
+                setMods ({});
+                check (b.uiInputV < 0.0f && c.uiInputV < 0.0f, "Alt-double-click input divider: B and C back to automatic");
+            }
+
+            for (int i = 0; i < comps.size(); ++i)
+            {
+                comps[i]->setVertical (false);
+                comps[i]->setBounds (0, i * RackComponent::baseHeight, 1400, RackComponent::baseHeight);
+            }
+            a.uiInputV = b.uiInputV = c.uiInputV = d.uiInputV = -1.0f;
+            paintAll();
+        }
+
         // leave the gains as the next checks expect them
         gs->setValue (-20.0, juce::dontSendNotification);
         b.gainDb = -20.0f; c.gainDb = -1.0f;

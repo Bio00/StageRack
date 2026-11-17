@@ -270,6 +270,7 @@ Automixer integrato per microfoni parlato (conferenze, culto, teatro, panel), se
 - **VERTICAL / HORIZONTAL** nella barra in alto: rack in righe (stile SuperRack) o strisce verticali stile mixer.
 - **Colonna delle scene richiudibile**: la striscia con la freccia a sinistra dei rack (o ⌘L) la chiude e la riapre; lo stato viene ricordato.
 - **Dimensione dei rack**: trascina il bordo inferiore (orizzontale) o destro (verticale), oppure ⌘= / ⌘- sui rack selezionati (o su tutti). Con **⌥** trascinando il bordo tutti i rack selezionati prendono la stessa dimensione, con **⇧** cambiano della stessa quantità (ognuno tiene la sua); il rack trascinato non deve per forza essere selezionato. Da piccoli i rack passano a un layout compatto.
+- **Tendine dentro il rack** (divisori IN | plugin, plugin | send, send | OUT): stesse regole del bordo. Con **⌥** i rack selezionati prendono la stessa altezza (o larghezza), con **⇧** si spostano della stessa quantità (ognuno tiene la sua); ⌥/⇧ + doppio click = tutti di nuovo automatici.
 - **Selezione**: click sul rack, ⌘-click per aggiungere, ⇧-click per un intervallo, ⌘A per tutti, Esc o un **click a vuoto** (fuori dai rack) per deselezionare. Click su uno slot per selezionare il plugin.
 - **Trascina** un plugin su un qualsiasi slot di un qualsiasi rack per spostarlo (se lo slot è occupato si scambiano); **con ⌥ (Alt)** ne fai una copia con lo stesso stato.
 - **Trascina un rack** (dal nome o dallo sfondo) per riordinarlo; **con ⌥** lo duplichi in quella posizione.

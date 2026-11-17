@@ -1175,7 +1175,9 @@ private:
 //==============================================================================
 /** Divider inside one rack: between the plugins and the sends (Sends) or between the input
     section and the plugins (Input). Drag = this rack only, all the way (only sends / only
-    plugins), double-click = automatic. */
+    plugins), double-click = automatic. Alt = the selected racks take the same length, Shift =
+    they move by the same amount (like the rack's size handle); double-click with either = all
+    of them back to automatic. */
 class RackComponent::SplitHandle final : public juce::Component,
                                          public juce::SettableTooltipClient
 {
@@ -1197,37 +1199,30 @@ public:
 
     void mouseExit (const juce::MouseEvent&) override  { repaint(); }
 
-    void mouseDown (const juce::MouseEvent&) override
+    void mouseDown (const juce::MouseEvent& e) override
     {
-        if (kind == Input)
-            startLength = (float) owner.inputLength;
-        else if (kind == Output)
-            startLength = (float) owner.outputLength;
-        else
-            startLength = owner.sendsView.isVisible() ? (float) (owner.vertical ? owner.sendsView.getHeight() : owner.sendsView.getWidth()) : 0.0f;
+        startLength = lengthOf (owner);
+        relative = e.mods.isShiftDown();
+        others.clear();
+
+        for (auto* rc : linkedRacks (e.mods))
+            others.push_back ({ rc, lengthOf (*rc) });
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
-        if (kind == Input)
-        {
-            // the input section sits above: dragging down gives it more room
-            owner.rack.uiInputV = juce::jmax (0.0f, startLength + (float) e.getDistanceFromDragStartY());
-        }
-        else if (kind == Output)
-        {
-            // the output section sits below: dragging up gives it more room
-            owner.rack.uiOutputV = juce::jmax (0.0f, startLength - (float) e.getDistanceFromDragStartY());
-        }
-        else
-        {
-            // the sends sit after the divider: dragging it up (left) gives them more room
-            const auto delta = (float) (owner.vertical ? e.getDistanceFromDragStartY() : e.getDistanceFromDragStartX());
-            (owner.vertical ? owner.rack.uiSendsV : owner.rack.uiSendsH) = juce::jmax (0.0f, startLength - delta);
-        }
+        float length;
 
-        owner.resized();
-        owner.repaint();
+        if (kind == Input)        length = startLength + (float) e.getDistanceFromDragStartY();   // input above: down = more room
+        else if (kind == Output)  length = startLength - (float) e.getDistanceFromDragStartY();   // output below: up = more room
+        else                      length = startLength - (float) (owner.vertical ? e.getDistanceFromDragStartY()     // sends after the
+                                                                                 : e.getDistanceFromDragStartX());  // divider: up/left = more
+        length = juce::jmax (0.0f, length);
+        setLength (owner, length);
+
+        for (auto& [rc, start] : others)
+            if (rc != nullptr)
+                setLength (*rc, relative ? juce::jmax (0.0f, start + length - startLength) : length);
     }
 
     void mouseUp (const juce::MouseEvent& e) override
@@ -1236,14 +1231,11 @@ public:
             owner.session.markDirty();
     }
 
-    void mouseDoubleClick (const juce::MouseEvent&) override
+    void mouseDoubleClick (const juce::MouseEvent& e) override
     {
-        if (kind == Input)                       owner.rack.uiInputV = -1.0f;
-        else if (kind == Output)                 owner.rack.uiOutputV = -1.0f;
-        else if (owner.vertical)                 owner.rack.uiSendsV = -1.0f;
-        else                                     owner.rack.uiSendsH = -1.0f;
-        owner.resized();
-        owner.repaint();
+        setLength (owner, -1.0f);
+        for (auto* rc : linkedRacks (e.mods))
+            setLength (*rc, -1.0f);
         owner.session.markDirty();
     }
 
@@ -1259,8 +1251,45 @@ public:
     }
 
 private:
+    /** The room this divider gives now (as laid out, also when it is automatic). */
+    float lengthOf (RackComponent& rc) const
+    {
+        if (kind == Input)   return (float) rc.inputLength;
+        if (kind == Output)  return (float) rc.outputLength;
+        return rc.sendsView.isVisible() ? (float) (rc.vertical ? rc.sendsView.getHeight() : rc.sendsView.getWidth()) : 0.0f;
+    }
+
+    /** -1 = automatic. */
+    void setLength (RackComponent& rc, float length) const
+    {
+        if (kind == Input)        rc.rack.uiInputV = length;
+        else if (kind == Output)  rc.rack.uiOutputV = length;
+        else if (rc.vertical)     rc.rack.uiSendsV = length;
+        else                      rc.rack.uiSendsH = length;
+        rc.resized();
+        rc.repaint();
+    }
+
+    /** Alt or Shift: the other selected racks (the dragged one doesn't need to be selected). */
+    std::vector<RackComponent*> linkedRacks (const juce::ModifierKeys& mods) const
+    {
+        std::vector<RackComponent*> result;
+        auto* parent = owner.getParentComponent();
+
+        if (parent == nullptr || ! (mods.isAltDown() || mods.isShiftDown()))
+            return result;
+
+        for (auto id : owner.edit.targetRacks())
+            for (auto* c : parent->getChildren())
+                if (auto* rc = dynamic_cast<RackComponent*> (c); rc != nullptr && rc != &owner && rc->rack.getId() == id)
+                    result.push_back (rc);
+        return result;
+    }
+
     RackComponent& owner;
     Kind kind;
+    bool relative = false;
+    std::vector<std::pair<juce::Component::SafePointer<RackComponent>, float>> others;   // racks moved together: length at mouse-down
     float startLength = 0.0f;
 };
 
