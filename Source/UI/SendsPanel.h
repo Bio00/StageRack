@@ -67,7 +67,9 @@ private:
     std::vector<int> letters;            // buses shown, in letter order
     std::vector<float> shown;            // last painted levels (repaint on change)
     int dragCell = -1, hoverCell = -1, fitHeight = 0;
-    float dragStartPos = 0.0f, dragLastDb = 0.0f;
+    float dragStartPos = 0.0f, dragLastDb = 0.0f, dragPos = 0.0f;
+    juce::Point<float> dragLast;
+    bool altClick = false;   // Alt-click without moving = send back to its default (off)
     juce::ModifierKeys dragMods;
 
     JUCE_DECLARE_NON_COPYABLE (SendsPanel)

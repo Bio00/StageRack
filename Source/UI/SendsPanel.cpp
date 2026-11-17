@@ -1,5 +1,6 @@
 #include "SendsPanel.h"
 #include "Theme.h"
+#include "ParamSlider.h"
 
 namespace stagerack
 {
@@ -299,7 +300,9 @@ void SendsPanel::mouseDown (const juce::MouseEvent& e)
     dragCell = cell;
     dragMods = e.mods;
     dragLastDb = rack.sends[(size_t) letters[(size_t) cell] - 1].db.load();
-    dragStartPos = dbToPos (dragLastDb);
+    dragStartPos = dragPos = dbToPos (dragLastDb);
+    dragLast = e.position;
+    altClick = e.mods.isAltDown();
     repaint();
 }
 
@@ -308,20 +311,34 @@ void SendsPanel::mouseDrag (const juce::MouseEvent& e)
     if (dragCell < 0 || dragCell >= (int) letters.size())
         return;
 
-    // knobs: up/down over ~160 px; bars: across their width (Shift: 4x finer)
-    const auto fine = e.mods.isShiftDown() ? 4.0f : 1.0f;
-    const auto move = knobs() ? (float) -e.getDistanceFromDragStartY() / (160.0f * fine)
-                              : (float) e.getDistanceFromDragStartX() / (fine * (float) juce::jmax (40, getWidth()));
-    const auto db = posToDb (dragStartPos + move);
+    if (e.getDistanceFromDragStart() > 2)
+        altClick = false;
+
+    if (altClick)
+        return;
+
+    // knobs: up/down over ~160 px; bars: across their width. Cmd/Shift: 5x finer, also mid-drag
+    // (incremental, so the value doesn't jump when the key changes)
+    const auto fine = ParamSlider::isFine (e.mods) ? 1.0f / ParamSlider::fineFactor : 1.0f;
+    const auto d = e.position - dragLast;
+    dragLast = e.position;
+    dragPos = juce::jlimit (0.0f, 1.0f, dragPos + (knobs() ? -d.y / (160.0f * fine)
+                                                           : d.x / (fine * (float) juce::jmax (40, getWidth()))));
+    const auto db = posToDb (dragPos);
     const auto delta = (db > Rack::sendOffDb && dragLastDb > Rack::sendOffDb) ? db - dragLastDb : 0.0f;
     setLevel (letters[(size_t) dragCell], db, dragMods, delta);
     dragLastDb = db;
 }
 
-void SendsPanel::mouseUp (const juce::MouseEvent&)
+void SendsPanel::mouseUp (const juce::MouseEvent& e)
 {
+    if (dragCell >= 0 && dragCell < (int) letters.size() && altClick && e.getDistanceFromDragStart() <= 2)
+        setLevel (letters[(size_t) dragCell], Rack::sendOffDb, dragMods);
+
     if (dragCell >= 0)
         session.markDirty();
+
+    altClick = false;
 
     dragCell = -1;
     repaint();

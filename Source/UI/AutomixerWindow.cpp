@@ -1,5 +1,6 @@
 #include "AutomixerWindow.h"
 #include "Theme.h"
+#include "ParamSlider.h"
 
 namespace stagerack
 {
@@ -48,8 +49,8 @@ public:
         weight.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         weight.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         weight.setRange (-20.0, 6.0, 0.5);
-        weight.setDoubleClickReturnValue (true, 0.0);
-        weight.setTooltip ("Weight: bias of this mic in its group (double click = 0 dB)");
+        weight.setDoubleClickReturnValue (true, 0.0, {});   // Alt-click: ParamSlider
+        weight.setTooltip ("Weight: bias of this mic in its group (double click or Alt-click = 0 dB, Cmd = fine)");
         weight.onValueChange = [this]
         {
             if (auto* r = rack())
@@ -222,7 +223,7 @@ private:
     Session& session;
     const int id;
     juce::ComboBox groupBox;
-    juce::Slider weight;
+    ParamSlider weight;
     juce::TextButton muteButton { "M" };
 
     juce::String name;

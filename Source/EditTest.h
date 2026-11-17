@@ -94,6 +94,7 @@ inline int runEditSelfTest()
     const juce::ModifierKeys alt (juce::ModifierKeys::altModifier | juce::ModifierKeys::leftButtonModifier);
     const juce::ModifierKeys altShift (alt.getRawFlags() | juce::ModifierKeys::shiftModifier);
     const juce::ModifierKeys plain (juce::ModifierKeys::leftButtonModifier);
+    const juce::ModifierKeys shift (juce::ModifierKeys::shiftModifier | juce::ModifierKeys::leftButtonModifier);
 
     auto* rcB = comps[1];
 
@@ -272,9 +273,155 @@ inline int runEditSelfTest()
         }
     }
 
+    // --- Alt-click = default, Cmd = fine (ParamSlider + parameter rows)
+    {
+        const juce::ModifierKeys cmd (juce::ModifierKeys::commandModifier | juce::ModifierKeys::leftButtonModifier);
+        auto* gs = dynamic_cast<juce::Slider*> (findChild (*rcB, [] (auto& ch) { return dynamic_cast<juce::Slider*> (&ch) != nullptr; }));
+        const auto mid = gs->getLocalBounds().getCentre().toFloat();
+        b.gainDb = -20.0f; c.gainDb = -1.0f; gs->setValue (-20.0, juce::dontSendNotification);
+
+        setMods (alt);
+        mouse (*gs, mid, mid, alt, 0);
+        mouse (*gs, mid, mid, alt, 2);
+        check (std::abs (b.gainDb.load()) < 0.01f && std::abs (c.gainDb.load()) < 0.01f && std::abs (a.gainDb - -5.0f) > 0.0f,
+               "Alt-click gain on B: B and C back to 0 dB (B " + juce::String (b.gainDb.load(), 1) + ", C " + juce::String (c.gainDb.load(), 1) + ")");
+
+        setMods (alt);
+        mouse (*gs, mid, mid, alt, 0);
+        mouse (*gs, mid.translated (0.0f, 30.0f), mid, alt, 1);
+        mouse (*gs, mid.translated (0.0f, 30.0f), mid, alt, 2);
+        check (b.gainDb < -0.5f && std::abs (c.gainDb - b.gainDb) < 0.01f, "Alt-drag gain still moves B and C together (" + juce::String (b.gainDb.load(), 1) + ")");
+
+        auto dragBy = [&] (juce::ModifierKeys m, float dy)
+        {
+            gs->setValue (0.0, juce::sendNotificationSync);
+            setMods (m);
+            mouse (*gs, mid, mid, m, 0);
+            mouse (*gs, mid.translated (0.0f, dy), mid, m, 1);
+            mouse (*gs, mid.translated (0.0f, dy), mid, m, 2);
+            setMods ({});
+            return gs->getValue();
+        };
+        const auto coarse = dragBy (plain, 20.0f);
+        const auto fine = dragBy (cmd, 20.0f);
+        check (coarse < -1.0 && fine < -0.1 && std::abs (fine) < std::abs (coarse) * 0.4,
+               "Cmd-drag gain is finer (20 px: " + juce::String (coarse, 2) + " dB plain, " + juce::String (fine, 2) + " dB with Cmd)");
+
+        // Cmd pressed in the middle of a drag: no jump
+        gs->setValue (0.0, juce::sendNotificationSync);
+        setMods (plain);
+        mouse (*gs, mid, mid, plain, 0);
+        mouse (*gs, mid.translated (0.0f, 20.0f), mid, plain, 1);
+        const auto atSwitch = gs->getValue();
+        setMods (cmd);
+        mouse (*gs, mid.translated (0.0f, 21.0f), mid, cmd, 1);
+        const auto afterSwitch = gs->getValue();
+        mouse (*gs, mid.translated (0.0f, 21.0f), mid, cmd, 2);
+        setMods ({});
+        check (std::abs (afterSwitch - atSwitch) < 0.2, "Cmd mid-drag doesn't jump (" + juce::String (atSwitch, 2) + " -> " + juce::String (afterSwitch, 2) + ")");
+
+        if (auto* slot = slotOf (*rcB, 0))
+        {
+            juce::Component* row = nullptr;
+            for (auto* ch : slot->getChildren())
+                if (ch->isVisible() && ch->getWidth() > 30 && ch->getHeight() < 20)
+                    row = ch;
+
+            if (row != nullptr)
+            {
+                auto* pb = b.getPlugin (0);
+                auto* pc = c.getPlugin (0);
+                const juce::Point<float> start (5.0f, 8.0f);
+
+                // find the parameter of the row, move it far from its default in B and C
+                juce::Array<float> before;
+                for (auto* prm : pb->getParameters()) before.add (prm->getValue());
+                setMods (alt);
+                mouse (*row, start, start, alt, 0);
+                mouse (*row, start.translated (-40.0f, 0.0f), start, alt, 1);
+                mouse (*row, start.translated (-40.0f, 0.0f), start, alt, 2);
+                int idx = -1;
+                for (int i = 0; i < pb->getParameters().size(); ++i)
+                    if (std::abs (pb->getParameters()[i]->getValue() - before[i]) > 0.001f) idx = i;
+
+                if (idx >= 0)
+                {
+                    auto* prmB = pb->getParameters()[idx];
+                    auto* prmC = pc->getParameters()[idx];
+                    prmB->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, prmB->getDefaultValue() + 0.3f > 1.0f ? prmB->getDefaultValue() - 0.3f : prmB->getDefaultValue() + 0.3f));
+                    prmC->setValueNotifyingHost (prmB->getValue());
+                    mouse (*row, start, start, alt, 0);
+                    mouse (*row, start, start, alt, 2);
+                    check (std::abs (prmB->getValue() - prmB->getDefaultValue()) < 0.01f && std::abs (prmC->getValue() - prmC->getDefaultValue()) < 0.01f,
+                           "Alt-click parameter row: " + prmB->getName (32) + " back to default in B and C");
+
+                    auto rowDrag = [&] (juce::ModifierKeys m)
+                    {
+                        prmB->setValueNotifyingHost (0.0f);
+                        setMods (m);
+                        mouse (*row, start, start, m, 0);
+                        mouse (*row, start.translated (20.0f, 0.0f), start, m, 1);
+                        mouse (*row, start.translated (20.0f, 0.0f), start, m, 2);
+                        setMods ({});
+                        return prmB->getValue();
+                    };
+                    const auto rc0 = rowDrag (plain), rf = rowDrag (cmd);
+                    check (rc0 > 0.0f && rf > 0.0f && rf < rc0 * 0.4f, "Cmd-drag parameter row is finer (" + juce::String (rc0, 3) + " vs " + juce::String (rf, 3) + ")");
+                }
+                else
+                {
+                    check (false, "parameter row: no parameter moved");
+                }
+            }
+        }
+
+        // --- rack size border: Alt = selected racks the same size, Shift = same change
+        juce::Component* handle = nullptr;
+        for (auto* ch : rcB->getChildren())
+            if (ch->isVisible() && (ch->getWidth() == 5 || ch->getHeight() == 5) && ch->getNumChildComponents() == 0
+                && (ch->getRight() == rcB->getWidth() || ch->getBottom() == rcB->getHeight()) && dynamic_cast<juce::Slider*> (ch) == nullptr)
+                handle = ch;
+
+        check (handle != nullptr, "found the size border of B");
+
+        if (handle != nullptr)
+        {
+            const juce::Point<float> p0 (2.0f, 2.0f);
+            const bool horiz = handle->getWidth() == 5;
+            const auto far = horiz ? p0.translated (60.0f, 0.0f) : p0.translated (0.0f, 60.0f);
+            b.uiSize = 1.0f; c.uiSize = 1.5f; a.uiSize = 1.0f; d.uiSize = 1.0f;
+            setMods (alt);
+            mouse (*handle, p0, p0, alt, 0);
+            mouse (*handle, far, p0, alt, 1);
+            mouse (*handle, far, p0, alt, 2);
+            check (b.uiSize > 1.05f && std::abs (c.uiSize - b.uiSize) < 0.001f && a.uiSize == 1.0f && d.uiSize == 1.0f,
+                   "Alt-drag size border: C takes B's size (" + juce::String (b.uiSize, 2) + "), A/D untouched");
+
+            b.uiSize = 1.0f; c.uiSize = 1.5f;
+            setMods (shift);
+            mouse (*handle, p0, p0, shift, 0);
+            mouse (*handle, far, p0, shift, 1);
+            mouse (*handle, far, p0, shift, 2);
+            check (std::abs ((c.uiSize - 1.5f) - (b.uiSize - 1.0f)) < 0.001f && b.uiSize > 1.05f,
+                   "Shift-drag size border: same change on C (B " + juce::String (b.uiSize, 2) + ", C " + juce::String (c.uiSize, 2) + ")");
+
+            b.uiSize = 1.0f; c.uiSize = 1.5f;
+            setMods (plain);
+            mouse (*handle, p0, p0, plain, 0);
+            mouse (*handle, far, p0, plain, 1);
+            mouse (*handle, far, p0, plain, 2);
+            check (c.uiSize == 1.5f && b.uiSize > 1.05f, "plain drag size border: B only");
+            setMods ({});
+            b.uiSize = c.uiSize = 1.0f;
+        }
+
+        // leave the gains as the next checks expect them
+        gs->setValue (-20.0, juce::dontSendNotification);
+        b.gainDb = -20.0f; c.gainDb = -1.0f;
+    }
+
     // --- Shift on a slot of a selected rack: plugin on/off on all selected racks (like Alt)
     using Link = EditController::Link;
-    const juce::ModifierKeys shift (juce::ModifierKeys::shiftModifier | juce::ModifierKeys::leftButtonModifier);
     paintAll();
     slotB = slotOf (*rcB, 0);
 

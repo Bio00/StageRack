@@ -3,6 +3,7 @@
 #include "../Engine/Session.h"
 #include "EditController.h"
 #include "SendsPanel.h"
+#include "ParamSlider.h"
 
 namespace stagerack
 {
@@ -79,7 +80,7 @@ private:
     void toggleExtraOutput (int code, const juce::ModifierKeys&);
     juce::String outputName (int code) const;
     juce::OwnedArray<SlotComponent> slots;
-    juce::Slider gain, inputGain;   // output fader (after the plugins), input trim (before)
+    ParamSlider gain, inputGain;   // output fader (after the plugins), input trim (before)
     juce::TextButton muteButton { "M" }, soloButton { "S" }, bypassButton { "B" };
     juce::TextButton menuButton { juce::String::fromUTF8 ("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2") };
     std::unique_ptr<ResizeHandle> resizeHandle;

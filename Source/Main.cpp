@@ -717,4 +717,21 @@ private:
 
 } // namespace stagerack
 
-START_JUCE_APPLICATION (stagerack::StageRackApplication)
+JUCE_CREATE_APPLICATION_DEFINE (stagerack::StageRackApplication)
+
+int main (int argc, char* argv[])
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string_view a (argv[i]);
+
+        if (a == stagerack::coreaudio::probeArgument)
+            std::_Exit (stagerack::coreaudio::runProbeChild());   // no AppKit at all: never a Dock icon
+
+        if (a == stagerack::PluginManager::scanArgument || a == stagerack::PluginManager::latencyArgument)
+            stagerack::markAsBackgroundProcess();
+    }
+
+    juce::JUCEApplicationBase::createInstance = &juce_CreateApplication;
+    return juce::JUCEApplicationBase::main (argc, (const char**) argv);
+}

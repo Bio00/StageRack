@@ -33,6 +33,9 @@ namespace cmd
 /** True if the event being handled right now is a key press (a menu shortcut, not a click). */
 bool currentEventIsKeyDown();
 
+/** Call at the top of main(), before JUCE/AppKit start, in child processes: no Dock icon. */
+void markAsBackgroundProcess();
+
 /** Menu item that remembers whether it was triggered from the keyboard. */
 struct KeyOriginCallback final : juce::PopupMenu::CustomCallback
 {

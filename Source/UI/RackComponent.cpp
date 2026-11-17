@@ -177,11 +177,14 @@ public:
 
         if (isToggle (*prm))
         {
-            set (*prm, prm->getValue() >= 0.5f ? 0.0f : 1.0f, e.mods);
+            // Alt-click: back to the default, otherwise flip
+            set (*prm, e.mods.isAltDown() ? prm->getDefaultValue() : (prm->getValue() >= 0.5f ? 0.0f : 1.0f), e.mods);
             return;
         }
 
-        startValue = prm->getValue();
+        startValue = dragValue = prm->getValue();
+        lastX = e.position.x;
+        altClick = e.mods.isAltDown();   // Alt-click without moving = default (Alt-drag = selected racks)
         dragMods = e.mods;
         prm->beginChangeGesture();
 
@@ -195,22 +198,43 @@ public:
     {
         if (auto* prm = param(); prm != nullptr && dragging)
         {
-            const auto range = e.mods.isShiftDown() ? 4.0f * (float) getWidth() : (float) getWidth();
-            const auto v = juce::jlimit (0.0f, 1.0f, startValue + (float) e.getDistanceFromDragStartX() / range);
-            prm->setValueNotifyingHost (v);
+            if (e.getDistanceFromDragStart() > 2)
+                altClick = false;
+
+            // incremental, so Cmd/Shift (fine, 5x) can change in the middle of a drag without a jump
+            const auto range = (float) getWidth() * (ParamSlider::isFine (e.mods) ? 1.0f / ParamSlider::fineFactor : 1.0f);
+            dragValue = juce::jlimit (0.0f, 1.0f, dragValue + (e.position.x - lastX) / range);
+            lastX = e.position.x;
+
+            if (altClick)
+                return;
+
+            prm->setValueNotifyingHost (dragValue);
 
             for (auto* other : linkedParams (dragMods))
-                other->setValueNotifyingHost (v);
+                other->setValueNotifyingHost (dragValue);
 
             refresh();
             repaint();
         }
     }
 
-    void mouseUp (const juce::MouseEvent&) override
+    void mouseUp (const juce::MouseEvent& e) override
     {
         if (auto* prm = param(); prm != nullptr && dragging)
         {
+            if (altClick && e.getDistanceFromDragStart() <= 2)
+            {
+                const auto v = prm->getDefaultValue();
+                prm->setValueNotifyingHost (v);
+
+                for (auto* other : linkedParams (dragMods))
+                    other->setValueNotifyingHost (v);
+
+                refresh();
+                repaint();
+            }
+
             prm->endChangeGesture();
 
             for (auto* other : linkedParams (dragMods))
@@ -218,6 +242,7 @@ public:
         }
 
         dragging = false;
+        altClick = false;
     }
 
     void mouseDoubleClick (const juce::MouseEvent& e) override
@@ -236,7 +261,7 @@ public:
         }
 
         if (auto* prm = param(); prm != nullptr && ! isToggle (*prm))
-            set (*prm, juce::jlimit (0.0f, 1.0f, prm->getValue() + w.deltaY * (e.mods.isShiftDown() ? 0.01f : 0.05f)), e.mods);
+            set (*prm, juce::jlimit (0.0f, 1.0f, prm->getValue() + w.deltaY * (ParamSlider::isFine (e.mods) ? 0.01f : 0.05f)), e.mods);
     }
 
 private:
@@ -284,8 +309,8 @@ private:
     EditController& edit;
     Rack& rack;
     const int slot, index;
-    float shownValue = -1.0f, startValue = 0.0f;
-    bool dragging = false;
+    float shownValue = -1.0f, startValue = 0.0f, dragValue = 0.0f, lastX = 0.0f;
+    bool dragging = false, altClick = false;
     juce::ModifierKeys dragMods;
 };
 
@@ -1066,16 +1091,31 @@ public:
         setMouseCursor (owner.vertical ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::UpDownResizeCursor);
     }
 
-    void mouseDown (const juce::MouseEvent&) override
+    void mouseDown (const juce::MouseEvent& e) override
     {
         startSize = owner.rack.uiSize;
+        others.clear();
+
+        // Alt = the selected racks take the same size, Shift = they grow / shrink by the same amount
+        // (each keeps its own size). The dragged rack doesn't need to be selected itself.
+        relative = e.mods.isShiftDown();
+
+        if (e.mods.isAltDown() || e.mods.isShiftDown())
+            for (auto id : owner.edit.targetRacks())
+                if (auto* r = owner.session.getEngine().findRack (id); r != nullptr && r != &owner.rack)
+                    others.push_back ({ id, r->uiSize });
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
         const auto base = (float) (owner.vertical ? baseWidth : baseHeight);
-        const auto delta = (float) (owner.vertical ? e.getDistanceFromDragStartX() : e.getDistanceFromDragStartY());
-        owner.rack.uiSize = juce::jlimit (EditController::minRackSize, EditController::maxRackSize, startSize + delta / base);
+        const auto delta = (float) (owner.vertical ? e.getDistanceFromDragStartX() : e.getDistanceFromDragStartY()) / base;
+        owner.rack.uiSize = juce::jlimit (EditController::minRackSize, EditController::maxRackSize, startSize + delta);
+
+        for (const auto& [id, size] : others)
+            if (auto* r = owner.session.getEngine().findRack (id))
+                r->uiSize = relative ? juce::jlimit (EditController::minRackSize, EditController::maxRackSize, size + delta)
+                                     : owner.rack.uiSize;
 
         if (owner.onResized)
             owner.onResized();
@@ -1098,6 +1138,8 @@ public:
 private:
     RackComponent& owner;
     float startSize = 1.0f;
+    bool relative = false;
+    std::vector<std::pair<int, float>> others;   // other racks resized together: id, size at mouse-down
 };
 
 //==============================================================================
@@ -1327,8 +1369,7 @@ RackComponent::RackComponent (Session& s, EditController& e, Rack& r, int i)
     gain.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 54, 14);
     gain.setRange (-60.0, 12.0, 0.1);
     gain.setSkewFactorFromMidPoint (-12.0);
-    gain.setDoubleClickReturnValue (true, 0.0, {});                 // no Alt-click reset: Alt = all selected racks
-    gain.setVelocityModeParameters (1.0, 1, 0.0, false);            // no modifier swaps the drag mode
+    gain.setDoubleClickReturnValue (true, 0.0, {});   // Alt-click reset is ParamSlider's (on release: Alt-drag = all selected racks)
     gain.setTextValueSuffix (" dB");
     gain.setColour (juce::Slider::rotarySliderFillColourId, rack.colour);
     gain.setValue (rack.gainDb.load(), juce::dontSendNotification);
@@ -1354,7 +1395,6 @@ RackComponent::RackComponent (Session& s, EditController& e, Rack& r, int i)
     inputGain.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 54, 14);
     inputGain.setRange (Rack::minInputGainDb, Rack::maxInputGainDb, 0.1);
     inputGain.setDoubleClickReturnValue (true, 0.0, {});
-    inputGain.setVelocityModeParameters (1.0, 1, 0.0, false);
     inputGain.textFromValueFunction = [] (double v) { return "IN " + juce::String (v, 1); };
     inputGain.valueFromTextFunction = [] (const juce::String& t) { return t.retainCharacters ("-+.0123456789").getDoubleValue(); };
     inputGain.setColour (juce::Slider::rotarySliderFillColourId, rack.colour);

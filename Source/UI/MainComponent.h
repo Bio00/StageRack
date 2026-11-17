@@ -28,6 +28,8 @@ class MainComponent final : public juce::Component,
                             private juce::Timer
 {
 public:
+    /** Release notes: since the version seen before (after an update) or the whole history. */
+    static void showWhatsNew (bool sinceUpdate, const juce::String& seenBefore = {});
     MainComponent();
     ~MainComponent() override;
 
@@ -115,8 +117,6 @@ private:
     void showAddRacksMenu();
     void commonConstructorTail();
     void openSettings();
-    /** Release notes: since the version seen before (after an update) or the whole history. */
-    static void showWhatsNew (bool sinceUpdate, const juce::String& seenBefore = {});
     void openPluginManager();
     void openAutomixer();
     void openTempo();

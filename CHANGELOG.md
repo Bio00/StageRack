@@ -2,6 +2,17 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.8.1-beta — 2026-11-17
+
+### Comandi
+- **⌥-click = valore di default** su qualsiasi controllo: gain, IN, send (→ off), parametri dei plugin sugli slot, Weight dell'automixer. Premi e rilascia senza muovere; sui rack selezionati vale per tutti. ⌥-trascina resta "tutti i rack selezionati".
+- **⌘ mentre trascini = regolazione fine** (5× più lenta) su tutti questi controlli, anche premuto o lasciato a metà trascinamento senza salti (⇧ continua a funzionare).
+- **Dimensione di più rack insieme**: trascinando il bordo con **⌥** i rack selezionati prendono la stessa dimensione, con **⇧** cambiano della stessa quantità.
+
+### Altro
+- **SETTINGS → Changelog**: la storia completa delle versioni.
+- Corretto: all'avvio il Dock mostrava una **seconda icona di StageRack** tra le app recenti (era il processo che controlla CoreAudio; anche scanner e probe delle latenze ora girano in background).
+
 ## 0.8.0-beta — 2026-11-17
 
 ### Tap tempo

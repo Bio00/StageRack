@@ -1,6 +1,7 @@
 #include "PluginManagerWindow.h"
 #include "../Update/Updater.h"
 #include "Theme.h"
+#include "MainComponent.h"
 
 namespace stagerack
 {
@@ -307,6 +308,11 @@ public:
         checkUpdates.onClick = [this] { if (onCheckUpdates) onCheckUpdates(); };
         addAndMakeVisible (checkUpdates);
 
+        changelog.setButtonText ("Changelog");
+        changelog.setTooltip ("Release notes of every StageRack version up to this one");
+        changelog.onClick = [] { MainComponent::showWhatsNew (false); };
+        addAndMakeVisible (changelog);
+
         versionLabel.setText ("StageRack " + update::currentVersion(), juce::dontSendNotification);
         versionLabel.setFont (theme::font (11.0f));
         versionLabel.setJustificationType (juce::Justification::centredRight);
@@ -430,7 +436,7 @@ public:
         auto r3 = row(); prevLabel.setBounds (r3.removeFromLeft (160)); prevCC.setBounds (r3.removeFromLeft (140));
         midiInfo.setBounds (row());
         auto rt = row(); lightTheme.setBounds (rt.removeFromLeft (300)); tapFlashLabel.setBounds (rt.removeFromLeft (110)); tapFlash.setBounds (rt.removeFromLeft (140));
-        auto ru = row(); autoUpdate.setBounds (ru.removeFromLeft (260)); checkUpdates.setBounds (ru.removeFromLeft (100)); versionLabel.setBounds (ru);
+        auto ru = row(); autoUpdate.setBounds (ru.removeFromLeft (260)); checkUpdates.setBounds (ru.removeFromLeft (100)); ru.removeFromLeft (6); changelog.setBounds (ru.removeFromLeft (100)); versionLabel.setBounds (ru);
     }
 
 private:
@@ -440,7 +446,7 @@ private:
     juce::Label title, threadsLabel, nextLabel, prevLabel, midiInfo;
     std::function<void (bool)> onThemeChanged;
     juce::ToggleButton spread, lightTheme, autoUpdate;
-    juce::TextButton respread, checkUpdates;
+    juce::TextButton respread, checkUpdates, changelog;
     juce::Label versionLabel;
     std::function<void()> onCheckUpdates;
     juce::ComboBox spin, tapFlash;
