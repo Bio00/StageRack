@@ -2,6 +2,12 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.8.2-beta — 2026-11-17
+
+### Correzioni
+- **Menu OUT del rack**: dopo averlo aperto e chiuso un paio di volte non si riapriva più. Ora si apre sempre.
+- **"⚠ CPU spikes" non sposta più il rack**: quando compariva il rack si accorciava e tutto si muoveva. Ora l'avviso entra nello spazio che c'è già (in forma corta se serve) e gli altri badge restano fermi.
+
 ## 0.8.1-beta — 2026-11-17
 
 ### Comandi

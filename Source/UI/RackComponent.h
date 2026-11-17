@@ -99,8 +99,9 @@ private:
 
     // Status badges (CPU spikes, latency group, tempo...): all shown side by side, short forms
     // when the room is tight. Rebuilt on every meter tick.
-    struct Badge { juce::String text, shortText, tip; juce::Colour colour; };
+    struct Badge { juce::String text, shortText, tip; juce::Colour colour; bool transient = false; };
     std::vector<Badge> badges;
+    static int stableBadgeCount (const std::vector<Badge>&);
     juce::Rectangle<int> badgeArea;
     void updateBadges();
     void paintBadges (juce::Graphics&);

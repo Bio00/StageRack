@@ -1736,7 +1736,14 @@ void RackComponent::showOutputMenu()
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&outputBox).withMinimumWidth (outputBox.getWidth()),
         [safe] (int result)
         {
-            if (safe == nullptr || result == 0)
+            if (safe == nullptr)
+                return;
+
+            // ComboBox::showPopupIfNotActive set menuActive: without this the box believes the
+            // popup is still open and ignores every later click (it opened only once or twice)
+            safe->outputBox.hidePopup();
+
+            if (result == 0)
                 return;
 
             auto& self = *safe;
@@ -2030,14 +2037,15 @@ void RackComponent::paint (juce::Graphics& g)
     }
 }
 
+int RackComponent::stableBadgeCount (const std::vector<Badge>& list)
+{
+    return (int) std::count_if (list.begin(), list.end(), [] (const Badge& b) { return ! b.transient; });
+}
+
 void RackComponent::updateBadges()
 {
     std::vector<Badge> b;
     const auto sr = juce::jmax (1.0, rack.getSampleRate());
-
-    if (peakLoad > 0.9f)
-        b.push_back ({ juce::String::fromUTF8 ("\xe2\x9a\xa0 CPU spikes"), juce::String::fromUTF8 ("\xe2\x9a\xa0 CPU"),
-                       "The plugins of this rack came close to the whole buffer time", theme::amber });
 
     if (rack.isFolder)
     {
@@ -2071,7 +2079,14 @@ void RackComponent::updateBadges()
                        "Plugins of this rack play with " + tempo.getConfig (t).name + " (" + bpm + " BPM)", tempoColour (t) });
     }
 
-    const bool changedPresence = b.empty() != badges.empty();
+    // last: it never shifts the other chips
+    if (peakLoad > 0.9f)
+        b.push_back ({ juce::String::fromUTF8 ("\xe2\x9a\xa0 CPU spikes"), juce::String::fromUTF8 ("\xe2\x9a\xa0 CPU"),
+                       "The plugins of this rack came close to the whole buffer time", theme::amber, true });
+
+    // the layout depends only on the badges that change on a user action (folder, bus, LG, tempo):
+    // a transient CPU spike must never move anything, it squeezes into the room already there
+    const bool changedPresence = stableBadgeCount (b) != stableBadgeCount (badges);
     bool same = b.size() == badges.size();
     for (size_t i = 0; same && i < b.size(); ++i)
         same = b[i].text == badges[i].text && b[i].colour == badges[i].colour;
@@ -2102,7 +2117,8 @@ void RackComponent::paintBadges (juce::Graphics& g)
     {
         float w = 0.0f;
         for (auto& b : badges)
-            w += widthOf (shortForm ? b.shortText : b.text) + 2.0f * pad + gap;
+            if (! b.transient)
+                w += widthOf (shortForm ? b.shortText : b.text) + 2.0f * pad + gap;
         return w - gap;
     };
 
@@ -2112,7 +2128,10 @@ void RackComponent::paintBadges (juce::Graphics& g)
 
     for (auto& b : badges)
     {
-        const auto& text = shortForm ? b.shortText : b.text;
+        // stable chips: short form decided without the transient ones (they do not change when a CPU
+        // spike appears); a transient chip takes the full text only if it fits in what is left
+        const bool shortHere = b.transient ? widthOf (b.text) + 2.0f * pad > a.getWidth() : shortForm;
+        const auto& text = shortHere ? b.shortText : b.text;
         const auto w = juce::jmin (a.getWidth(), widthOf (text) + 2.0f * pad);
         if (w <= 8.0f) break;
 
@@ -2205,7 +2224,7 @@ void RackComponent::resized()
             badgeArea = narrow ? juce::Rectangle<int>() : statusRow;
         }
 
-        if (! narrow && ! badges.empty() && badgeArea.getWidth() < 120)
+        if (! narrow && stableBadgeCount (badges) > 0 && badgeArea.getWidth() < 120)
         {
             r.removeFromTop (2);
             badgeArea = r.removeFromTop (16);   // no room beside the group / automix: a row of its own
