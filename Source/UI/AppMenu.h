@@ -17,7 +17,9 @@ namespace cmd
         nextScene, prevScene, storeScene, addScene,
         masterMute, automixOnOff, audioSettings, pluginManager,
         toggleLayout, toggleScenes, automixerWindow, lightTheme, tintRacks, editGroupsOn,
-        lastCommand = editGroupsOn
+        tempoWindow, tapMaster, editGroupsWindow, addTempo,
+        routingOnOff, addBus, groupFolder,
+        lastCommand = groupFolder
     };
 
     /** Editing commands act on the racks only while the main window has the keyboard: the same

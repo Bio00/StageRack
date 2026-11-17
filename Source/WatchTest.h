@@ -29,12 +29,14 @@ public:
         if (const auto pi = args.indexOf ("--param"); pi >= 0) paramName = args[pi + 1];
         if (const auto si = args.indexOf ("--seconds"); si >= 0) seconds = args[si + 1].getIntValue();
         engine.hopAlignEnabled = ! args.contains ("--noalign");
+        engine.logWatch = args.contains ("--verbose");
 
         juce::OwnedArray<juce::PluginDescription> found;
         for (auto* f : plugins.getFormatManager().getFormats())
             if (f->getName() == formatName)
                 f->findAllTypesForFile (found, id);
         if (found.isEmpty()) { std::cout << "plugin not found" << std::endl; return 1; }
+        desc = *found[0];
 
         for (int r = 0; r < numRacks; ++r)
         {
@@ -75,6 +77,8 @@ private:
     static constexpr double sr = 48000.0;
     int bs = 32, seconds = 30, ticks = 0;
     juce::String paramName { "Active" };
+    juce::PluginDescription desc;
+    Rack* master = nullptr;
 
     AudioEngine engine;
     PluginManager plugins;
@@ -123,7 +127,23 @@ private:
         ++ticks;
         session.watchHops();
 
-        if (ticks == 6 && ! args.contains ("--start-on"))
+        // --master-later: at t=3 s a bus gets the plugin and every track is routed into it
+        // (like inserting De-Feedback on a master after the tracks are already running)
+        if (ticks == 6 && args.contains ("--master-later"))
+        {
+            const int tracks = engine.getNumRacks();
+            master = session.addBus();
+            if (master != nullptr)
+            {
+                master->outputChannel = 0;
+                for (int r = 0; r < tracks; ++r)
+                    engine.setRackOutputBus (engine.getRack (r), master->busIndex);
+                session.loadPlugin (*master, 0, desc);
+                std::cout << "master bus added with the plugin, " << tracks << " tracks routed into it" << std::endl;
+            }
+        }
+
+        if (ticks == 6 && ! args.contains ("--start-on") && ! args.contains ("--master-later"))
             for (int r = 0; r < engine.getNumRacks(); ++r)
                 if (auto* p = engine.getRack (r).getPlugin (0))
                     setParam (*p, 1.0f);   // all at once
@@ -154,6 +174,16 @@ private:
         {
             phases << "hop " << hop << " calls, instances per phase:";
             for (int k = 0; k < hop; ++k) phases << " " << perPhase[k];
+
+            if (master != nullptr && master->getSlot (0).hopCalls > 0)
+            {
+                int sharing = 0;
+                for (int r = 0; r < engine.getNumRacks(); ++r)
+                    if (auto& rr = engine.getRack (r); &rr != master && rr.getSlot (0).hopPhase == master->getSlot (0).hopPhase)
+                        ++sharing;
+                phases << "  (master phase " << master->getSlot (0).hopPhase.load() << ", tracks on it " << sharing
+                       << ", series moves " << engine.seriesRespreads << ")";
+            }
         }
         else
         {

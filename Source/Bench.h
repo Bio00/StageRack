@@ -6,6 +6,8 @@
 #include "Plugins/PluginManager.h"
 #include "Update/Updater.h"
 #include "PluginProbe.h"
+#include "TempoTest.h"
+#include "RoutingTest.h"
 #include <chrono>
 #include <thread>
 
@@ -270,6 +272,49 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
         }
     }
 
+    // --buses N: routing on, N empty buses (FX returns); every rack sends to every bus at -10 dB
+    if (const auto bi = args.indexOf ("--buses"); bi >= 0)
+    {
+        const int tracks = engine.getNumRacks();
+        engine.setRoutingEnabled (true);
+
+        for (int k = 1; k <= juce::jlimit (1, Rack::maxBuses, args[bi + 1].getIntValue()); ++k)
+        {
+            auto& bus = engine.addRack();
+            bus.outputChannel = 0;
+            engine.setRackBus (bus, k);
+
+            for (int r = 0; r < tracks; ++r)
+                engine.getRack (r).sends[(size_t) k - 1].db = -10.0f;
+        }
+
+        std::cout << "routing: " << (engine.getNumRacks() - tracks) << " buses, each fed by " << tracks << " sends" << std::endl;
+    }
+
+    // --master-bus: routing on, one more rack = Bus A with the same plugin; every track outputs to it
+    // (a master fed by N tracks: the bus runs one stage after them, in the same callback)
+    if (args.contains ("--master-bus"))
+    {
+        const int tracks = engine.getNumRacks();
+        engine.setRoutingEnabled (true);
+
+        auto& bus = engine.addRack();
+        bus.outputChannel = 0;
+        engine.setRackBus (bus, 1);
+
+        juce::String err;
+        auto p = fm.createPluginInstance (*found[0], sr, bs, err);
+        if (p == nullptr) { std::cout << "create failed: " << err << std::endl; return 1; }
+        Rack::configurePlugin (*p, sr, bs);
+        applySetArgs (*p, args);
+        bus.setPlugin (0, std::move (p));
+
+        for (int r = 0; r < tracks; ++r)
+            engine.setRackOutputBus (engine.getRack (r), 1);
+
+        std::cout << "routing: master bus with the plugin, fed by " << tracks << " tracks" << std::endl;
+    }
+
     struct Proxy final : juce::AudioIODeviceCallback
     {
         std::vector<float> hopCosts;    // rack 0 slot 0 cost on its heavy callbacks
@@ -436,6 +481,12 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
         juce::Thread::sleep (12000);
         std::cout << "      rack 1 input peak (last 12 s): " << juce::String (juce::Decibels::gainToDecibels (engine.getRack (0).inMeter[0].readAndReset()), 1)
                   << " dBFS, output peak " << juce::String (juce::Decibels::gainToDecibels (engine.getRack (0).outMeter[0].readAndReset()), 1) << " dBFS" << std::endl;
+
+        for (int k = 1; k <= Rack::maxBuses; ++k)
+            if (auto* bus = engine.findBus (k))
+                std::cout << "      bus " << juce::String::charToString ((juce::juce_wchar) ('A' + k - 1)) << " input peak "
+                          << juce::String (juce::Decibels::gainToDecibels (bus->inMeter[0].readAndReset()), 1) << " dBFS (stage "
+                          << bus->stage << ")" << std::endl;
         dm.removeAudioCallback (&proxy);
 
         const int n = juce::jmin ((int) proxy.count.load(), (int) proxy.times.size());
@@ -608,8 +659,10 @@ inline int runSelfTest()
 
         e.masterMuted = true;
         for (int k = 0; k < 20; ++k) runBlock (e, 1.0f, false);
-        check (out.getMagnitude (0, bs) < 1.0e-6f && out.getMagnitude (1, bs) < 1.0e-6f && r.outMeter[0].readAndReset() > 0.4f,
-               "master mute: outputs silent, rack still metering");
+        const auto mutedPeak = r.outMeter[0].readAndReset();
+        // getMagnitude (channel, start, num): the two-argument form is (start, num) of all channels
+        check (out.getMagnitude (0, 0, bs) < 1.0e-6f && out.getMagnitude (1, 0, bs) < 1.0e-6f && mutedPeak > 0.4f,
+               "master mute: outputs silent, rack still metering (meter " + juce::String (mutedPeak, 3) + ")");
 
         e.masterMuted = false;
         for (int k = 0; k < 20; ++k) runBlock (e, 1.0f, false);
@@ -926,6 +979,9 @@ inline int runSelfTest()
         Autosave::setDirectoryForTests ({});
         dir.deleteRecursively();
     }
+
+    runTempoSelfTest (check);
+    runRoutingSelfTest (check);
 
     std::cout << (failures == 0 ? "ALL PASSED" : juce::String (failures) + " FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

@@ -5,6 +5,9 @@
 #include "Rack.h"
 #include "WorkerPool.h"
 #include "CoreWakeAssist.h"
+#include "TempoEngine.h"
+#include "OscInput.h"
+#include "TempoOutput.h"
 
 namespace stagerack
 {
@@ -45,6 +48,37 @@ public:
     bool setRackInputSource (Rack&, int sourceRackId);
     bool wouldCreateCycle (const Rack&, int sourceRackId) const;
 
+    //==============================================================================
+    // Buses and sends (message thread). Off = the racks play exactly as without them (bus racks
+    // read their own input, sends and "to bus" outputs are ignored); the settings are kept.
+    void setRoutingEnabled (bool);
+    bool isRoutingEnabled() const noexcept                   { return routingEnabled.load (std::memory_order_relaxed); }
+    /** Makes `rack` Bus A..H (1..maxBuses) or a normal rack (0). False if the letter is taken. */
+    bool setRackBus (Rack&, int letter);
+    /** Routes the rack's output into a bus (1..maxBuses) or back to the device outputs (0).
+        False if it would create a loop. */
+    bool setRackOutputBus (Rack&, int letter);
+    bool canRouteToBus (const Rack&, int letter) const;
+    /** Extra destinations of the rack (codes as Rack::extraOutputs, up to maxExtraOutputs):
+        duplicates of the main one, of each other, and buses that would make a loop are dropped.
+        Returns the codes kept. */
+    std::vector<int> setRackExtraOutputs (Rack&, const std::vector<int>& codes);
+    bool canSendTo (const Rack& r, int letter) const noexcept
+    {
+        return letter > 0 && letter <= Rack::maxBuses && (r.sendAllowed.load() & (1u << (letter - 1))) != 0;
+    }
+    Rack* findBus (int letter) const;                       // the active bus with that letter, else nullptr
+    int firstFreeBus() const;                               // 0 = all letters used
+    /** Sets a send level (dB, <= Rack::sendOffDb = off). Use it instead of writing the atomic
+        when a bus's send may turn on or off: that changes the graph. */
+    void setSend (Rack&, int letter, float db);
+    /** Which bus sends are on (to see whether a scene recall changed the graph). */
+    juce::uint32 busSendMask() const;
+    /** Rebuilds the routing graph after settings were changed directly (load, undo, scenes). */
+    void rebuildRouting();
+    /** True if `upstream` feeds `rack` (chain, routed output or send that is on), directly or not. */
+    bool feedsInto (const Rack& upstream, const Rack& rack) const;
+
     /** Recomputes the compensation delays of latency groups (cheap; call periodically, as
         plugins may change their latency). */
     void updateLatencyCompensation();
@@ -74,6 +108,11 @@ public:
         freer phase exists, its (rackId, slot) is returned for a live re-spread. */
     std::vector<std::pair<int, int>> watchHops();
     int hopsAdopted = 0;    // hops found moved by watchHops (tests, status)
+    /** Racks in the order their hops should be placed: most series partners first. */
+    std::vector<Rack*> alignmentOrder() const;
+    std::atomic<int> deviceIoLatencySamples { 0 };   // device input + output latency, read when the device starts
+    bool logWatch = false;   // tests: print what watchHops decides
+    int seriesRespreads = 0; // instances moved by watchHops off a phase shared with a series partner
 
     /** Re-aligns every plugin of a running sync rack (after its plugins were re-prepared). */
     void realignRack (Rack&);
@@ -83,6 +122,13 @@ public:
     /** Core wake assist (see CoreWakeAssist): 0 = auto (around plugin hops), 1 = always, 2 = off. */
     void setWakeAssistMode (int mode);
     int getWakeAssistMode() const noexcept                   { return wakeAssistMode; }
+
+    /** Master + 4 tempos for the plugins (each rack plays with one, see Rack::tempoIndex). */
+    TempoEngine tempo;
+    /** OSC in for the tempos (taps, BPM, beat): off until enabled in the Tempo window. */
+    OscInput osc { tempo };
+    /** Sends the tempos out (MIDI note/CC/clock, OSC), per tempo; its thread runs only when something is sent. */
+    TempoOutput tempoOut { tempo, osc };
 
     std::atomic<float> masterGainDb { 0.0f };
     /** Silences every device output (20 ms ramp); the racks keep running. Not saved: always off at start. */
@@ -152,6 +198,8 @@ private:
     // Processing stages: racks of a stage only depend on earlier stages, so each stage
     // runs in parallel. Rebuilt on the message thread, swapped in under racksLock.
     std::vector<std::vector<Rack*>> stages;
+    std::atomic<bool> routingEnabled { false };
+    std::shared_ptr<int> aliveToken = std::make_shared<int> (0);   // delayed rebuilds check it
     const std::vector<Rack*>* currentStage = nullptr;
     void rebuildGraph();
     void rebuildGraphLocked();

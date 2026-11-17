@@ -1,10 +1,13 @@
 #include "MainComponent.h"
+#include "RackViewMenu.h"
 #include "TopBar.h"
 #include "SceneListComponent.h"
 #include "RackComponent.h"
 #include "PluginWindow.h"
 #include "PluginManagerWindow.h"
 #include "AutomixerWindow.h"
+#include "TempoWindow.h"
+#include "EditGroupsWindow.h"
 #include "../Update/Updater.h"
 #include "../Engine/CoreAudioProbe.h"
 
@@ -16,11 +19,13 @@ MainComponent::MainComponent()
     auto& settings = pluginManager.getSettings();
     theme::setLight (settings.getBoolValue ("lightTheme", false));
     theme::tintRacks = settings.getBoolValue ("tintRacks", true);
+    theme::tapFlash = juce::jlimit (0, 4, settings.getIntValue ("tapFlash", 2));
     lnf.applyColours();
     juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
 
     engine.nextSceneCC = settings.getIntValue ("nextSceneCC", 80);
     engine.prevSceneCC = settings.getIntValue ("prevSceneCC", 81);
+    engine.osc.setEnabled (settings.getBoolValue ("oscIn", false), settings.getIntValue ("oscPort", OscInput::defaultPort));
     Rack::asyncSafetyMs = (float) settings.getDoubleValue ("asyncSafetyMs", 3.0);
     engine.hopAlignEnabled = settings.getBoolValue ("hopAlign", true);
     engine.setWakeAssistMode (settings.getIntValue ("wakeAssist", 0));
@@ -54,6 +59,9 @@ MainComponent::MainComponent()
     topBar->onSettings = [this] { openSettings(); };
     topBar->onToggleLayout = [this] { setVerticalLayout (! verticalLayout); };
     topBar->onAutomixView = [this] { openAutomixer(); };
+    topBar->onTempoView = [this] { openTempo(); };
+    topBar->onGroupsView = [this] { openEditGroups(); };
+    tapKeys = std::make_unique<TapKeys>();
     topBar->onToggleTheme = [this] { toggleLightTheme(); };
     topBar->deviceStatus = [this] { return deviceGuard != nullptr ? deviceGuard->getStatus() : juce::String(); };
     addAndMakeVisible (*topBar);
@@ -87,6 +95,36 @@ void MainComponent::openPluginManager()
         pluginWindow = std::make_unique<PluginManagerWindow> (pluginManager);
     pluginWindow->setVisible (true);
     pluginWindow->toFront (true);
+}
+
+void MainComponent::openEditGroups()
+{
+    if (editGroupsWindow == nullptr)
+    {
+        editGroupsWindow = std::make_unique<EditGroupsWindow> (*session, *edit);
+        editGroupsWindow->getPanel().onChanged = [this]
+        {
+            for (auto* rc : rackComponents)
+            {
+                rc->resized();   // group badge in / out
+                rc->repaint();
+            }
+            layoutRacks();
+            topBar->updateMeters();
+            commands.commandStatusChanged();
+        };
+    }
+
+    editGroupsWindow->setVisible (true);
+    editGroupsWindow->toFront (true);
+}
+
+void MainComponent::openTempo()
+{
+    if (tempoWindow == nullptr)
+        tempoWindow = std::make_unique<TempoWindow> (*session);
+    tempoWindow->setVisible (true);
+    tempoWindow->toFront (true);
 }
 
 void MainComponent::openAutomixer()
@@ -139,6 +177,8 @@ void MainComponent::showAddRacksMenu()
     }
 
     m.addSeparator();
+    m.addItem ("Add Bus (FX return, sub-group, master bus)", engine.firstFreeBus() > 0, false,
+               [safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->session->addBus(); });
     m.addItem ("Other number...", [safe = juce::Component::SafePointer<MainComponent> (this)]
     {
         if (safe == nullptr)
@@ -260,6 +300,8 @@ void MainComponent::prepareToQuit()
     pluginWindow = nullptr;
     settingsWindow = nullptr;
     automixerWindow = nullptr;
+    tempoWindow = nullptr;
+    editGroupsWindow = nullptr;
 
     session->removeChangeListener (this);
     edit->removeChangeListener (this);
@@ -358,35 +400,116 @@ void MainComponent::setVerticalLayout (bool v)
 
 void MainComponent::layoutRacks()
 {
-    if (verticalLayout)
+    auto depthOf = [this] (const Rack& r)
     {
-        const int h = rackViewport.getMaximumVisibleHeight();
-        int x = 0;
+        int d = 0;
+        for (auto* f = r.folderId >= 0 ? engine.findRack (r.folderId) : nullptr; f != nullptr && d < 16;
+             f = f->folderId >= 0 ? engine.findRack (f->folderId) : nullptr)
+            ++d;
+        return d;
+    };
 
-        for (auto* rc : rackComponents)
-        {
-            const auto w = rc->getPreferredLength();
-            rc->setBounds (x, 0, w, h);
-            x += w + 4;
-        }
-
-        addRackButton.setBounds (x + 4, 0, 48, h);
-        rackContainer.setSize (x + 56, h);
-        return;
-    }
-
-    const int w = rackViewport.getMaximumVisibleWidth();
-    int y = 0;
+    const bool v = verticalLayout;
+    const int across = v ? rackViewport.getMaximumVisibleHeight() : rackViewport.getMaximumVisibleWidth();
+    int pos = 0;
 
     for (auto* rc : rackComponents)
     {
-        const auto h = rc->getPreferredLength();
-        rc->setBounds (0, y, w, h);
-        y += h + 4;
+        // racks inside a closed folder are not shown (the folder still plays them)
+        const bool shown = ! session->isHiddenInFolder (rc->getRack());
+        rc->setVisible (shown);
+        if (! shown) continue;
+
+        if (pos > 0) pos += rc->getRack().folderId >= 0 ? 2 : 6;   // a folder's racks sit closer together
+        const auto len = rc->getPreferredLength();
+        const auto inset = depthOf (rc->getRack()) * folderStep;   // inside a folder: a step shorter, under its band
+
+        if (v) rc->setBounds (pos, inset, len, across - inset);
+        else   rc->setBounds (inset, pos, across - inset, len);
+        pos += len;
     }
 
-    addRackButton.setBounds (0, y + 4, w, 40);
-    rackContainer.setSize (w, y + 52);
+    // folder blocks: the folder rack + everything shown inside it
+    rackContainer.vertical = v;
+    rackContainer.folders.clear();
+
+    for (int i = 0; i < rackComponents.size(); ++i)
+    {
+        auto* f = rackComponents[i];
+        auto& fr = f->getRack();
+
+        if (! fr.isFolder || ! f->isVisible())
+            continue;
+
+        auto block = f->getBounds();
+        juce::Rectangle<int> members;
+
+        for (int j = i + 1; j < rackComponents.size(); ++j)
+        {
+            auto* m = rackComponents[j];
+
+            // members follow their folder (Session::normalizeFolders): stop at the first one outside
+            bool inside = false;
+            for (auto* p = m->getRack().folderId >= 0 ? engine.findRack (m->getRack().folderId) : nullptr; p != nullptr && ! inside;
+                 p = p->folderId >= 0 ? engine.findRack (p->folderId) : nullptr)
+                inside = p == &fr;
+
+            if (! inside) break;
+            if (m->isVisible()) members = members.isEmpty() ? m->getBounds() : members.getUnion (m->getBounds());
+        }
+
+        if (members.isEmpty())
+            continue;   // closed (or empty): just the folder rack
+
+        block = block.getUnion (members);
+        const auto d = depthOf (fr) * folderStep;
+        const auto band = v ? juce::Rectangle<int> (f->getRight() - 8, d, members.getRight() - f->getRight() + 8, folderStep - 3)
+                            : juce::Rectangle<int> (d, f->getBottom() - 8, folderStep - 3, members.getBottom() - f->getBottom() + 8);
+        rackContainer.folders.push_back ({ block, band, fr.colour, fr.name });
+    }
+
+    if (v)
+    {
+        addRackButton.setBounds (pos + 8, 0, 48, across);
+        rackContainer.setSize (pos + 60, across);
+    }
+    else
+    {
+        addRackButton.setBounds (0, pos + 8, across, 40);
+        rackContainer.setSize (across, pos + 56);
+    }
+
+    rackContainer.repaint();
+}
+
+void MainComponent::RackContainer::paint (juce::Graphics& g)
+{
+    for (auto& f : folders)
+    {
+        // a light tint behind the whole block, then the band that "holds" the racks
+        g.setColour (f.colour.withAlpha (0.10f));
+        g.fillRoundedRectangle (f.block.toFloat().expanded (2.0f), 7.0f);
+        g.setColour (f.colour.withAlpha (0.45f));
+        g.drawRoundedRectangle (f.block.toFloat().expanded (2.0f), 7.0f, 1.0f);
+
+        g.setColour (f.colour.withAlpha (0.85f));
+        g.fillRoundedRectangle (f.band.toFloat(), 4.0f);
+
+        g.setColour (juce::Colours::black.withAlpha (0.8f));
+        g.setFont (theme::font (10.0f, true));
+
+        if (vertical)
+        {
+            g.drawText (f.name, f.band.withTrimmedLeft (14).reduced (4, 0), juce::Justification::centredLeft, true);
+        }
+        else
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            g.addTransform (juce::AffineTransform::rotation (-juce::MathConstants<float>::halfPi, (float) f.band.getCentreX(), (float) f.band.getCentreY()));
+            g.drawText (f.name, f.band.toFloat().withSizeKeepingCentre ((float) f.band.getHeight(), (float) f.band.getWidth()).reduced (14.0f, 0.0f),
+                        juce::Justification::centredLeft, true);
+        }
+    }
 }
 
 void MainComponent::syncRacks()
@@ -414,6 +537,8 @@ void MainComponent::syncRacks()
     {
         for (auto* rc : rackComponents)
             rc->refresh();
+
+        layoutRacks();   // a folder opened / closed
     }
 }
 
@@ -467,6 +592,8 @@ void MainComponent::timerCallback()
         session->watchHops();
     }
 
+    engine.tempo.poll();   // audio taps / beat tracking (timestamps are exact: the timer's lag doesn't matter)
+    engine.tempoOut.update();   // MIDI / OSC out of the tempos: settings, devices
     topBar->updateMeters();
     edit->syncGroupParameters();   // a knob turned in a plugin window: same knob in its edit group
 
@@ -475,8 +602,20 @@ void MainComponent::timerCallback()
             rc->updateMeters();
 }
 
+bool MainComponent::keyStateChanged (bool)
+{
+    tapKeys->keyStateChanged();
+    return false;
+}
+
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
+    // tap tempo keys first (plain keys only; repeats of a held key are not taps)
+    if (tapKeys->keyPressed (engine.tempo, key))
+        return true;
+
+    if (key == juce::KeyPress ('t', juce::ModifierKeys::commandModifier, 0)) { openTempo(); return true; }
+
     const auto cmd = juce::ModifierKeys::commandModifier;
 
     if (key == juce::KeyPress::rightKey || key == juce::KeyPress::spaceKey || key == juce::KeyPress::pageDownKey)
@@ -506,6 +645,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress ('z', cmd | shift, 0)) { session->redo(); return true; }
     if (key == juce::KeyPress ('m', cmd | shift, 0)) { engine.masterMuted = ! engine.masterMuted.load(); topBar->updateMeters(); return true; }
     if (key == juce::KeyPress ('g', cmd | shift, 0)) { commands.invokeDirectly (cmd::editGroupsOn, false); return true; }
+    if (key == juce::KeyPress ('b', cmd | shift, 0)) { commands.invokeDirectly (cmd::addBus, false); return true; }
+    if (key == juce::KeyPress ('g', cmd, 0))         { commands.invokeDirectly (cmd::groupFolder, false); return true; }
     if (key == juce::KeyPress ('c', cmd, 0)) { edit->copy(); return true; }
     if (key == juce::KeyPress ('v', cmd, 0)) { edit->paste(); return true; }
     if (key == juce::KeyPress ('d', cmd, 0)) { edit->duplicate(); return true; }
@@ -735,10 +876,16 @@ juce::PopupMenu MainComponent::AppMenu::getMenuForIndex (int index, const juce::
         case 1:  return owner.commandItems ({ cmd::undo, cmd::redo, 0, cmd::copy, cmd::paste, cmd::duplicate, cmd::deleteSelection, 0,
                                               cmd::selectAll, cmd::deselect, 0,
                                               cmd::consecutiveInMono, cmd::consecutiveInStereo, cmd::consecutiveOutMono, cmd::consecutiveOutStereo });
-        case 2:  return owner.commandItems ({ cmd::addRack, cmd::addRacks, 0, cmd::biggerRacks, cmd::smallerRacks, 0, cmd::editGroupsOn });
+        case 2:  return owner.commandItems ({ cmd::addRack, cmd::addRacks, cmd::addBus, cmd::groupFolder, 0, cmd::routingOnOff, 0, cmd::biggerRacks, cmd::smallerRacks, 0, cmd::editGroupsWindow, cmd::editGroupsOn });
         case 3:  return owner.commandItems ({ cmd::nextScene, cmd::prevScene, 0, cmd::storeScene, cmd::addScene });
-        case 4:  return owner.commandItems ({ cmd::masterMute, cmd::automixOnOff, 0, cmd::audioSettings, cmd::pluginManager });
-        case 5:  return owner.commandItems ({ cmd::toggleLayout, cmd::toggleScenes, cmd::automixerWindow, 0, cmd::lightTheme, cmd::tintRacks });
+        case 4:  return owner.commandItems ({ cmd::masterMute, cmd::automixOnOff, cmd::tapMaster, cmd::addTempo, 0, cmd::audioSettings, cmd::pluginManager });
+        case 5:
+        {
+            auto m = owner.commandItems ({ cmd::toggleLayout, cmd::toggleScenes, cmd::automixerWindow, cmd::tempoWindow, 0, cmd::lightTheme, cmd::tintRacks });
+            m.addSeparator();
+            m.addSubMenu ("Rack View", rackViewMenu (*owner.session));
+            return m;
+        }
         default: return {};
     }
 }
@@ -793,6 +940,13 @@ void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommand
         case cmd::toggleLayout:        set ("Vertical Racks", "View"); info.setTicked (verticalLayout); break;
         case cmd::toggleScenes:        set ("Scene List", "View", 'l', c); info.setTicked (! scenesCollapsed); break;
         case cmd::automixerWindow:     set ("Automixer Window", "View"); break;
+        case cmd::tempoWindow:         set ("Tempo Window", "View", 't', c); break;
+        case cmd::tapMaster:           set ("Tap Master Tempo", "Audio"); break;
+        case cmd::addTempo:            set ("Add Tap Tempo", "Audio"); info.setActive (engine.tempo.getNumTempos() < TempoEngine::maxTempos); break;
+        case cmd::editGroupsWindow:    set ("Edit Groups...", "Rack"); break;
+        case cmd::routingOnOff:        set ("Buses and Sends", "Rack"); info.setTicked (engine.isRoutingEnabled()); break;
+        case cmd::addBus:              set ("Add Bus", "Rack", 'b', c | s); info.setActive (engine.firstFreeBus() > 0); break;
+        case cmd::groupFolder:         set ("Group Into Folder", "Rack", 'g', c); info.setActive (engine.firstFreeBus() > 0 && engine.getNumRacks() > 0); break;
         case cmd::lightTheme:          set ("Light Theme", "View"); info.setTicked (theme::light); break;
         case cmd::tintRacks:           set ("Tinted Racks", "View"); info.setTicked (theme::tintRacks); break;
         case cmd::editGroupsOn:
@@ -855,6 +1009,18 @@ bool MainComponent::perform (const InvocationInfo& info)
         case cmd::toggleLayout:        setVerticalLayout (! verticalLayout); break;
         case cmd::toggleScenes:        setScenesCollapsed (! scenesCollapsed); break;
         case cmd::automixerWindow:     openAutomixer(); break;
+        case cmd::tempoWindow:         openTempo(); break;
+        case cmd::tapMaster:           engine.tempo.tapNow (0, TempoEngine::srcButton); break;
+        case cmd::addTempo:            session->addTempo(); break;
+        case cmd::editGroupsWindow:    openEditGroups(); break;
+        case cmd::routingOnOff:        session->setRoutingEnabled (! engine.isRoutingEnabled()); break;
+        case cmd::addBus:              session->addBus(); break;
+        case cmd::groupFolder:
+        {
+            auto ids = edit->targetRacks();
+            if (! ids.isEmpty()) session->groupIntoFolder (ids);
+            break;
+        }
         case cmd::lightTheme:          toggleLightTheme(); break;
         case cmd::tintRacks:
             theme::tintRacks = ! theme::tintRacks;

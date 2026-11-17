@@ -7,7 +7,7 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 # Universal binary: runs natively on Apple Silicon and Intel Macs.
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Target architectures")
 
-project(StageRack VERSION 0.7.0 LANGUAGES C CXX OBJC OBJCXX)
+project(StageRack VERSION 0.8.0 LANGUAGES C CXX OBJC OBJCXX)
 
 # Pre-release label ("beta", "" for a final release). The full version ("0.2.0-beta") must match
 # the GitHub release tag ("v0.2.0-beta"): the built-in updater compares them.
@@ -61,6 +61,8 @@ target_sources(StageRack PRIVATE
     Source/Engine/CoreWakeAssist.cpp
     Source/Engine/CoreAudioProbe.cpp
     Source/Engine/DeviceGuard.cpp
+    Source/Engine/TempoEngine.cpp
+    Source/Engine/TempoOutput.cpp
     Source/Plugins/PluginManager.cpp
     Source/Plugins/CLAPPluginFormat.mm
     Source/UI/MainComponent.cpp
@@ -69,6 +71,9 @@ target_sources(StageRack PRIVATE
     Source/UI/SceneListComponent.cpp
     Source/UI/TopBar.cpp
     Source/UI/AutomixerWindow.cpp
+    Source/UI/TempoWindow.cpp
+    Source/UI/EditGroupsWindow.cpp
+    Source/UI/SendsPanel.cpp
     Source/UI/PluginWindow.cpp
     Source/UI/PluginThumbnail.mm
     Source/UI/PluginMeters.mm
@@ -120,6 +125,7 @@ target_link_libraries(StageRack PRIVATE
         juce::juce_audio_processors
         juce::juce_audio_devices
         juce::juce_gui_extra
+        juce::juce_osc
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags

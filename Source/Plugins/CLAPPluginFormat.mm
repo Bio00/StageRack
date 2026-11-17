@@ -433,6 +433,51 @@ public:
         proc.in_events = &inEvents.in;
         proc.out_events = &outEvents;
 
+        // host tempo / beat position (StageRack's tempos, see TempoEngine)
+        clap_event_transport_t transport {};
+        if (auto* ph = getPlayHead())
+        {
+            if (const auto pos = ph->getPosition())
+            {
+                transport.header.size = sizeof (transport);
+                transport.header.type = CLAP_EVENT_TRANSPORT;
+                transport.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+
+                if (const auto bpm = pos->getBpm())
+                {
+                    transport.flags |= CLAP_TRANSPORT_HAS_TEMPO;
+                    transport.tempo = *bpm;
+                }
+
+                if (const auto ppq = pos->getPpqPosition())
+                {
+                    transport.flags |= CLAP_TRANSPORT_HAS_BEATS_TIMELINE;
+                    transport.song_pos_beats = (clap_beattime) std::llround (*ppq * (double) CLAP_BEATTIME_FACTOR);
+                    const auto barStart = pos->getPpqPositionOfLastBarStart().orFallback (0.0);
+                    transport.bar_start = (clap_beattime) std::llround (barStart * (double) CLAP_BEATTIME_FACTOR);
+                    transport.bar_number = (int32_t) pos->getBarCount().orFallback (0);
+                }
+
+                if (const auto secs = pos->getTimeInSeconds())
+                {
+                    transport.flags |= CLAP_TRANSPORT_HAS_SECONDS_TIMELINE;
+                    transport.song_pos_seconds = (clap_sectime) std::llround (*secs * (double) CLAP_SECTIME_FACTOR);
+                }
+
+                if (const auto sig = pos->getTimeSignature())
+                {
+                    transport.flags |= CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+                    transport.tsig_num = (uint16_t) sig->numerator;
+                    transport.tsig_denom = (uint16_t) sig->denominator;
+                }
+
+                if (pos->getIsPlaying())
+                    transport.flags |= CLAP_TRANSPORT_IS_PLAYING;
+
+                proc.transport = &transport;
+            }
+        }
+
         if (plugin->process (plugin, &proc) == CLAP_PROCESS_ERROR)
             buffer.clear();
 

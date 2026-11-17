@@ -2,7 +2,9 @@
 #include "UI/MainComponent.h"
 #include "Bench.h"
 #include "PluginProbe.h"
+#include "TempoProbe.h"
 #include "WatchTest.h"
+#include "SessionCheck.h"
 #include "EditTest.h"
 #include "EditorTest.h"
 #include "UndoTest.h"
@@ -14,6 +16,8 @@
 #include "UI/TopBar.h"
 #include "UI/PluginManagerWindow.h"
 #include "UI/AutomixerWindow.h"
+#include "UI/TempoWindow.h"
+#include "UI/EditGroupsWindow.h"
 #include "Engine/Rack.h"
 #include "Update/Updater.h"
 #include "Engine/CoreAudioProbe.h"
@@ -31,7 +35,7 @@ public:
         setContentOwned (new MainComponent(), true);
         setBackgroundColour (theme::bg);   // the saved theme is applied by MainComponent
         setResizable (true, false);
-        setResizeLimits (1100, 560, 10000, 10000);
+        setResizeLimits (1160, 560, 10000, 10000);
         centreWithSize (getWidth(), getHeight());
         setVisible (true);
     }
@@ -146,6 +150,31 @@ public:
             std::_Exit (0);
         }
 
+        if (args.contains ("--session-roundtrip"))
+        {
+            // Diagnostics: --session-roundtrip <in.stagerack> <out.xml>  loads a session (no device;
+            // plugins are not created) and writes it back with the current code, to compare with old files
+            juce::Process::setDockIconVisible (false);
+            const auto i = args.indexOf ("--session-roundtrip");
+            const juce::File in (args[i + 1]), out (args[i + 2]);
+            AudioEngine engine;
+            auto* pm = new PluginManager();   // leaked on purpose (its destructor saves files)
+            Session session (engine, *pm);
+            const auto tree = juce::ValueTree::fromXml (in.loadFileAsString());
+            session.loadFromTree (tree, in, false);
+            std::printf ("racks %d, routing %s\n", engine.getNumRacks(), engine.isRoutingEnabled() ? "on" : "off");
+            for (int r = 0; r < engine.getNumRacks(); ++r)
+            {
+                auto& rk = engine.getRack (r);
+                std::printf ("  %-16s in %d%s out %d%s gain %.1f bus %d outBus %d stage %d folder %d\n", rk.name.toRawUTF8(),
+                             rk.inputChannel.load(), rk.stereoInput.load() ? "st" : "m", rk.outputChannel.load(), rk.stereoOutput.load() ? "st" : "m",
+                             rk.gainDb.load(), rk.busIndex.load(), rk.outputBus.load(), rk.stage, rk.folderId);
+            }
+            out.replaceWithText (session.toTree().toXmlString());
+            std::fflush (nullptr);
+            std::_Exit (0);
+        }
+
         if (args.contains ("--render-racks"))
         {
             // Diagnostics: --render-racks <dir>  draws racks with the automixer at work + the top bar (PNG, no device)
@@ -168,7 +197,74 @@ public:
             engine.getRack (0).editGroup = engine.getRack (1).editGroup = 1;   // group A active
             engine.getRack (2).editGroup = 2;                                   // group B suspended
             session.setEditGroupActive (2, false);
+
+            // --routing: Coro = Bus B (sub-group of the two voices), Musica = Bus A (FX return)
+            const bool routingDemo = args.contains ("--routing");
+            if (routingDemo)
+            {
+                engine.setRoutingEnabled (true);
+                engine.getRack (3).name = "Reverb"; engine.getRack (3).inputChannel = -1;
+                engine.getRack (2).name = "Sub voci"; engine.getRack (2).inputChannel = -1; engine.getRack (2).automixGroup = 0;
+                engine.setRackBus (engine.getRack (3), 1);
+                engine.setRackBus (engine.getRack (2), 2);
+                engine.getRack (0).sends[0].db = -6.0f;
+                engine.getRack (1).sends[0].db = -14.0f;
+                engine.getRack (1).sends[0].pre = true;
+                engine.getRack (2).sends[0].db = -20.0f;
+                engine.setRackOutputBus (engine.getRack (0), 2);
+                engine.setRackOutputBus (engine.getRack (1), 2);
+                // multiple outputs: the voice also goes to the monitor pair, the reverb to two more
+                engine.setRackExtraOutputs (engine.getRack (0), { Rack::outStereo + 4 });
+                engine.setRackExtraOutputs (engine.getRack (3), { Rack::outStereo + 2, Rack::outMono + 7 });
+            }
+
+            // --view 1: no input, no info, sends of Bus A only (Lettore keeps all: its own choice)
+            // --view 2: no inserts (sends get the room), no I/O selectors
+            const int viewDemo = args.contains ("--view") ? args[args.indexOf ("--view") + 1].getIntValue() : 0;
+            if (viewDemo == 1)
+            {
+                Session::RackView v;
+                v.input = false; v.info = false; v.sendsMask = 1;
+                session.setRackView (v);
+                engine.getRack (1).uiSendsShown = 0xff;
+                engine.getRack (0).uiHideSections = 1 | 2 | 4 | 16;   // Pastore: only its sends
+            }
+            else if (viewDemo == 2)
+            {
+                Session::RackView v;
+                v.inserts = false; v.io = false;
+                session.setRackView (v);
+            }
+
             engine.prepare (48000.0, 64, {});
+
+            // tempos: master tapped at 96, T1 own (vocal delay, key Y + footswitch CC 64), T2 = master x2,
+            // T3 tracking a kick on IN 4; the music rack plays with T1
+            {
+                auto& tempo = engine.tempo;
+                for (int k = 0; k < 3; ++k) tempo.addTempo();
+                const auto now = TempoEngine::nowSec();
+                for (int k = 0; k < 4; ++k)
+                    tempo.tap (0, now - 1.9 + k * 0.625, TempoEngine::srcButton);
+                auto c1 = tempo.getConfig (1);
+                c1.name = "Vox delay"; c1.keyCode = 'Y'; c1.midiKind = TempoEngine::midiCC; c1.midiNumber = 64; c1.tapValue = TempoEngine::tapEighth;
+                tempo.setConfig (1, c1);
+                tempo.setBpm (1, 72.5);
+                tempo.link (2, 2.0);
+                auto c2 = tempo.getConfig (2);   // audio from a rack, after its plugins; back to the audio after 8 s
+                c2.audioPoint = TempoEngine::pointPostPlugins; c2.audioRackId = engine.getRack (3).getId(); c2.returnToAudioSec = 8; c2.audioWindowPct = 6.0f; c2.oscOut = true; c2.oscOutHost = "192.168.1.50"; c2.midiOutId = "x"; c2.midiOutName = "IAC Bus 1"; c2.midiOutKind = TempoEngine::midiNote; c2.midiOutClock = true;
+                tempo.setConfig (2, c2);
+                auto c3 = tempo.getConfig (3);
+                c3.name = "Drums"; c3.audioChannel = 3; c3.audioMode = TempoEngine::audioFollow; c3.midiClock = true;
+                tempo.setConfig (3, c3);
+                auto c0 = tempo.getConfig (0);
+                c0.midiKind = TempoEngine::midiNote; c0.midiNumber = 36; c0.midiChannel = 10;
+                tempo.setConfig (0, c0);
+                engine.getRack (3).tempoIndex = 1;
+                engine.getRack (3).latencyGroup = 1;   // tempo + latency group + automix on the same racks: all badges visible
+                engine.getRack (0).latencyGroup = 1;
+                engine.getRack (0).tempoIndex = 2;
+            }
 
             // a few real plugins (Apple's), so the slots show names and parameters
             for (auto [rackIndex, slot, id] : { std::tuple { 0, 0, "AudioUnit:Effects/aufx,dely,appl" },
@@ -211,12 +307,20 @@ public:
                 theme::LookAndFeel lnf;
                 juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
 
-                for (int variant : { 0, 1, 2, 3 })   // horizontal, vertical, short horizontal, narrow vertical
+                // horizontal, vertical, short horizontal, narrow vertical, thinnest vertical, vertical with
+                // each rack's dividers moved (only sends / only plugins / big input / big knobs)
+                for (int variant : { 0, 1, 2, 3, 4, 5 })
                 {
-                    const bool vertical = variant == 1 || variant == 3;
-                    const float size = variant >= 2 ? (vertical ? 0.55f : 0.5f) : 1.0f;
+                    const bool vertical = variant != 0 && variant != 2;
+                    const float size = variant == 4 ? EditController::minRackSize : variant == 2 ? 0.5f : variant == 3 ? 0.55f : 1.0f;
                     for (int i = 0; i < 4; ++i)
-                        engine.getRack (i).uiSize = size;
+                    {
+                        auto& rk = engine.getRack (i);
+                        rk.uiSize = size;
+                        rk.uiSendsV = variant == 5 ? std::array<float, 4> { 2000.0f, 0.0f, -1.0f, 300.0f }[(size_t) i] : -1.0f;
+                        rk.uiInputV = variant == 5 && i >= 2 ? 120.0f : -1.0f;
+                        rk.uiOutputV = variant == 5 && i >= 1 ? 230.0f : (variant == 4 && i == 3 ? 200.0f : -1.0f);
+                    }
                     const int rw = juce::roundToInt (RackComponent::baseWidth * size), rh = juce::roundToInt (RackComponent::baseHeight * size);
                     juce::Component window;
                     const int w = vertical ? 4 * rw : 1400, h = vertical ? 700 : 4 * rh + 76;
@@ -241,12 +345,12 @@ public:
                     g.fillAll (theme::bg);
                     window.paintEntireComponent (g, true);
                     juce::PNGImageFormat png;
-                    juce::FileOutputStream os (dir.getChildFile (juce::String ("racks-") + (vertical ? "v-" : "h-") + (variant >= 2 ? "small-" : "") + (light ? "light.png" : "dark.png")));
+                    juce::FileOutputStream os (dir.getChildFile (juce::String (viewDemo > 0 ? "view" + juce::String (viewDemo) + "-" : routingDemo ? "routing-" : "racks-") + (vertical ? "v-" : "h-") + (variant == 4 ? "tiny-" : variant == 5 ? "dividers-" : variant >= 2 ? "small-" : "") + (light ? "light.png" : "dark.png")));
                     os.setPosition (0); os.truncate();
                     png.writeImageToStream (img, os);
                 }
 
-                for (int width : { 1100, 1300, 1700 })   // top bar at the minimum window width and wider
+                for (int width : { 1160, 1300, 1700 })   // top bar at the minimum window width and wider
                 {
                     TopBar bar (session);
                     bar.setBounds (0, 0, width, TopBar::preferredHeight);
@@ -272,6 +376,44 @@ public:
                     os.setPosition (0); os.truncate();
                     png.writeImageToStream (img, os);
                 }
+
+                {
+                    TempoPanel panel (session);
+                                        panel.tick();
+                    juce::Image img (juce::Image::ARGB, panel.getWidth(), panel.getHeight(), true);
+                    juce::Graphics g (img);
+                    panel.paintEntireComponent (g, true);
+                    juce::PNGImageFormat png;
+                    juce::FileOutputStream os (dir.getChildFile (light ? "tempo-light.png" : "tempo-dark.png"));
+                    os.setPosition (0); os.truncate();
+                    png.writeImageToStream (img, os);
+                }
+
+                {
+                    auto send = TempoPanel::createSendPanel (session, 2);
+                    juce::Image img (juce::Image::ARGB, send->getWidth(), send->getHeight(), true);
+                    juce::Graphics g (img);
+                    g.fillAll (theme::panel);
+                    send->paintEntireComponent (g, true);
+                    juce::PNGImageFormat png;
+                    juce::FileOutputStream os (dir.getChildFile (light ? "tempo-send-light.png" : "tempo-send-dark.png"));
+                    os.setPosition (0); os.truncate();
+                    png.writeImageToStream (img, os);
+                }
+
+                {
+                    edit.clickRack (engine.getRack (3).getId(), {});
+                    EditGroupsPanel panel (session, edit);
+                    panel.resized();
+                    juce::Image img (juce::Image::ARGB, panel.getWidth(), panel.getHeight(), true);
+                    juce::Graphics g (img);
+                    panel.paintEntireComponent (g, true);
+                    juce::PNGImageFormat png;
+                    juce::FileOutputStream os (dir.getChildFile (light ? "groups-light.png" : "groups-dark.png"));
+                    os.setPosition (0); os.truncate();
+                    png.writeImageToStream (img, os);
+                }
+
 
                 juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
             }
@@ -394,6 +536,15 @@ public:
             return;
         }
 
+        if (args.contains ("--session-check"))
+        {
+            juce::Process::setDockIconVisible (false);
+            static std::unique_ptr<SessionCheck> check;   // drives itself on the message loop, exits with _Exit
+            check = std::make_unique<SessionCheck> (args);
+            if (check->start() != 0) std::_Exit (1);
+            return;
+        }
+
         if (args.contains ("--watch-test"))
         {
             juce::Process::setDockIconVisible (false);
@@ -424,6 +575,13 @@ public:
             static std::unique_ptr<EditorTest> test;   // drives itself on the message loop, exits with _Exit
             test = std::make_unique<EditorTest> (args);
             if (test->start() != 0) std::_Exit (1);
+            return;
+        }
+
+        if (args.contains ("--tempo-probe"))
+        {
+            setApplicationReturnValue (runTempoProbe (args));
+            quit();
             return;
         }
 

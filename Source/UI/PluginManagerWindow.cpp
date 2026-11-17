@@ -284,6 +284,18 @@ public:
         };
         addAndMakeVisible (lightTheme);
 
+        tapFlashLabel.setText ("TAP beat flash", juce::dontSendNotification);
+        addAndMakeVisible (tapFlashLabel);
+        tapFlash.addItemList ({ "Off", "Subtle", "Medium", "Strong", "Full" }, 1);
+        tapFlash.setSelectedItemIndex (theme::tapFlash, juce::dontSendNotification);
+        tapFlash.setTooltip ("How much the TAP buttons in the top bar light up on each beat");
+        tapFlash.onChange = [this]
+        {
+            theme::tapFlash = tapFlash.getSelectedItemIndex();
+            plugins.getSettings().setValue ("tapFlash", theme::tapFlash);
+        };
+        addAndMakeVisible (tapFlash);
+
         autoUpdate.setButtonText ("Check for updates at startup");
         autoUpdate.setTooltip ("Looks for a newer StageRack on GitHub when the app starts and asks before downloading anything.");
         autoUpdate.setToggleState (plugins.getSettings().getBoolValue (update::Controller::settingCheck, true), juce::dontSendNotification);
@@ -417,7 +429,7 @@ public:
         auto r2 = row(); nextLabel.setBounds (r2.removeFromLeft (160)); nextCC.setBounds (r2.removeFromLeft (140));
         auto r3 = row(); prevLabel.setBounds (r3.removeFromLeft (160)); prevCC.setBounds (r3.removeFromLeft (140));
         midiInfo.setBounds (row());
-        lightTheme.setBounds (row().removeFromLeft (300));
+        auto rt = row(); lightTheme.setBounds (rt.removeFromLeft (300)); tapFlashLabel.setBounds (rt.removeFromLeft (110)); tapFlash.setBounds (rt.removeFromLeft (140));
         auto ru = row(); autoUpdate.setBounds (ru.removeFromLeft (260)); checkUpdates.setBounds (ru.removeFromLeft (100)); versionLabel.setBounds (ru);
     }
 
@@ -431,7 +443,8 @@ private:
     juce::TextButton respread, checkUpdates;
     juce::Label versionLabel;
     std::function<void()> onCheckUpdates;
-    juce::ComboBox spin;
+    juce::ComboBox spin, tapFlash;
+    juce::Label tapFlashLabel;
     juce::Label spinLabel;
 
     Session& session;

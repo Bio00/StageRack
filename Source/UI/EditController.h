@@ -72,7 +72,7 @@ public:
     std::function<void (int rackId)> onRackSizeChanged;
     std::function<void()> onUserAction;     // e.g. give the main window keyboard focus
 
-    static constexpr float minRackSize = 0.5f, maxRackSize = 2.2f;
+    static constexpr float minRackSize = 0.32f, maxRackSize = 2.2f;
 
 private:
     void changed()                                   { if (onUserAction) onUserAction(); sendChangeMessage(); }

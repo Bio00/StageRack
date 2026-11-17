@@ -7,6 +7,8 @@
 namespace stagerack
 {
 
+class TempoEngine;
+
 /** A peak meter value written by the audio thread and read (and decayed) by the UI. */
 struct PeakMeter
 {
@@ -165,15 +167,97 @@ public:
     std::atomic<bool> stereoOutput { true }; // false = (L+R)/2 on a single output channel
 
     float uiSize = 1.0f;                     // rack height (horizontal) / width (vertical) factor
+    // Dividers inside the rack (pixels, -1 = automatic), per layout: room for the sends (between
+    // plugins and fader) and for the input section (trim + meter, above the plugins).
+    float uiSendsV = -1.0f, uiSendsH = -1.0f, uiInputV = -1.0f, uiOutputV = -1.0f;
+    int uiHideSections = -1; // this rack's own sections (bits as Session::hiddenBits: 1 I/O, 2 input, 4 inserts, 8 sends, 16 info); -1 = as the session's view
+    int uiSendsShown = -1;   // sends this rack shows: bit k = Bus k+1; -1 = as the session's view (Session::RackView)
+
+    // Folder (Ableton group track, message thread only): a folder is a bus rack that its member
+    // racks are routed into; members follow it in the rack list (Session::normalizeFolders) and
+    // are hidden while it is closed. folderId = the folder this rack is in (-1 = top level).
+    bool isFolder = false, folderOpen = true;
+    int folderId = -1;
 
     // Edit group (Pro Tools style, message thread only): racks of the same group (1..8 = A..H,
     // 0 = none) follow each other's edits while the group is active (Session::isEditGroupActive).
     int editGroup = 0;
     static constexpr int maxEditGroups = 8;
 
+    // Tempo: the plugins of this rack get this tempo (0 = master, 1..4) and its beat position
+    // through their AudioPlayHead (synced delays, LFOs...). Zero cost when no plugin asks.
+    std::atomic<int> tempoIndex { 0 };
+    /** Audio for the tempo detectors (TempoEngine::AudioPoint 1 pre plugins, 2 post plugins,
+        3 post fader): bit 1 << point, set by the engine before the racks run. Mono (L+R)/2. */
+    std::atomic<int> tempoTapMask { 0 };
+    const float* getTempoTap (int point) const noexcept
+    {
+        return point >= 1 && point <= 3 && tempoTapValid[(size_t) point] ? tempoTapBuffer.getReadPointer (point - 1) : nullptr;
+    }
+    const TempoEngine* tempo = nullptr;     // set by AudioEngine
+    juce::AudioPlayHead* getPlayHead() noexcept { return &playHead; }
+
     // Chaining: input from another rack's output instead of the device (-1 = device).
     // Set through AudioEngine::setRackInputSource (it rebuilds the processing stages).
     std::atomic<int> inputRackId { -1 };
+
+    // Buses and sends (Ableton style; only while AudioEngine::routingEnabled). A bus is a rack
+    // whose input is the sum of what the other racks route or send to it (FX return, sub-group,
+    // master bus...). It runs in a later stage of the same callback: zero latency.
+    static constexpr int maxBuses = 8;            // A..H
+    static constexpr float sendOffDb = -100.0f;   // a send at or below this is off
+    std::atomic<int> busIndex { 0 };              // 1..maxBuses: this rack is Bus A..H (message thread: AudioEngine::setRackBus)
+    std::atomic<int> outputBus { 0 };             // 0 = device outputs, 1..maxBuses = into that bus (AudioEngine::setRackOutputBus)
+
+    // More destinations besides the main one (outputChannel/stereoOutput or outputBus), Pro Tools
+    // style "multiple outputs". Same codes as the OUT menu: outStereo + ch = device pair from ch,
+    // outMono + ch = device channel ch, outBus + k = Bus k (only while routing is on); 0 = unused.
+    // Written on the message thread (AudioEngine::setRackExtraOutputs), read by the audio thread.
+    static constexpr int maxExtraOutputs = 7, outNone = 1, outStereo = 1000, outMono = 2000, outBus = 4000;
+    std::array<std::atomic<int>, maxExtraOutputs> extraOutputs {};
+    std::vector<int> getExtraOutputs() const
+    {
+        std::vector<int> v;
+        for (auto& o : extraOutputs)
+            if (const auto c = o.load (std::memory_order_relaxed); c > 0)
+                v.push_back (c);
+        return v;
+    }
+    /** The main destination as a code (outBus + k only while `routing`). */
+    int mainOutputCode (bool routing) const noexcept
+    {
+        if (const auto b = outputBus.load(); routing && b > 0) return outBus + b;
+        const auto ch = outputChannel.load();
+        return ch < 0 ? outNone : (stereoOutput.load() ? outStereo : outMono) + ch;
+    }
+    struct Send
+    {
+        std::atomic<float> db { sendOffDb };
+        std::atomic<bool> pre { false };          // pre-fader (after the plugins, before gain/automix; follows mute)
+        bool isOn() const noexcept                { return db.load (std::memory_order_relaxed) > sendOffDb; }
+    };
+    std::array<Send, maxBuses> sends;             // index = bus letter - 1 (set levels through AudioEngine::setSend)
+
+    // Routing graph (written by AudioEngine under its racks lock, read by the audio thread;
+    // the message thread may read it too, it is its only writer).
+    struct Feed
+    {
+        Rack* src = nullptr;
+        int kind = 0;           // 0 = chain (input from rack), 1 = routed output, 2 = send
+        int send = -1;          // kind 2: send index (bus letter - 1)
+        float gain = 0.0f;      // audio thread (this bus): gain applied in the last block
+    };
+    std::vector<Feed> feeds;                      // everything that runs before this rack and feeds it
+    Rack* outBusRack = nullptr;                   // routed into this bus (else device outputs)
+    bool outToBus = false;                        // routed to a bus: never summed into the device (bus missing = silent)
+    bool feedsABus = false;                       // some output (main or extra) reaches a bus
+    bool isActiveBus = false;                     // input = sum of the feeds
+    std::atomic<juce::uint32> sendAllowed { 0 };  // bit k: a send to bus k+1 is possible (exists, no loop)
+    bool feedIsOn (const Feed& f) const noexcept  { return f.kind != 2 || f.src->sends[(size_t) f.send].isOn(); }
+
+    // Solo, per callback (engine): heard = soloed or fed by a soloed rack; feeds = feeds a soloed rack.
+    bool anySolo = false, soloHeard = false, soloFeeds = false;
+    bool passesSolo() const noexcept              { return ! anySolo || soloHeard || soloFeeds; }
 
     // Latency groups (SuperRack style): racks of the same group (1..8 = A..H, 0 = none)
     // are delayed to the group's highest latency, so they stay time-aligned.
@@ -199,6 +283,7 @@ public:
     int stage = 0;
 
     PeakMeter inMeter[2], outMeter[2];
+    std::atomic<juce::uint32> nonFiniteBlocks { 0 };   // blocks silenced because they held inf / NaN
     std::atomic<float> cpuMs { 0.0f };       // chain time per processed block
     std::atomic<float> cpuLoad { 0.0f };     // chain time / block duration (0..1+)
     PeakMeter peakLoad;                      // max cpuLoad since last read
@@ -212,6 +297,9 @@ public:
     // Audio thread
     void process (const float* const* deviceInputs, int numDeviceInputs, int numSamples, int threadIndex) noexcept;
     const juce::AudioBuffer<float>& getOutput() const noexcept { return buffer; }
+    /** After the plugins and the latency compensation, before gain/mute (valid if hasPreFader()). */
+    const juce::AudioBuffer<float>& getPreFader() const noexcept { return preBuffer; }
+    bool hasPreFader() const noexcept               { return preValid; }
     bool producedAudio() const noexcept             { return hasAudio; }
 
 private:
@@ -230,6 +318,12 @@ private:
     juce::SpinLock asyncLock;       // async FIFOs vs. mode changes
 
     juce::AudioBuffer<float> buffer;       // device-side rack bus
+    juce::AudioBuffer<float> preBuffer;    // pre-fader copy, only while a pre-fader send is on
+    juce::AudioBuffer<float> tempoTapBuffer;   // tempo detector taps (see tempoTapMask)
+    std::array<bool, 4> tempoTapValid {};
+    void captureTempoTap (int point, int numSamples) noexcept;
+    bool preValid = false;
+    void sumFeeds (int numSamples) noexcept;   // bus input
     juce::AudioBuffer<float> delayLine;    // latency-group compensation (2 x maxCompensation)
     int delayWrite = 0;
     void applyCompensation (int numSamples) noexcept;
@@ -266,6 +360,14 @@ public:
     static inline std::atomic<float> automixAvgMs { 5.0f }, automixHoldMs { 40.0f }, automixReleaseDbPerSec { 100.0f },
                                      automixHighPassHz { 200.0f }, automixLowPassHz { 4000.0f };
 private:
+    struct TempoPlayHead final : juce::AudioPlayHead
+    {
+        explicit TempoPlayHead (const Rack& r) : rack (r) {}
+        juce::Optional<PositionInfo> getPosition() const override;
+        const Rack& rack;
+    };
+    TempoPlayHead playHead { *this };
+
     juce::AudioBuffer<float> workBuffer;   // async thread chain buffer
     juce::AudioBuffer<float> twinBuffer;   // hand-over: the twin's copy of the slot input
     std::vector<std::unique_ptr<juce::AudioPluginInstance>> discarded;   // message thread, see takeDiscarded()

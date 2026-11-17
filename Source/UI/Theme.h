@@ -22,6 +22,7 @@ namespace stagerack::theme
     inline juce::Colour display     { 0xff0e1013 };   // scene display in the top bar
     inline bool light = false;
     inline bool tintRacks = true;   // whole rack tinted with its colour (View > Tinted Racks)
+    inline int tapFlash = 2;        // beat flash of the TAP buttons: 0 off, 1 subtle, 2 medium, 3 strong, 4 full (SETTINGS)
 
     /** A rack surface (panel, slot) tinted with the rack colour: greyish in dark, pastel in light. */
     inline juce::Colour tinted (juce::Colour base, juce::Colour rackColour, float amount)
@@ -178,6 +179,92 @@ namespace stagerack::theme
         juce::Font getTextButtonFont (juce::TextButton&, int h) override
         {
             return font (juce::jmin (13.0f, (float) h * 0.55f), true);
+        }
+
+        // as JUCE's, but the side margins shrink on very thin buttons (M S B on the thinnest racks)
+        void drawButtonText (juce::Graphics& g, juce::TextButton& b, bool, bool) override
+        {
+            const auto f = getTextButtonFont (b, b.getHeight());
+            g.setFont (f);
+            g.setColour (b.findColour (b.getToggleState() ? juce::TextButton::textColourOnId : juce::TextButton::textColourOffId)
+                           .withMultipliedAlpha (b.isEnabled() ? 1.0f : 0.5f));
+            const auto indent = juce::jlimit (1, juce::roundToInt (f.getHeight()), (b.getWidth() - 12) / 3);
+            const auto yIndent = juce::jmin (4, b.proportionOfHeight (0.3f));
+            g.drawFittedText (b.getButtonText(), b.getLocalBounds().reduced (indent, yIndent), juce::Justification::centred, 2, 0.7f);
+        }
+
+        // thin combo boxes (IN / OUT on the thinnest racks): a small arrow, more room for the text
+        static bool thinCombo (const juce::ComboBox& box) noexcept  { return box.getWidth() < 72; }
+
+        void drawComboBox (juce::Graphics& g, int width, int height, bool down, int bx, int by, int bw, int bh, juce::ComboBox& box) override
+        {
+            if (! thinCombo (box))
+                return juce::LookAndFeel_V4::drawComboBox (g, width, height, down, bx, by, bw, bh, box);
+
+            const auto bounds = juce::Rectangle<int> (0, 0, width, height).toFloat();
+            g.setColour (box.findColour (juce::ComboBox::backgroundColourId));
+            g.fillRoundedRectangle (bounds, 3.0f);
+            g.setColour (box.findColour (juce::ComboBox::outlineColourId));
+            g.drawRoundedRectangle (bounds.reduced (0.5f), 3.0f, 1.0f);
+
+            const auto zone = juce::Rectangle<float> ((float) width - 9.0f, 0.0f, 6.0f, (float) height);
+            juce::Path p;
+            p.startNewSubPath (zone.getX(), zone.getCentreY() - 1.5f);
+            p.lineTo (zone.getCentreX(), zone.getCentreY() + 1.5f);
+            p.lineTo (zone.getRight(), zone.getCentreY() - 1.5f);
+            g.setColour (box.findColour (juce::ComboBox::arrowColourId).withAlpha (box.isEnabled() ? 0.9f : 0.2f));
+            g.strokePath (p, juce::PathStrokeType (1.5f));
+        }
+
+        void positionComboBoxText (juce::ComboBox& box, juce::Label& label) override
+        {
+            if (! thinCombo (box))
+                return juce::LookAndFeel_V4::positionComboBoxText (box, label);
+
+            label.setBounds (0, 1, box.getWidth() - 9, box.getHeight() - 2);
+            label.setBorderSize ({ 1, 3, 1, 1 });
+            label.setFont (getComboBoxFont (box).withHeight (juce::jmin (12.0f, getComboBoxFont (box).getHeight())));
+            label.setMinimumHorizontalScale (0.75f);
+        }
+
+        // vertical faders (big input / output sections of a rack): groove, fill in the rack
+        // colour, 0 dB mark, console-style cap
+        void drawLinearSlider (juce::Graphics& g, int x, int y, int w, int h, float sliderPos, float minPos, float maxPos,
+                               juce::Slider::SliderStyle style, juce::Slider& s) override
+        {
+            if (style != juce::Slider::LinearVertical)
+                return juce::LookAndFeel_V4::drawLinearSlider (g, x, y, w, h, sliderPos, minPos, maxPos, style, s);
+
+            const auto cx = (float) x + (float) w * 0.5f;
+            const auto groove = juce::Rectangle<float> (cx - 2.0f, (float) y, 4.0f, (float) h);
+            g.setColour (light ? outline : slot);
+            g.fillRoundedRectangle (groove, 2.0f);
+            g.setColour (s.findColour (juce::Slider::rotarySliderFillColourId));
+            g.fillRoundedRectangle (groove.withTop (sliderPos), 2.0f);
+
+            if (s.getMinimum() < 0.0 && s.getMaximum() > 0.0)
+            {
+                const auto zero = (float) s.getPositionOfValue (0.0);
+                g.setColour (textDim);
+                g.drawHorizontalLine (juce::roundToInt (zero), cx - 11.0f, cx - 4.0f);
+                g.drawHorizontalLine (juce::roundToInt (zero), cx + 4.0f, cx + 11.0f);
+            }
+
+            const auto capW = juce::jlimit (16.0f, 34.0f, (float) w - 4.0f);
+            const auto cap = juce::Rectangle<float> (capW, 18.0f).withCentre ({ cx, sliderPos });
+            g.setColour (juce::Colours::black.withAlpha (0.35f));
+            g.fillRoundedRectangle (cap.translated (0.0f, 1.5f), 3.0f);
+            g.setColour (light ? juce::Colour (0xfff4f5f7) : juce::Colour (0xff4a5058));
+            g.fillRoundedRectangle (cap, 3.0f);
+            g.setColour (outline);
+            g.drawRoundedRectangle (cap.reduced (0.5f), 3.0f, 1.0f);
+            g.setColour (text);
+            g.fillRect (cap.withSizeKeepingCentre (capW - 6.0f, 2.0f));
+        }
+
+        int getSliderThumbRadius (juce::Slider& s) override
+        {
+            return s.getSliderStyle() == juce::Slider::LinearVertical ? 9 : juce::LookAndFeel_V4::getSliderThumbRadius (s);
         }
 
         void drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos,

@@ -1,4 +1,5 @@
 #include "Rack.h"
+#include "TempoEngine.h"
 #include "WorkerPool.h"
 #include <pthread.h>
 #include <ctime>
@@ -50,6 +51,8 @@ Rack::Rack (int uniqueId) : id (uniqueId)
     delayLine.setSize (2, maxCompensation);
     delayLine.clear();
     buffer.setSize (maxPluginChannels, deviceBlockSize);
+    preBuffer.setSize (2, deviceBlockSize);
+    preBuffer.clear();
     gain.reset (sampleRate, 0.02);
 }
 
@@ -98,9 +101,33 @@ static void updateSlotChannels (Rack::Slot& s)
     s.mono = (ins <= 1 && outs == 1);
 }
 
+juce::Optional<juce::AudioPlayHead::PositionInfo> Rack::TempoPlayHead::getPosition() const
+{
+    if (rack.tempo == nullptr)
+        return {};
+
+    const auto& b = rack.tempo->getBlockInfo (rack.tempoIndex.load (std::memory_order_relaxed));
+    PositionInfo info;
+    info.setBpm (b.bpm);
+    info.setTimeSignature (TimeSignature { 4, 4 });
+    info.setPpqPosition (b.ppq);
+    const auto bar = std::floor (b.ppq / 4.0);
+    info.setPpqPositionOfLastBarStart (bar * 4.0);
+    info.setBarCount ((juce::int64) bar);
+    info.setTimeInSamples (b.samplePos);
+    info.setTimeInSeconds ((double) b.samplePos / juce::jmax (1.0, rack.sampleRate));
+    info.setIsPlaying (true);   // a live rig always runs: synced plugins work without a transport
+    if (b.hostTimeNs != 0)
+        info.setHostTimeNs (b.hostTimeNs);
+    return info;
+}
+
 std::unique_ptr<juce::AudioPluginInstance> Rack::setPlugin (int slot, std::unique_ptr<juce::AudioPluginInstance> p)
 {
     jassert (juce::isPositiveAndBelow (slot, maxSlots));
+
+    if (p != nullptr)
+        p->setPlayHead (&playHead);
 
     Slot temp;
     temp.plugin = std::move (p);
@@ -124,6 +151,9 @@ std::unique_ptr<juce::AudioPluginInstance> Rack::setPlugin (int slot, std::uniqu
         s.paramsChosen = false;
         s.viewMode = 0;
     }
+
+    if (temp.plugin != nullptr)
+        temp.plugin->setPlayHead (nullptr);   // may be parked or moved: never points at a rack that goes away
 
     return std::move (temp.plugin);
 }
@@ -181,6 +211,7 @@ bool Rack::beginHandover (int slot, std::unique_ptr<juce::AudioPluginInstance>& 
         || twin->getTotalNumOutputChannels() != s.plugin->getTotalNumOutputChannels())
         return false;
 
+    twin->setPlayHead (&playHead);
     s.twinHopCalls = hopCalls;
     s.twinHopPhase = hopPhase;
     s.twinWarmSamples = juce::jmax (0, warmSamples);
@@ -214,14 +245,20 @@ std::unique_ptr<juce::AudioPluginInstance> Rack::collectHandover (int slot)
         s.handoverDone = false;
         s.twinPos = 0;
     }
+    if (retired != nullptr)
+        retired->setPlayHead (nullptr);
     return retired;
 }
 
 std::vector<std::unique_ptr<juce::AudioPluginInstance>> Rack::takeDiscarded()
 {
     std::vector<std::unique_ptr<juce::AudioPluginInstance>> out;
-    const juce::SpinLock::ScopedLockType sl (processLock);
-    std::swap (out, discarded);
+    {
+        const juce::SpinLock::ScopedLockType sl (processLock);
+        std::swap (out, discarded);
+    }
+    for (auto& p : out)
+        if (p != nullptr) p->setPlayHead (nullptr);
     return out;
 }
 
@@ -266,6 +303,12 @@ void Rack::prepare (double sr, int devBlock)
 
         buffer.setSize (maxPluginChannels, juce::jmax (deviceBlockSize, pluginBlockSize), false, true, false);
         buffer.clear();
+        preBuffer.setSize (2, juce::jmax (deviceBlockSize, pluginBlockSize), false, true, false);
+        preBuffer.clear();
+        tempoTapBuffer.setSize (3, juce::jmax (deviceBlockSize, pluginBlockSize), false, true, false);
+        tempoTapBuffer.clear();
+        tempoTapValid = {};
+        preValid = false;
         workBuffer.setSize (maxPluginChannels, pluginBlockSize, false, true, false);
         workBuffer.clear();
         twinBuffer.setSize (maxPluginChannels, juce::jmax (deviceBlockSize, pluginBlockSize), false, true, false);
@@ -707,11 +750,105 @@ void Rack::updateAutomixLevel (int numSamples) noexcept
     automixLevelDb.store (juce::jmax (-100.0f, amEnvDb), std::memory_order_relaxed);
 }
 
+void Rack::sumFeeds (int numSamples) noexcept
+{
+    buffer.clear (0, 0, numSamples);
+    buffer.clear (1, 0, numSamples);
+
+    for (auto& f : feeds)
+    {
+        if (f.kind == 0)
+            continue;
+
+        auto& s = *f.src;
+
+        if (! s.producedAudio() || ! s.passesSolo())
+        {
+            f.gain = 0.0f;   // nothing (valid) to read: no ramp from stale data
+            continue;
+        }
+
+        const juce::AudioBuffer<float>* src = &s.getOutput();
+        float target = 0.0f;
+
+        if (f.kind == 1)
+        {
+            target = s.automixGain;   // routed: everything (fader, mute, automix)
+        }
+        else if (auto& send = s.sends[(size_t) f.send]; send.isOn())
+        {
+            target = juce::Decibels::decibelsToGain (send.db.load (std::memory_order_relaxed), sendOffDb);
+
+            if (send.pre.load (std::memory_order_relaxed))
+            {
+                // pre-fader: before gain and automix, but a muted rack sends nothing
+                if (s.hasPreFader())
+                    src = &s.getPreFader();
+                else
+                    target = 0.0f;
+
+                if (s.muted.load (std::memory_order_relaxed))
+                    target = 0.0f;
+            }
+            else
+            {
+                target *= s.automixGain;   // post-fader: what the rack plays, automix included
+            }
+        }
+
+        const auto g0 = f.gain;
+        f.gain = target;
+
+        if (g0 == 0.0f && target == 0.0f)
+            continue;
+
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            if (g0 == target)
+                buffer.addFrom (ch, 0, *src, ch, 0, numSamples, target);
+            else
+                buffer.addFromWithRamp (ch, 0, src->getReadPointer (ch), numSamples, g0, target);
+        }
+    }
+}
+
+// Inf / NaN from a device or a plugin: silence the block, so it never reaches the speakers, the
+// buses, the delay lines or the meters (an infinite meter value would never come down).
+// Returns false if the block was cleared.
+static bool keepFinite (juce::AudioBuffer<float>& b, int numSamples) noexcept
+{
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        const auto range = juce::FloatVectorOperations::findMinAndMax (b.getReadPointer (ch), numSamples);
+
+        if (! (std::isfinite (range.getStart()) && std::isfinite (range.getEnd())))
+        {
+            b.clear (0, 0, numSamples);
+            b.clear (1, 0, numSamples);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void Rack::captureTempoTap (int point, int numSamples) noexcept
+{
+    if ((tempoTapMask.load (std::memory_order_relaxed) & (1 << point)) == 0 || numSamples > tempoTapBuffer.getNumSamples())
+        return;
+
+    auto* d = tempoTapBuffer.getWritePointer (point - 1);
+    juce::FloatVectorOperations::copyWithMultiply (d, buffer.getReadPointer (0), 0.5f, numSamples);
+    juce::FloatVectorOperations::addWithMultiply (d, buffer.getReadPointer (1), 0.5f, numSamples);
+    tempoTapValid[(size_t) point] = true;
+}
+
 void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int numSamples, int threadIndex) noexcept
 {
     const juce::ScopedNoDenormals noDenormals;
     const auto t0 = juce::Time::getHighResolutionTicks();
     hasAudio = false;
+    tempoTapValid = {};
 
     auto readInput = [&]
     {
@@ -726,7 +863,11 @@ void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int n
                 buffer.clear (dest, 0, numSamples);
         };
 
-        if (sourceRack != nullptr)
+        if (isActiveBus)
+        {
+            sumFeeds (numSamples);   // the racks routed / sending here ran in earlier stages
+        }
+        else if (sourceRack != nullptr)
         {
             // chained: the source ran in an earlier stage of this same callback
             if (sourceRack->producedAudio())
@@ -779,12 +920,41 @@ void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int n
             buffer.applyGain (1, 0, numSamples, g);
         }
 
+        if (! keepFinite (buffer, numSamples))
+            nonFiniteBlocks.fetch_add (1, std::memory_order_relaxed);
+
         inMeter[0].push (buffer.getMagnitude (0, 0, numSamples));
         inMeter[1].push (buffer.getMagnitude (1, 0, numSamples));
+        captureTempoTap (1, numSamples);   // tempo taps: before the plugins
     };
 
     auto applyGainAndMeter = [&]
     {
+        if (! keepFinite (buffer, numSamples))   // a plugin blew up
+            nonFiniteBlocks.fetch_add (1, std::memory_order_relaxed);
+
+        captureTempoTap (2, numSamples);   // tempo taps: after the plugins, before the fader
+
+        // latency-group delay first, so pre- and post-fader sends are both compensated
+        applyCompensation (numSamples);
+
+        // pre-fader copy, only while a pre-fader send is on
+        preValid = false;
+
+        if (const auto allowed = sendAllowed.load (std::memory_order_relaxed); allowed != 0)
+        {
+            for (int k = 0; k < maxBuses; ++k)
+            {
+                if ((allowed & (1u << k)) != 0 && sends[(size_t) k].pre.load (std::memory_order_relaxed) && sends[(size_t) k].isOn())
+                {
+                    preBuffer.copyFrom (0, 0, buffer, 0, 0, numSamples);
+                    preBuffer.copyFrom (1, 0, buffer, 1, 0, numSamples);
+                    preValid = true;
+                    break;
+                }
+            }
+        }
+
         const float target = muted.load (std::memory_order_relaxed)
                                  ? 0.0f
                                  : juce::Decibels::decibelsToGain (gainDb.load (std::memory_order_relaxed), -100.0f);
@@ -811,8 +981,7 @@ void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int n
         // automix detector AFTER the fader, like Dugan Speech in Waves consoles: pulling a
         // fader down also takes that mic's claim on the floor (the way to quiet a noisy mic)
         updateAutomixLevel (numSamples);
-
-        applyCompensation (numSamples);
+        captureTempoTap (3, numSamples);   // tempo taps: after the fader (and mute)
 
         outMeter[0].push (buffer.getMagnitude (0, 0, numSamples));
         outMeter[1].push (buffer.getMagnitude (1, 0, numSamples));

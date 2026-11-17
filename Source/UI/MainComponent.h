@@ -15,7 +15,10 @@ class SceneListComponent;
 class RackComponent;
 class PluginManagerWindow;
 class AutomixerWindow;
+class TempoWindow;
+class EditGroupsWindow;
 class SettingsWindow;
+class TapKeys;
 namespace update { class Controller; }
 
 class MainComponent final : public juce::Component,
@@ -37,6 +40,7 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress&) override;
+    bool keyStateChanged (bool isKeyDown) override;
 
     Session& getSession() noexcept { return *session; }
 
@@ -82,7 +86,17 @@ private:
     std::unique_ptr<SceneListComponent> sceneList;
     juce::Viewport rackViewport;
     void mouseDown (const juce::MouseEvent&) override;   // click on empty space = deselect
-    juce::Component rackContainer;
+    /** Holds the racks; paints the folders behind them (a band in the folder's colour over its
+        racks, which sit a step lower, and a tint behind the whole block). */
+    struct RackContainer final : juce::Component
+    {
+        struct Folder { juce::Rectangle<int> block, band; juce::Colour colour; juce::String name; };
+        std::vector<Folder> folders;   // outer folders first
+        bool vertical = false;
+        void paint (juce::Graphics&) override;
+    };
+    RackContainer rackContainer;
+    static constexpr int folderStep = 16;   // how much shorter a folder's racks are (per nesting level)
     juce::OwnedArray<RackComponent> rackComponents;
     /** "+ ADD RACK": click adds one, right-click offers several at once (consecutive inputs). */
     struct AddRackButton final : juce::TextButton
@@ -103,6 +117,8 @@ private:
     void openSettings();
     void openPluginManager();
     void openAutomixer();
+    void openTempo();
+    void openEditGroups();
     void toggleLightTheme();
     /** Slim strip that collapses/expands the scene column. */
     struct ScenesToggle final : juce::Component
@@ -135,6 +151,9 @@ private:
     std::unique_ptr<PluginManagerWindow> pluginWindow;
     std::unique_ptr<SettingsWindow> settingsWindow;
     std::unique_ptr<AutomixerWindow> automixerWindow;
+    std::unique_ptr<TempoWindow> tempoWindow;
+    std::unique_ptr<EditGroupsWindow> editGroupsWindow;
+    std::unique_ptr<TapKeys> tapKeys;   // tap tempo from the computer keyboard
     std::unique_ptr<juce::FileChooser> chooser;
 
     // updates from GitHub: checked at startup, "Check for Updates..." in the app menu and in Settings

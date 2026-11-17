@@ -73,6 +73,7 @@ Rack& AudioEngine::addRackWithId (int id)
 
     rack->inputChannel = 0;
     rack->outputChannel = 0;
+    rack->tempo = &tempo;
     rack->prepare (sampleRate, blockSize);
 
     auto& ref = *rack;
@@ -255,6 +256,25 @@ std::vector<std::pair<int, int>> AudioEngine::watchHops()
             if (hop == s.hopCalls && phase == s.hopPhase)
             {
                 s.watchSeen = 0;
+
+                // Settled, but sharing its phase with an instance in series (a track whose
+                // master got a plugin later, or an output just routed to a bus): the two hops
+                // add up on one core. Move it if a phase without series partners exists. The
+                // master itself never moves (all its phases are in series); every move removes
+                // a series collision, so this cannot oscillate.
+                const auto cost = phaseCosts (hop, &s, r.get());
+                if (cost[(size_t) phase] >= 1000 && *std::min_element (cost.begin(), cost.end()) < 1000
+                    && s.watchRespreads < 3)
+                {
+                    ++s.watchRespreads;
+                    ++seriesRespreads;
+                    toRespread.push_back ({ r->getId(), i });
+                    if (logWatch)
+                    {
+                        juce::String c; for (auto v : cost) c << v << " ";
+                        std::printf ("    [watch] rack id %d slot %d phase %d shares it with a series partner -> move (costs %s)\n", r->getId(), i, phase, c.toRawUTF8());
+                    }
+                }
                 continue;
             }
 
@@ -274,6 +294,12 @@ std::vector<std::pair<int, int>> AudioEngine::watchHops()
             const auto cost = phaseCosts (hop, &s, r.get());
             const bool crowded = cost[(size_t) phase] > *std::min_element (cost.begin(), cost.end());
 
+            if (logWatch)
+            {
+                juce::String c; for (auto v : cost) c << v << " ";
+                std::printf ("    [watch] rack id %d slot %d hop moved %d/%d -> %d/%d (costs %s)%s\n", r->getId(), i, s.hopCalls.load(), s.hopPhase.load(),
+                             hop, phase, c.toRawUTF8(), crowded ? " crowded" : "");
+            }
             s.hopCalls = hop;       // where it really is now
             s.hopPhase = phase;
             ++hopsAdopted;
@@ -293,33 +319,39 @@ std::vector<std::pair<int, int>> AudioEngine::watchHops()
 bool AudioEngine::runsInSeries (const Rack& a, const Rack& b) const
 {
     // same rack, or one feeds the other (directly or through other racks)
-    auto feeds = [this] (const Rack& from, const Rack& to)
+    return &a == &b || feedsInto (a, b) || feedsInto (b, a);
+}
+
+bool AudioEngine::feedsInto (const Rack& upstream, const Rack& rack) const
+{
+    std::vector<const Rack*> todo { &rack }, seen;
+
+    while (! todo.empty())
     {
-        const Rack* r = &to;
+        const auto* r = todo.back();
+        todo.pop_back();
 
-        for (int guard = 0; r != nullptr && guard < 256; ++guard)
+        for (const auto& f : r->feeds)
         {
-            if (r == &from)
+            if (! r->feedIsOn (f))
+                continue;
+            if (f.src == &upstream)
                 return true;
-
-            r = r->inputRackId >= 0 ? findRack (r->inputRackId) : nullptr;
+            if (std::find (seen.begin(), seen.end(), f.src) == seen.end() && seen.size() < 1024)
+            {
+                seen.push_back (f.src);
+                todo.push_back (f.src);
+            }
         }
+    }
 
-        return false;
-    };
-
-    return feeds (a, b) || feeds (b, a);
+    return false;
 }
 
 bool AudioEngine::wouldCreateCycle (const Rack& rack, int sourceRackId) const
 {
-    int guard = 0;
-
-    for (auto* r = findRack (sourceRackId); r != nullptr && guard++ < 256; r = r->inputRackId >= 0 ? findRack (r->inputRackId) : nullptr)
-        if (r == &rack)
-            return true;
-
-    return guard >= 256;
+    const auto* src = findRack (sourceRackId);
+    return src != nullptr && (src == &rack || feedsInto (rack, *src));
 }
 
 bool AudioEngine::setRackInputSource (Rack& rack, int sourceRackId)
@@ -333,6 +365,160 @@ bool AudioEngine::setRackInputSource (Rack& rack, int sourceRackId)
     return true;
 }
 
+void AudioEngine::setRoutingEnabled (bool on)
+{
+    routingEnabled = on;
+    rebuildRouting();
+}
+
+bool AudioEngine::setRackBus (Rack& rack, int letter)
+{
+    letter = juce::jlimit (0, Rack::maxBuses, letter);
+
+    if (letter > 0)
+        for (auto& r : racks)
+            if (r.get() != &rack && r->busIndex.load() == letter)
+                return false;
+
+    rack.busIndex = letter;
+
+    if (letter > 0 && rack.outputBus.load() == letter)
+        rack.outputBus = 0;
+
+    if (letter > 0)
+        for (auto& o : rack.extraOutputs)
+            if (o.load() == Rack::outBus + letter)
+                o = 0;
+
+    rebuildRouting();
+    return true;
+}
+
+bool AudioEngine::setRackOutputBus (Rack& rack, int letter)
+{
+    letter = juce::jlimit (0, Rack::maxBuses, letter);
+
+    if (letter > 0 && ! canRouteToBus (rack, letter))
+        return false;
+
+    rack.outputBus = letter;
+    rebuildRouting();
+    return true;
+}
+
+std::vector<int> AudioEngine::setRackExtraOutputs (Rack& rack, const std::vector<int>& codes)
+{
+    std::vector<int> kept;
+    const auto main = rack.mainOutputCode (true);
+    bool busesChanged = false;
+
+    for (auto c : codes)
+    {
+        if (c <= Rack::outNone || c == main || std::find (kept.begin(), kept.end(), c) != kept.end()
+            || (int) kept.size() >= Rack::maxExtraOutputs)
+            continue;
+
+        if (c > Rack::outBus)
+        {
+            const auto k = c - Rack::outBus;
+            // a bus that does not exist yet / with routing off is kept (it works when it does);
+            // only a loop or the rack's own letter is refused
+            if (k > Rack::maxBuses || rack.busIndex.load() == k || (findBus (k) != nullptr && ! canRouteToBus (rack, k)))
+                continue;
+        }
+        else if (c < Rack::outStereo || c >= Rack::outBus)
+        {
+            continue;
+        }
+
+        kept.push_back (c);
+    }
+
+    for (int i = 0; i < Rack::maxExtraOutputs; ++i)
+    {
+        const auto c = i < (int) kept.size() ? kept[(size_t) i] : 0;
+        const auto old = rack.extraOutputs[(size_t) i].load();
+        busesChanged = busesChanged || (old != c && (old > Rack::outBus || c > Rack::outBus));
+        rack.extraOutputs[(size_t) i] = c;
+    }
+
+    if (busesChanged)
+        rebuildRouting();
+
+    return kept;
+}
+
+bool AudioEngine::canRouteToBus (const Rack& rack, int letter) const
+{
+    auto* bus = findBus (letter);
+    return bus != nullptr && bus != &rack && ! feedsInto (*bus, rack);
+}
+
+Rack* AudioEngine::findBus (int letter) const
+{
+    for (auto& r : racks)
+        if (r->isActiveBus && r->busIndex.load() == letter)
+            return r.get();
+    return nullptr;
+}
+
+int AudioEngine::firstFreeBus() const
+{
+    for (int k = 1; k <= Rack::maxBuses; ++k)
+    {
+        bool used = false;
+        for (auto& r : racks)
+            used = used || r->busIndex.load() == k;
+        if (! used)
+            return k;
+    }
+    return 0;
+}
+
+void AudioEngine::setSend (Rack& r, int letter, float db)
+{
+    if (letter <= 0 || letter > Rack::maxBuses)
+        return;
+
+    auto& send = r.sends[(size_t) letter - 1];
+    const bool wasOn = send.isOn();
+    send.db = juce::jlimit (Rack::sendOffDb, 12.0f, db);
+
+    if (! r.isActiveBus || wasOn == send.isOn())
+        return;
+
+    if (send.isOn())
+    {
+        rebuildRouting();   // a bus -> bus edge appears (its gain ramps up from 0)
+    }
+    else
+    {
+        // let the feed ramp down to 0 in the next blocks, then drop the edge
+        juce::Timer::callAfterDelay (150, [weak = std::weak_ptr<int> (aliveToken), this]
+        {
+            if (weak.lock() != nullptr)
+                rebuildRouting();
+        });
+    }
+}
+
+juce::uint32 AudioEngine::busSendMask() const
+{
+    juce::uint32 m = 0;
+    int bit = 0;
+    for (auto& r : racks)
+        if (r->isActiveBus)
+            for (auto& snd : r->sends)
+                m |= (snd.isOn() ? 1u : 0u) << (bit++ & 31);
+    return m;
+}
+
+void AudioEngine::rebuildRouting()
+{
+    rebuildGraph();
+    updateLatencyCompensation();
+}
+
 void AudioEngine::rebuildGraph()
 {
     const juce::SpinLock::ScopedLockType sl (racksLock);
@@ -341,25 +527,150 @@ void AudioEngine::rebuildGraph()
 
 void AudioEngine::rebuildGraphLocked()
 {
-    // stage = 1 + stage of the source (racks without a valid source are stage 0)
-    std::vector<std::vector<Rack*>> newStages;
+    // Everything that feeds a rack (chain source, racks routed or sending to it as a bus) runs
+    // in an earlier stage of the same callback: stage = 1 + the latest stage feeding it.
+    const bool routing = routingEnabled.load();
+    std::array<Rack*, Rack::maxBuses> buses {};
+    std::map<const Rack*, std::vector<Rack::Feed>> previous;   // keeps the send ramps going
 
     for (auto& r : racks)
     {
-        r->sourceRack = r->inputRackId >= 0 ? findRack (r->inputRackId) : nullptr;
+        previous[r.get()] = std::move (r->feeds);
+        r->feeds.clear();
+        r->sourceRack = nullptr;
+        r->outBusRack = nullptr;
+        r->outToBus = false;
+        r->feedsABus = false;
+        r->isActiveBus = false;
         r->stage = -1;
+
+        if (const auto b = r->busIndex.load(); routing && b > 0 && b <= Rack::maxBuses && buses[(size_t) b - 1] == nullptr)
+        {
+            buses[(size_t) b - 1] = r.get();
+            r->isActiveBus = true;
+        }
     }
+
+    // does `from` already reach `to` through the edges added so far (all of them, on or off)?
+    auto reaches = [] (const Rack* from, const Rack* to)
+    {
+        std::vector<const Rack*> todo { to }, seen;
+
+        while (! todo.empty())
+        {
+            const auto* r = todo.back();
+            todo.pop_back();
+
+            if (r == from)
+                return true;
+
+            for (const auto& f : r->feeds)
+                if (std::find (seen.begin(), seen.end(), f.src) == seen.end() && seen.size() < 1024)
+                {
+                    seen.push_back (f.src);
+                    todo.push_back (f.src);
+                }
+        }
+
+        return false;
+    };
+
+    auto addFeed = [&] (Rack* src, Rack* dst, int kind, int send)
+    {
+        if (src == dst || reaches (dst, src))
+            return false;   // would close a loop
+
+        float g = 0.0f;
+        for (const auto& old : previous[dst])
+            if (old.src == src && old.kind == kind && old.send == send)
+                g = old.gain;
+
+        dst->feeds.push_back ({ src, kind, send, g });
+        return true;
+    };
+
+    // 1. chains (a bus takes its input from its feeds instead)
+    for (auto& r : racks)
+        if (! r->isActiveBus && r->inputRackId.load() >= 0)
+            if (auto* src = findRack (r->inputRackId.load()); src != nullptr && addFeed (src, r.get(), 0, -1))
+                r->sourceRack = src;
+
+    // 2. outputs routed into buses (missing bus or loop = silent, never the device by surprise)
+    if (routing)
+    {
+        for (auto& r : racks)
+        {
+            const auto b = r->outputBus.load();
+
+            if (b <= 0 || b > Rack::maxBuses)
+                continue;
+
+            r->outToBus = true;
+
+            if (auto* bus = buses[(size_t) b - 1]; bus != nullptr && addFeed (r.get(), bus, 1, -1))
+            {
+                r->outBusRack = bus;
+                r->feedsABus = true;
+            }
+        }
+
+        // extra outputs into buses (after every main one: a main output wins a would-be loop)
+        for (auto& r : racks)
+            for (auto c : r->getExtraOutputs())
+                if (const auto k = c - Rack::outBus; k > 0 && k <= Rack::maxBuses)
+                    if (auto* bus = buses[(size_t) k - 1]; bus != nullptr && bus != r->outBusRack && addFeed (r.get(), bus, 1, -1))
+                        r->feedsABus = true;
+    }
+
+    // 3. sends: every rack can send to every bus that does not feed it. Sends that are on are
+    //    placed first; normal racks before buses, buses in letter order.
+    std::map<const Rack*, juce::uint32> allowed;
+
+    if (routing)
+    {
+        std::vector<Rack*> order;
+        for (auto& r : racks)
+            if (! r->isActiveBus)
+                order.push_back (r.get());
+        for (auto* b : buses)
+            if (b != nullptr)
+                order.push_back (b);
+
+        // A send from a bus that is off is not an edge: buses can send to each other in any
+        // direction until one of the two is turned on (setSend rebuilds then).
+        for (int pass = 0; pass < 2; ++pass)
+            for (auto* r : order)
+                for (int k = 0; k < Rack::maxBuses; ++k)
+                    if (buses[(size_t) k] != nullptr && r->sends[(size_t) k].isOn() == (pass == 0)
+                        && ! (pass == 1 && r->isActiveBus)
+                        && addFeed (r, buses[(size_t) k], 2, k))
+                        allowed[r] |= 1u << k;
+
+        for (auto* b : buses)
+            if (b != nullptr)
+                for (int k = 0; k < Rack::maxBuses; ++k)
+                    if (auto* to = buses[(size_t) k]; to != nullptr && to != b && ! b->sends[(size_t) k].isOn() && ! reaches (to, b))
+                        allowed[b] |= 1u << k;   // possible: turning it on adds the edge
+    }
+
+    for (auto& r : racks)
+        r->sendAllowed = allowed[r.get()];
 
     std::function<int (Rack*, int)> stageOf = [&] (Rack* r, int depth) -> int
     {
         if (r->stage >= 0)
             return r->stage;
 
-        if (r->sourceRack == nullptr || depth > 256)
-            return r->stage = 0;
+        int st = 0;
 
-        return r->stage = stageOf (r->sourceRack, depth + 1) + 1;
+        if (depth < 256)
+            for (const auto& f : r->feeds)
+                st = juce::jmax (st, stageOf (f.src, depth + 1) + 1);
+
+        return r->stage = st;
     };
+
+    std::vector<std::vector<Rack*>> newStages;
 
     for (auto& r : racks)
     {
@@ -383,10 +694,12 @@ void AudioEngine::updateLatencyCompensation()
         if (auto it = base.find (r); it != base.end())
             return it->second;
 
-        int upstream = 0;
+        int upstream = 0;   // the latest of the racks feeding it (chain, buses)
 
-        if (auto* src = r->inputRackId >= 0 ? findRack (r->inputRackId) : nullptr; src != nullptr && depth < 256)
-            upstream = baseOf (src, depth + 1) + src->compensationSamples.load();
+        if (depth < 256)
+            for (const auto& f : r->feeds)
+                if (r->feedIsOn (f))
+                    upstream = juce::jmax (upstream, baseOf (f.src, depth + 1) + f.src->compensationSamples.load());
 
         return base[r] = upstream + r->getLatencySamples();
     };
@@ -408,10 +721,37 @@ void AudioEngine::updateLatencyCompensation()
     }
 }
 
+std::vector<Rack*> AudioEngine::alignmentOrder() const
+{
+    // Racks in series with many others first (a master fed by 8 tracks): they take a phase of
+    // their own, then the independent tracks share the remaining phases among themselves.
+    // Aligned last, the master would find every phase taken by a track that feeds it
+    // (measured: 8 De-Feedback tracks + one on the master @32 = 991 late callbacks in 10 s,
+    // master first = 0).
+    std::vector<std::pair<int, Rack*>> counted;
+
+    for (auto& a : racks)
+    {
+        int n = 0;
+        for (auto& b : racks)
+            if (a != b && runsInSeries (*a, *b))
+                ++n;
+        counted.push_back ({ n, a.get() });
+    }
+
+    std::stable_sort (counted.begin(), counted.end(), [] (auto& x, auto& y) { return x.first > y.first; });
+
+    std::vector<Rack*> order;
+    for (auto& c : counted)
+        order.push_back (c.second);
+    return order;
+}
+
 void AudioEngine::alignAllRacks()
 {
     // Called while the callback is stopped: plugins can be driven directly.
-    for (auto& r : racks)
+    // Racks in series with many others first (see alignmentOrder)
+    for (auto* r : alignmentOrder())
     {
         if (r->isAsync() || ! hopAlignEnabled)
             continue;
@@ -427,7 +767,7 @@ void AudioEngine::alignAllRacks()
                 continue;
 
             const auto res = HopAligner::detectAndAlign (*slot.plugin, blockSize,
-                                                         [&] (int hop) { return choosePhase (hop, &slot, r.get()); },
+                                                         [&] (int hop) { return choosePhase (hop, &slot, r); },
                                                          [] { return (juce::uint64) 0; });
             slot.hopCalls = res.hopCalls;
             slot.hopPhase = res.phase;
@@ -547,6 +887,9 @@ void AudioEngine::setWorkerThreads (int numWorkers)
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
     outputsBlocked = isDeviceAllowed != nullptr && ! isDeviceAllowed();
+    // read once here: the UI must not ask CoreAudio on every paint (a busy coreaudiod would
+    // freeze the window; seen after a Dante device was reopened)
+    deviceIoLatencySamples = device->getInputLatencyInSamples() + device->getOutputLatencyInSamples();
 
     setChannelMaps (device->getActiveInputChannels(), device->getInputChannelNames().size(),
                     device->getActiveOutputChannels(), device->getOutputChannelNames().size());
@@ -557,6 +900,7 @@ void AudioEngine::prepare (double newSampleRate, int newBlockSize, const juce::A
 {
     sampleRate = newSampleRate;
     blockSize = newBlockSize;
+    tempo.prepare (sampleRate);
 
     {
         const juce::SpinLock::ScopedLockType sl (racksLock);
@@ -656,8 +1000,12 @@ void AudioEngine::computeAutomixGains (bool anySolo) noexcept
             }
 
             // only racks that reach the mix take part
-            const bool audible = r->producedAudio() && r->outputChannel.load (std::memory_order_relaxed) >= 0
-                                  && ! (anySolo && ! r->solo.load (std::memory_order_relaxed));
+            juce::ignoreUnused (anySolo);
+            bool reachesMix = r->feedsABus || (! r->outToBus && r->outputChannel.load (std::memory_order_relaxed) >= 0);
+            for (auto& o : r->extraOutputs)
+                if (const auto c = o.load (std::memory_order_relaxed); c >= Rack::outStereo && c < Rack::outBus)
+                    reachesMix = true;
+            const bool audible = r->producedAudio() && reachesMix && r->passesSolo();
             const auto w = juce::Decibels::decibelsToGain (r->automixWeightDb.load (std::memory_order_relaxed), -100.0f);
 
             members[n] = r.get();
@@ -708,7 +1056,7 @@ void AudioEngine::processRackTask (void* ctx, int index, int threadIndex)
 
 void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, int numInputs,
                                                     float* const* outputs, int numOutputs,
-                                                    int numSamples, const juce::AudioIODeviceCallbackContext&)
+                                                    int numSamples, const juce::AudioIODeviceCallbackContext& context)
 {
     const juce::ScopedNoDenormals noDenormals;
     const auto t0 = juce::Time::getHighResolutionTicks();
@@ -745,6 +1093,52 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
     cbInputs = deviceIns.data();
     cbNumInputs = numDeviceInputs;
     cbNumSamples = numSamples;
+
+    // tempo: beat position of this block for every tempo (the racks' play heads), audio taps.
+    // CoreAudio's host time and nowSec() both count mach_absolute_time.
+    {
+        const auto hostNs = context.hostTimeNs != nullptr ? *context.hostTimeNs : (juce::uint64) 0;
+        tempo.processBlock (deviceIns.data(), numDeviceInputs, numSamples,
+                            hostNs != 0 ? (double) hostNs * 1.0e-9 : TempoEngine::nowSec(), hostNs);
+    }
+
+    // tempo audio taps taken from racks: tell each rack which points to copy this block
+    for (auto& r : racks)
+    {
+        int mask = 0;
+        for (int i = 0; i < tempo.getNumTempos(); ++i)
+            if (tempo.getAudioRackId (i) == r->getId())
+                mask |= 1 << tempo.getAudioPoint (i);
+        r->tempoTapMask.store (mask, std::memory_order_relaxed);
+    }
+
+    // Solo: a soloed rack is heard with what it feeds (its buses); the racks feeding a soloed
+    // rack or bus still reach it, but are not heard on their own.
+    bool anySolo = false;
+    for (auto& r : racks)
+        anySolo = anySolo || r->solo.load (std::memory_order_relaxed);
+
+    for (auto& r : racks)
+    {
+        r->anySolo = anySolo;
+        r->soloHeard = r->soloFeeds = anySolo && r->solo.load (std::memory_order_relaxed);
+    }
+
+    if (anySolo)
+    {
+        for (const auto& stageRacks : stages)
+            for (auto* r : stageRacks)
+                for (const auto& f : r->feeds)
+                    if (f.src->soloHeard && r->feedIsOn (f))
+                        r->soloHeard = true;
+
+        for (auto st = stages.rbegin(); st != stages.rend(); ++st)
+            for (auto* r : *st)
+                if (r->soloFeeds)
+                    for (const auto& f : r->feeds)
+                        if (r->feedIsOn (f))
+                            f.src->soloFeeds = true;
+    }
 
     for (const auto& stageRacks : stages)
     {
@@ -785,9 +1179,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
         }
     }
 
-    bool anySolo = false;
-    for (auto& r : racks)
-        anySolo = anySolo || r->solo.load (std::memory_order_relaxed);
+    // the racks ran: tempo detectors on their audio (same block, so the beat time is exact)
+    for (int i = 0; i < tempo.getNumTempos(); ++i)
+    {
+        if (const auto id = tempo.getAudioRackId (i); id >= 0)
+        {
+            const float* x = nullptr;
+            for (auto& r : racks)
+                if (r->getId() == id)
+                    x = r->getTempoTap (tempo.getAudioPoint (i));
+            tempo.detectRackAudio (i, x, numSamples);
+        }
+    }
 
     computeAutomixGains (anySolo);
 
@@ -812,28 +1215,52 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
         const auto g0 = r->automixGain, g1 = r->automixTarget;
         r->automixGain = g1;
 
-        if (! r->producedAudio() || (anySolo && ! r->solo.load (std::memory_order_relaxed)))
+        if (! r->producedAudio() || (anySolo && ! r->soloHeard))
             continue;
 
-        const int outCh = r->outputChannel.load (std::memory_order_relaxed);
         const auto& buf = r->getOutput();
 
-        if (outCh < 0)
-            continue;   // "OUT: none" (e.g. a rack that only feeds other racks)
-
-        if (! r->stereoOutput.load (std::memory_order_relaxed))
+        // one device destination: a pair from outCh, or (L+R)/2 on one channel
+        auto toDevice = [&] (int outCh, bool stereo)
         {
-            if (juce::isPositiveAndBelow (outCh, numDeviceOutputs) && deviceOuts[(size_t) outCh] != nullptr)
+            if (! stereo)
             {
-                addRamped (deviceOuts[(size_t) outCh], buf.getReadPointer (0), 0.5f * g0, 0.5f * g1);
-                addRamped (deviceOuts[(size_t) outCh], buf.getReadPointer (1), 0.5f * g0, 0.5f * g1);
+                if (juce::isPositiveAndBelow (outCh, numDeviceOutputs) && deviceOuts[(size_t) outCh] != nullptr)
+                {
+                    addRamped (deviceOuts[(size_t) outCh], buf.getReadPointer (0), 0.5f * g0, 0.5f * g1);
+                    addRamped (deviceOuts[(size_t) outCh], buf.getReadPointer (1), 0.5f * g0, 0.5f * g1);
+                }
+                return;
             }
-            continue;
-        }
 
-        for (int i = 0; i < 2; ++i)
-            if (juce::isPositiveAndBelow (outCh + i, numDeviceOutputs) && deviceOuts[(size_t) (outCh + i)] != nullptr)
-                addRamped (deviceOuts[(size_t) (outCh + i)], buf.getReadPointer (i), g0, g1);
+            for (int i = 0; i < 2; ++i)
+                if (juce::isPositiveAndBelow (outCh + i, numDeviceOutputs) && deviceOuts[(size_t) (outCh + i)] != nullptr)
+                    addRamped (deviceOuts[(size_t) (outCh + i)], buf.getReadPointer (i), g0, g1);
+        };
+
+        // main destination: the device, unless routed into a bus (the bus sums it) or "OUT: none"
+        int mainCode = -1;
+
+        if (! r->outToBus)
+            if (const int outCh = r->outputChannel.load (std::memory_order_relaxed); outCh >= 0)
+            {
+                const bool stereo = r->stereoOutput.load (std::memory_order_relaxed);
+                toDevice (outCh, stereo);
+                mainCode = (stereo ? Rack::outStereo : Rack::outMono) + outCh;
+            }
+
+        // extra device destinations (extra buses are feeds of those buses); one that became the
+        // main output (consecutive outputs) is not summed twice
+        for (auto& o : r->extraOutputs)
+        {
+            const auto c = o.load (std::memory_order_relaxed);
+
+            if (c == mainCode)
+                continue;
+
+            if (c >= Rack::outStereo && c < Rack::outMono)   toDevice (c - Rack::outStereo, true);
+            else if (c >= Rack::outMono && c < Rack::outBus) toDevice (c - Rack::outMono, false);
+        }
     }
 
     // master gain + meters on the main pair
@@ -869,6 +1296,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
 //==============================================================================
 void AudioEngine::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& m)
 {
+    tempo.handleMidi (m);   // taps (note / CC), clock, learn
+
     if (m.isProgramChange())
     {
         const auto program = m.getProgramChangeNumber();

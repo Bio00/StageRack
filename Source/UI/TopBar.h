@@ -1,12 +1,14 @@
 #pragma once
 
 #include "../Engine/Session.h"
+#include "TempoWindow.h"
 
 namespace stagerack
 {
 
 /** Top bar, in sections by function (left to right):
-    session (logo, file, NEW/OPEN/SAVE) | scenes | live (MUTE ALL, automixer, edit groups) |
+    session (logo, file, NEW/OPEN/SAVE) | scenes | live (MUTE ALL, automixer, GROUPS/TEMPO windows) |
+    tap tempos (one cell per tempo + "+") |
     audio engine (DSP per core, device, PLUGINS/SETTINGS) | view (layout, theme).
     Every section has a minimum width: all of it stays visible down to the minimum window width. */
 class TopBar final : public juce::Component,
@@ -17,7 +19,7 @@ public:
 
     /** Device problem to show instead of the device info ("Waiting for Dante..."), empty if none. */
     std::function<juce::String()> deviceStatus;
-    std::function<void()> onNew, onOpen, onSave, onPlugins, onSettings, onToggleLayout, onAutomixView, onToggleTheme;
+    std::function<void()> onNew, onOpen, onSave, onPlugins, onSettings, onToggleLayout, onAutomixView, onToggleTheme, onTempoView, onGroupsView;
     void setVerticalLayout (bool);
 
     void refresh();
@@ -26,7 +28,6 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void lookAndFeelChanged() override;
-    void mouseDown (const juce::MouseEvent&) override;
     void mouseMove (const juce::MouseEvent&) override;
 
     static constexpr int preferredHeight = 76;
@@ -40,11 +41,14 @@ private:
     juce::TextButton pluginsButton { "PLUGINS" }, settingsButton { "SETTINGS" }, layoutButton { "VERTICAL" }, themeButton { "LIGHT" };
     juce::TextButton automixButton { "AUTOMIX" }, automixViewButton { "AM METERS" };
     juce::TextButton masterMuteButton { "MUTE ALL" };
+    juce::TextButton viewButton { "VIEW" };
+    juce::TextButton groupsButton { "GROUPS" }, tempoButton { "TEMPO" }, addTempoButton { "+" };
+    juce::OwnedArray<TempoCell> tempoCells;
+    void rebuildTempoCells();
     int blink = 0;
 
-    juce::Rectangle<int> logoArea, sceneArea, cpuArea, deviceArea, groupsArea;
+    juce::Rectangle<int> logoArea, sceneArea, cpuArea, deviceArea;
     juce::Array<int> separators;   // x of the lines between sections
-    juce::Rectangle<float> groupPill (int group) const;
     std::vector<float> threadLoads;
     float totalLoad = 0.0f;
 };

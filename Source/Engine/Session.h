@@ -36,6 +36,55 @@ public:
     /** Adds `count` racks in one edit (one undo step). Inputs: consecutive, after the highest
         input used by any rack; outputs: like the last rack. */
     void addRacks (int count, bool stereoInputs);
+    /** Buses & sends on/off for this session (saved with it). */
+    void setRoutingEnabled (bool);
+    /** New rack set as the first free bus (turns routing on). nullptr if A..H are all used. */
+    Rack* addBus();
+
+    /** Folders (Ableton group tracks). groupIntoFolder: a new folder rack (a bus, routing on)
+        where the first of these racks was; they move inside it and their outputs go into it.
+        nullptr if no bus letter is free. ungroupFolder: members back to the folder's level, the
+        ones routed into it go where the folder went, the folder rack is removed. */
+    Rack* groupIntoFolder (const juce::Array<int>& rackIds);
+    void ungroupFolder (Rack& folder);
+    void removeFromFolder (Rack&);
+    void moveIntoFolder (Rack&, Rack& folder);
+    void setFolderOpen (Rack& folder, bool open);
+
+    /** What every rack shows (Pro Tools "Mix window view"): saved with the session, not an undo
+        step. A rack can override which sends it shows (Rack::uiSendsShown). */
+    struct RackView
+    {
+        bool io = true, input = true, inserts = true, sends = true, info = true;
+        int sendsMask = 0xff;   // bit k = Bus k+1
+        bool operator== (const RackView&) const = default;
+    };
+    const RackView& getRackView() const noexcept     { return rackView; }
+    void setRackView (const RackView&);
+    /** Sections as bits (1 I/O, 2 input, 4 inserts, 8 sends, 16 info; set = hidden) and back. */
+    static int hiddenBits (const RackView&) noexcept;
+    static RackView withHidden (RackView, int hidden) noexcept;
+    /** What this rack shows: the session's view, or its own sections (Rack::uiHideSections),
+        with its sends as sendsShown() says. */
+    RackView viewFor (const Rack& r) const noexcept
+    {
+        auto v = r.uiHideSections >= 0 ? withHidden (rackView, r.uiHideSections) : rackView;
+        v.sendsMask = r.uiSendsShown >= 0 ? r.uiSendsShown : rackView.sendsMask;
+        return v;
+    }
+    void setRackHiddenSections (Rack&, int hidden);   // -1 = as the session's view
+    /** Sends shown on this rack (bit k = Bus k+1): its own choice or the session's; 0 if its view hides sends. */
+    int sendsShown (const Rack& r) const noexcept
+    {
+        const auto v = viewFor (r);
+        return v.sends ? v.sendsMask : 0;
+    }
+    void setRackSendsShown (Rack&, int mask);   // -1 = follow the session's view
+    /** True if a folder around this rack is closed (the rack is not shown). */
+    bool isHiddenInFolder (const Rack&) const;
+    int numFolderMembers (const Rack& folder) const;
+    /** Members right after their folder (nested too), invalid memberships dropped. */
+    void normalizeFolders();
 
     /** Called before a plugin is destroyed, so editor windows can be closed. */
     std::function<void (juce::AudioPluginInstance*)> onPluginAboutToBeDeleted;
@@ -123,6 +172,11 @@ public:
     bool isEditGroupActive (int group) const noexcept { return group > 0 && (editGroupsOff & (1 << group)) == 0; }
     void setEditGroupActive (int group, bool active)  { editGroupsOff = active ? (editGroupsOff & ~(1 << group)) : (editGroupsOff | (1 << group)); markDirty(); }
     int numRacksInEditGroup (int group) const;
+
+    /** Tap tempos: add one (follows the master), or remove one: racks on it go back to the
+        master, the later ones (racks, scenes) are renumbered. */
+    int addTempo();
+    void removeTempo (int index);
     void markDirty();
 
     //==============================================================================
@@ -160,6 +214,7 @@ private:
 
     juce::ValueTree rackSettingsToTree (const Rack&) const;
     void applyRackSettings (Rack&, const juce::ValueTree&);
+    void releaseFolderMembers (Rack& folder);
     juce::ValueTree captureSceneData() const;
     void buildRack (Rack&, const juce::ValueTree& rackTree);
     void applySceneData (const juce::ValueTree&);
@@ -172,12 +227,14 @@ private:
     juce::File file;
     bool dirty = false;
     int editGroupsOff = 0;   // bit g set = group g suspended
+    RackView rackView;
     std::shared_ptr<int> loadGeneration = std::make_shared<int> (0);
     std::shared_ptr<int> pendingLoads = std::make_shared<int> (0);
     int documentGeneration = 0, recallCount = 0;
 
     class LiveRespreader;
     std::unique_ptr<LiveRespreader> respreader;
+    double watchQuietUntilMs = 0;   // hop watch paused during / just after a live re-spread
     std::vector<std::unique_ptr<juce::AudioPluginInstance>> retired;   // see retirePlugin()
     bool closingSession = false;
 };

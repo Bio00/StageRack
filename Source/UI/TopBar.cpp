@@ -1,12 +1,23 @@
 #include "TopBar.h"
 #include "../Engine/CoreAudioProbe.h"
 #include "Theme.h"
+#include "RackViewMenu.h"
 
 namespace stagerack
 {
 
 TopBar::TopBar (Session& s) : session (s)
 {
+    groupsButton.setTooltip ("Edit groups window: racks of an active group follow each other's gain, mute/solo/bypass and plugins (Cmd+Shift+G = all on/off)");
+    groupsButton.onClick = [this] { if (onGroupsView) onGroupsView(); };
+    tempoButton.setTooltip ("Tempo window: tempos, tap sources (key, MIDI, clock, audio), tap settings (Cmd+T)");
+    tempoButton.onClick = [this] { if (onTempoView) onTempoView(); };
+    addTempoButton.setTooltip ("Add a tap tempo (it follows the master until you tap it). Right click a tempo to remove it.");
+    addTempoButton.onClick = [this] { session.addTempo(); rebuildTempoCells(); };
+    for (auto* b : { &groupsButton, &tempoButton, &addTempoButton })
+        addAndMakeVisible (*b);
+    rebuildTempoCells();
+
     prevButton.onClick = [this] { session.stepScene (-1); };
     nextButton.onClick = [this] { session.stepScene (1); };
     prevButton.setTooltip ("Previous scene (Left arrow)");
@@ -36,8 +47,15 @@ TopBar::TopBar (Session& s) : session (s)
     pluginsButton.setTooltip ("Plugin manager: scan, formats, latencies");
     settingsButton.setTooltip ("Audio device, buffer, MIDI and app settings (Cmd+,)");
 
-    for (auto* b : { &prevButton, &nextButton, &storeButton, &newButton, &openButton, &saveButton, &pluginsButton, &settingsButton, &layoutButton, &themeButton })
+    for (auto* b : { &prevButton, &nextButton, &storeButton, &newButton, &openButton, &saveButton, &pluginsButton, &settingsButton, &layoutButton, &themeButton, &viewButton })
         addAndMakeVisible (*b);
+
+    viewButton.setButtonText (juce::String::fromUTF8 ("VIEW \xe2\x96\xbe"));
+    viewButton.setTooltip ("What the racks show (Pro Tools style): I/O, input, inserts, sends (which buses), info. Saved with the session.");
+    viewButton.onClick = [this]
+    {
+        rackViewMenu (session).showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&viewButton));
+    };
 
     storeButton.setColour (juce::TextButton::buttonColourId, theme::accent.withAlpha (0.25f));
 
@@ -65,6 +83,7 @@ TopBar::TopBar (Session& s) : session (s)
 
 void TopBar::lookAndFeelChanged()
 {
+
     storeButton.setColour (juce::TextButton::buttonColourId, theme::accent.withAlpha (0.25f));
     automixButton.setColour (juce::TextButton::buttonOnColourId, theme::green.withAlpha (0.8f));
     masterMuteButton.setColour (juce::TextButton::buttonOnColourId, theme::red);
@@ -83,35 +102,26 @@ void TopBar::refresh()
     repaint();
 }
 
-juce::Rectangle<float> TopBar::groupPill (int group) const
+void TopBar::rebuildTempoCells()
 {
-    // 4 x 2 grid, A-D on top
-    const auto a = groupsArea.toFloat();
-    const float w = (a.getWidth() - 3 * 3.0f) / 4.0f, h = (a.getHeight() - 4.0f) / 2.0f;
-    const int i = group - 1;
-    return { a.getX() + (float) (i % 4) * (w + 3.0f), a.getY() + (float) (i / 4) * (h + 4.0f), w, h };
-}
+    tempoCells.clear();
 
-void TopBar::mouseDown (const juce::MouseEvent& e)
-{
-    // edit groups: click = suspend / resume
-    for (int g = 1; g <= Rack::maxEditGroups; ++g)
-        if (groupPill (g).contains (e.position) && session.numRacksInEditGroup (g) > 0)
-        {
-            session.setEditGroupActive (g, ! session.isEditGroupActive (g));
-            if (auto* p = getParentComponent()) p->repaint();
-            return;
-        }
+    for (int i = 0; i < session.getEngine().tempo.getNumTempos(); ++i)
+    {
+        auto* c = tempoCells.add (new TempoCell (session, i));
+        c->onOpenWindow = [this] { if (onTempoView) onTempoView(); };
+        addAndMakeVisible (c);
+    }
+
+    addTempoButton.setEnabled (tempoCells.size() < TempoEngine::maxTempos);
+    resized();
 }
 
 void TopBar::mouseMove (const juce::MouseEvent& e)
 {
     juce::String tip;
 
-    if (groupsArea.contains (e.getPosition()))
-        tip = "Edit groups (Pro Tools style): racks of an active group follow each other's gain, mute/solo/bypass and plugins. "
-              "Click a letter to suspend / resume it, Cmd+Shift+G = all. Racks join a group from the rack menu > Edit group.";
-    else if (logoArea.contains (e.getPosition()))
+    if (logoArea.contains (e.getPosition()))
         tip = session.getFile() == juce::File() ? juce::String ("Untitled session") : session.getFile().getFullPathName();
 
     if (tip != getTooltip())
@@ -148,6 +158,20 @@ void TopBar::updateMeters()
     blink = muted ? (blink + 1) % 30 : 0;
     masterMuteButton.setColour (juce::TextButton::buttonOnColourId, blink < 15 ? theme::red : theme::red.darker (0.6f));
 
+    if (tempoCells.size() != session.getEngine().tempo.getNumTempos())
+        rebuildTempoCells();
+    for (auto* c : tempoCells)
+        c->repaintDisplay();
+
+    // GROUPS lit while some edit group links racks
+    bool groupsOn = false;
+    for (int g = 1; g <= Rack::maxEditGroups && ! groupsOn; ++g)
+        groupsOn = session.numRacksInEditGroup (g) > 0 && session.isEditGroupActive (g);
+    groupsButton.setColour (juce::TextButton::buttonColourId, groupsOn ? theme::accent.withAlpha (0.45f) : theme::slot);
+
+    // VIEW lit while the racks hide something
+    viewButton.setColour (juce::TextButton::buttonColourId, session.getRackView() == Session::RackView() ? theme::slot : theme::accent.withAlpha (0.45f));
+
     repaint (cpuArea);
     repaint (deviceArea);
 }
@@ -178,23 +202,6 @@ void TopBar::paint (juce::Graphics& g)
         auto f = session.getFile();
         g.drawText ((f == juce::File() ? juce::String ("Untitled") : f.getFileNameWithoutExtension()) + (session.isDirty() ? " *" : ""),
                     row, juce::Justification::centredLeft, true);
-    }
-
-    // edit groups A-H: filled = active, outlined = suspended, faint = unused
-    for (int grp = 1; grp <= Rack::maxEditGroups && ! groupsArea.isEmpty(); ++grp)
-    {
-        const auto pill = groupPill (grp);
-        const auto c = theme::groupColour (grp);
-        const auto used = session.numRacksInEditGroup (grp) > 0;
-        const auto on = used && session.isEditGroupActive (grp);
-
-        g.setColour (on ? c : (used ? c.withAlpha (0.12f) : theme::meterBg));
-        g.fillRoundedRectangle (pill, 3.0f);
-        g.setColour (used ? c : theme::outline);
-        if (! on) g.drawRoundedRectangle (pill.reduced (0.5f), 3.0f, 1.0f);
-        g.setColour (on ? juce::Colour (0xff101214) : (used ? c : theme::textDim.withAlpha (0.5f)));
-        g.setFont (theme::font (10.5f, true));
-        g.drawText (theme::groupLetter (grp), pill, juce::Justification::centred, false);
     }
 
     // scene display
@@ -230,15 +237,16 @@ void TopBar::paint (juce::Graphics& g)
     // DSP per-core meters
     {
         auto r = cpuArea;
-        g.setColour (theme::textDim);
         g.setFont (theme::font (10.5f, true));
         auto head = r.removeFromTop (14);
+        const auto wg = session.getEngine().hasWorkgroup();
+        const bool tight = head.getWidth() < 84;   // no room for the workgroup label: DSP in green = workgroup
+        g.setColour (tight && wg ? theme::green : theme::textDim);
         g.drawText ("DSP " + juce::String (juce::roundToInt (totalLoad * 100.0f)) + "%", head, juce::Justification::centredLeft);
 
-        const auto wg = session.getEngine().hasWorkgroup();
         g.setColour (wg ? theme::green : theme::textDim);
         const bool roomy = head.getWidth() >= 170;
-        g.drawText (wg ? (WorkerPool::hasPerformanceLevels() ? (roomy ? "P-CORE WORKGROUP" : "P-CORE WG") : (roomy ? "AUDIO WORKGROUP" : "WG"))
+        if (! tight) g.drawText (wg ? (WorkerPool::hasPerformanceLevels() ? (roomy ? "P-CORE WORKGROUP" : "P-CORE WG") : (roomy ? "AUDIO WORKGROUP" : "WG"))
                        : (roomy ? "NO WORKGROUP" : "NO WG"),
                     head, juce::Justification::centredRight);
 
@@ -291,7 +299,7 @@ void TopBar::paint (juce::Graphics& g)
         {
             const auto sr = dev->getCurrentSampleRate();
             const auto bs = dev->getCurrentBufferSizeSamples();
-            const auto lat = dev->getInputLatencyInSamples() + dev->getOutputLatencyInSamples() + bs;
+            const auto lat = session.getEngine().deviceIoLatencySamples.load() + bs;   // no CoreAudio call while painting
             line1 = dev->getName();
             line2 = juce::String (sr / 1000.0, 1) + " kHz · " + juce::String (bs) + " smp · "
                   + juce::String (1000.0 * lat / sr, 1) + " ms RT";
@@ -312,11 +320,50 @@ void TopBar::resized()
     separators.clearQuick();
     const int gap = 12, rowH = (r.getHeight() - 4) / 2;
 
-    // minimum widths of the flexible parts; what is left goes to the scene, device and DSP areas
-    const int sessionMin = 172, sceneMin = 270, cpuMin = 72, deviceMin = 92;
-    const int liveW = 68 + 4 + 84 + 6 + 78, engineButtonsW = 80, viewW = 80;
-    const int fixed = sessionMin + liveW + engineButtonsW + viewW + 4 * gap + 2 * 6 + sceneMin + cpuMin + deviceMin;
-    const int extra = juce::jmax (0, r.getWidth() - fixed);
+    // minimum widths of the flexible parts; what is left goes first to the tap tempos (all of them
+    // must be there), then to the scene, device and DSP areas
+    const int sessionMin = 172;
+    int cpuMin = 72, deviceMin = 92;
+    int sceneMin = 232;
+    const int liveW = 68 + 4 + 84 + 4 + 70, engineButtonsW = 80, viewW = 80 + 4 + 62;
+    const int cellMax = 52, cellMin = 42, plusW = 26;
+    const int n = juce::jmax (1, tempoCells.size());
+    auto tempoWidth = [n, plusW] (int cell) { return n * cell + (n - 1) * 4 + 4 + plusW; };
+    const int tempoMin = tempoWidth (cellMax) - (n - 1) * (cellMax + 4);   // one full cell + "+"
+    const int fixed = sessionMin + liveW + tempoMin + engineButtonsW + viewW + 5 * gap + 2 * 6 + sceneMin + cpuMin + deviceMin;
+    int extra = juce::jmax (0, r.getWidth() - fixed);
+
+    int cellW = cellMax;
+    int tempoW = tempoWidth (cellMax);
+
+    if (tempoW - tempoMin > extra)
+    {
+        // not enough room: narrower cells, then a narrower scene display
+        int avail = tempoMin + extra;
+        cellW = (avail - 4 - plusW - (n - 1) * 4) / n;
+
+        if (cellW < cellMin)
+        {
+            // take the missing width from the scene display, then the device info, then the DSP meter
+            auto take = [&avail, need = tempoWidth (cellMin)] (int& w, int floor)
+            {
+                const int steal = juce::jlimit (0, juce::jmax (0, w - floor), need - avail);
+                w -= steal;
+                avail += steal;
+            };
+            take (sceneMin, 170);
+            take (deviceMin, 56);
+            take (cpuMin, 52);
+            cellW = juce::jmax (34, (avail - 4 - plusW - (n - 1) * 4) / n);
+        }
+
+        tempoW = juce::jmin (avail, tempoWidth (cellW));
+        extra = 0;
+    }
+    else
+    {
+        extra -= tempoW - tempoMin;
+    }
 
     const int sceneExtra   = juce::jmin (330, extra / 2);
     const int sessionExtra = juce::jmin (50, (extra - sceneExtra) / 4);
@@ -361,20 +408,39 @@ void TopBar::resized()
     }
     separator();
 
-    // --- live: master mute, automixer, edit groups
+    // --- live: master mute, automixer, edit groups / tempo windows
     {
         auto sec = r.removeFromLeft (liveW);
         masterMuteButton.setBounds (sec.removeFromLeft (68));
         sec.removeFromLeft (4);
         stacked (sec.removeFromLeft (84), automixButton, automixViewButton);
-        sec.removeFromLeft (6);
-        groupsArea = sec;
+        sec.removeFromLeft (4);
+        stacked (sec, groupsButton, tempoButton);
+    }
+    separator();
+
+    // --- tap tempos: one cell per tempo (BPM + TAP), then "+"
+    {
+        auto sec = r.removeFromLeft (tempoW);
+        auto cells = sec.withTrimmedRight (plusW + 4);
+
+        for (auto* c : tempoCells)
+        {
+            const bool fits = cells.getWidth() >= cellW;
+            c->setVisible (fits);
+            if (fits) { c->setBounds (cells.removeFromLeft (cellW).reduced (0, 7)); cells.removeFromLeft (4); }
+        }
+
+        // "+" right after the last cell shown
+        addTempoButton.setBounds (juce::Rectangle<int> (cells.getX(), sec.getY(), plusW, sec.getHeight()).reduced (0, 14));
     }
     separator();
 
     // --- view (rightmost), then the audio engine in between
     {
         auto view = r.removeFromRight (viewW);
+        viewButton.setBounds (view.removeFromLeft (62).reduced (0, 6));
+        view.removeFromLeft (4);
         stacked (view, layoutButton, themeButton);
         separators.add (r.getRight() - gap / 2);
         r.removeFromRight (gap);

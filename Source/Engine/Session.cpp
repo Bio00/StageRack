@@ -41,13 +41,10 @@ public:
         cancel();
         auto& engine = session.engine;
 
-        for (int r = 0; r < engine.getNumRacks(); ++r)
-        {
-            auto& rack = engine.getRack (r);
+        for (auto* rack : engine.alignmentOrder())   // a master before the tracks feeding it
             for (int i = 0; i < Rack::maxSlots; ++i)
-                if (auto* p = rack.getPlugin (i))
-                    jobs.push_back ({ rack.getId(), i, p });
-        }
+                if (auto* p = rack->getPlugin (i))
+                    jobs.push_back ({ rack->getId(), i, p });
 
         total = (int) jobs.size();
         done = 0;
@@ -271,7 +268,26 @@ Session::Session (AudioEngine& e, PluginManager& p) : engine (e), plugins (p)
 Session::~Session() = default;
 
 void Session::respreadLive()                    { respreader->start(); }
-void Session::watchHops()                       { if (auto list = engine.watchHops(); ! list.empty()) respreader->add (list); }
+void Session::watchHops()
+{
+    // While a twin is being aligned and runs next to the original, the CPU is busier and a
+    // plugin helper (De-Feedback) can finish late: its hop cost then shows up one callback
+    // later and the watch would "see" an instance move that did not (measured: a master moved
+    // back and forth). Watch only when nothing is being handed over, and 1.5 s after.
+    const auto now = juce::Time::getMillisecondCounterHiRes();
+
+    if (respreader->isBusy())
+    {
+        watchQuietUntilMs = now + 1500.0;
+        return;
+    }
+
+    if (now < watchQuietUntilMs)
+        return;
+
+    if (auto list = engine.watchHops(); ! list.empty())
+        respreader->add (list);
+}
 void Session::cancelRespread()                  { respreader->cancel(); }
 bool Session::isRespreading() const noexcept    { return respreader->isBusy(); }
 juce::String Session::getRespreadStatus() const
@@ -282,8 +298,52 @@ juce::String Session::getRespreadStatus() const
     return s;
 }
 
+int Session::addTempo()
+{
+    const auto i = engine.tempo.addTempo();
+    if (i > 0) markDirty();
+    return i;
+}
+
+void Session::removeTempo (int index)
+{
+    if (index <= 0 || index >= engine.tempo.getNumTempos())
+        return;
+
+    engine.tempo.removeTempo (index);
+
+    for (int r = 0; r < engine.getNumRacks(); ++r)
+    {
+        auto& rack = engine.getRack (r);
+        const auto t = rack.tempoIndex.load();
+        if (t == index)     rack.tempoIndex = 0;
+        else if (t > index) rack.tempoIndex = t - 1;
+    }
+
+    // scenes keep their tempos under the new numbers
+    for (auto& sc : scenes)
+    {
+        auto data = sc.data.createCopy();
+        data.removeProperty ("tempo" + juce::String (index), nullptr);
+        data.removeProperty ("tempoRatio" + juce::String (index), nullptr);
+
+        for (int i = index + 1; i < TempoEngine::maxTempos; ++i)
+            for (auto* key : { "tempo", "tempoRatio" })
+                if (const juce::Identifier from (key + juce::String (i)); data.hasProperty (from))
+                {
+                    data.setProperty (key + juce::String (i - 1), data[from], nullptr);
+                    data.removeProperty (from, nullptr);
+                }
+
+        sc.data = data;
+    }
+
+    markDirty();
+}
+
 void Session::markDirty()
 {
+    normalizeFolders();
     dirty = true;
     recordUndoStep();
     notify();
@@ -295,6 +355,280 @@ Rack& Session::addRack()
     auto& r = engine.addRack();
     markDirty();
     return r;
+}
+
+void Session::setRoutingEnabled (bool on)
+{
+    if (on == engine.isRoutingEnabled())
+        return;
+
+    engine.setRoutingEnabled (on);
+    markDirty();
+}
+
+Rack* Session::addBus()
+{
+    const auto letter = engine.firstFreeBus();
+
+    if (letter == 0)
+        return nullptr;
+
+    engine.setRoutingEnabled (true);
+
+    // outputs: like the last rack (a bus usually goes to the main outputs); no device input
+    int out = 0;
+    bool stereoOut = true;
+    if (engine.getNumRacks() > 0)
+    {
+        auto& last = engine.getRack (engine.getNumRacks() - 1);
+        out = last.outputChannel.load();
+        stereoOut = last.stereoOutput.load();
+    }
+
+    auto& r = engine.addRack();
+    r.name = "Bus " + juce::String::charToString ((juce::juce_wchar) ('A' + letter - 1));
+    r.inputChannel = -1;
+    r.outputChannel = out;
+    r.stereoOutput = stereoOut;
+    engine.setRackBus (r, letter);
+    markDirty();
+    return &r;
+}
+
+//==============================================================================
+void Session::normalizeFolders()
+{
+    const int n = engine.getNumRacks();
+
+    // a member only of an existing folder, never (through nesting) of itself
+    for (int i = 0; i < n; ++i)
+    {
+        auto& r = engine.getRack (i);
+
+        if (r.folderId < 0)
+            continue;
+
+        auto* f = engine.findRack (r.folderId);
+        bool ok = f != nullptr && f->isFolder && f != &r;
+
+        for (int depth = 0; ok && f->folderId >= 0 && depth <= n; ++depth)
+        {
+            f = engine.findRack (f->folderId);
+            ok = f != nullptr && f != &r;
+        }
+
+        if (! ok)
+            r.folderId = -1;
+    }
+
+    // order: each folder followed by its members (in their current order), recursively
+    std::vector<Rack*> order;
+    std::function<void (int)> emit = [&] (int parent)
+    {
+        for (int i = 0; i < n; ++i)
+            if (auto& r = engine.getRack (i); r.folderId == parent)
+            {
+                order.push_back (&r);
+                if (r.isFolder) emit (r.getId());
+            }
+    };
+    emit (-1);
+
+    if ((int) order.size() != n)
+        return;   // cannot happen after the check above; never lose a rack
+
+    for (int i = 0; i < n; ++i)
+        if (&engine.getRack (i) != order[(size_t) i])
+            engine.moveRack (engine.indexOf (*order[(size_t) i]), i);
+}
+
+bool Session::isHiddenInFolder (const Rack& r) const
+{
+    auto* f = r.folderId >= 0 ? engine.findRack (r.folderId) : nullptr;
+
+    for (int depth = 0; f != nullptr && depth <= engine.getNumRacks(); ++depth)
+    {
+        if (! f->folderOpen)
+            return true;
+        f = f->folderId >= 0 ? engine.findRack (f->folderId) : nullptr;
+    }
+
+    return false;
+}
+
+int Session::numFolderMembers (const Rack& folder) const
+{
+    int count = 0;
+    for (int i = 0; i < engine.getNumRacks(); ++i)
+        if (engine.getRack (i).folderId == folder.getId())
+            ++count;
+    return count;
+}
+
+Rack* Session::groupIntoFolder (const juce::Array<int>& rackIds)
+{
+    // the racks in list order; a rack inside another chosen folder comes along with it
+    std::vector<Rack*> members;
+    for (int i = 0; i < engine.getNumRacks(); ++i)
+        if (auto& r = engine.getRack (i); rackIds.contains (r.getId()))
+            members.push_back (&r);
+
+    auto insideChosen = [&] (const Rack& r)
+    {
+        for (auto* f = r.folderId >= 0 ? engine.findRack (r.folderId) : nullptr; f != nullptr;
+             f = f->folderId >= 0 ? engine.findRack (f->folderId) : nullptr)
+            if (rackIds.contains (f->getId()))
+                return true;
+        return false;
+    };
+    members.erase (std::remove_if (members.begin(), members.end(), [&] (Rack* r) { return insideChosen (*r); }), members.end());
+
+    const auto letter = engine.firstFreeBus();
+
+    if (members.empty() || letter == 0)
+        return nullptr;
+
+    engine.setRoutingEnabled (true);
+    auto& first = *members.front();
+
+    auto& f = engine.addRack();
+    f.name = "Folder";                      // its own colour (the next in the palette): members show it on their strip
+    f.isFolder = true;
+    f.folderOpen = true;
+    f.folderId = first.folderId;            // where the first one was (also inside a folder)
+    f.inputChannel = -1;
+    f.outputChannel = first.outputChannel.load();
+    f.stereoOutput = first.stereoOutput.load();
+    engine.setRackBus (f, letter);
+
+    if (const auto ob = first.outputBus.load(); ob > 0)
+        engine.setRackOutputBus (f, ob);    // the members went into a bus: so does the folder
+
+    engine.moveRack (engine.indexOf (f), engine.indexOf (first));
+
+    for (auto* m : members)
+    {
+        m->folderId = f.getId();
+        engine.setRackOutputBus (*m, letter);   // refused if it would make a loop (the rack keeps its output)
+    }
+
+    markDirty();
+    return &f;
+}
+
+void Session::releaseFolderMembers (Rack& folder)
+{
+    // members go up one level; those that played into the folder now go where it went
+    for (int i = 0; i < engine.getNumRacks(); ++i)
+    {
+        auto& m = engine.getRack (i);
+
+        if (m.folderId != folder.getId())
+            continue;
+
+        m.folderId = folder.folderId;
+
+        if (folder.busIndex.load() > 0 && m.outputBus.load() == folder.busIndex.load())
+        {
+            m.outputChannel = folder.outputChannel.load();
+            m.stereoOutput = folder.stereoOutput.load();
+            if (! engine.setRackOutputBus (m, folder.outputBus.load()))
+                engine.setRackOutputBus (m, 0);
+        }
+    }
+}
+
+void Session::ungroupFolder (Rack& folder)
+{
+    if (! folder.isFolder)
+        return;
+
+    releaseFolderMembers (folder);
+    removeRack (folder);
+}
+
+void Session::removeFromFolder (Rack& r)
+{
+    auto* folder = r.folderId >= 0 ? engine.findRack (r.folderId) : nullptr;
+
+    if (folder == nullptr)
+        return;
+
+    r.folderId = folder->folderId;
+
+    if (folder->busIndex.load() > 0 && r.outputBus.load() == folder->busIndex.load())
+    {
+        r.outputChannel = folder->outputChannel.load();
+        r.stereoOutput = folder->stereoOutput.load();
+        if (! engine.setRackOutputBus (r, folder->outputBus.load()))
+            engine.setRackOutputBus (r, 0);
+    }
+
+    // normalizeFolders (in markDirty) puts it right after the folder's block: it is still
+    // inside the block, so it is the first rack of the folder's level after it
+    markDirty();
+}
+
+void Session::moveIntoFolder (Rack& r, Rack& folder)
+{
+    if (! folder.isFolder || &r == &folder)
+        return;
+
+    for (auto* f = &folder; f != nullptr; f = f->folderId >= 0 ? engine.findRack (f->folderId) : nullptr)
+        if (f == &r)
+            return;   // a folder into one of its own members
+
+    r.folderId = folder.getId();
+    if (engine.isRoutingEnabled() && folder.busIndex.load() > 0)
+        engine.setRackOutputBus (r, folder.busIndex.load());
+    folder.folderOpen = true;
+    markDirty();
+}
+
+void Session::setFolderOpen (Rack& folder, bool open)
+{
+    folder.folderOpen = open;   // a view setting: saved, not an undo step
+    dirty = true;
+    notify();
+}
+
+void Session::setRackView (const RackView& v)
+{
+    if (v == rackView)
+        return;
+
+    rackView = v;   // a view setting: saved, not an undo step
+    dirty = true;
+    notify();
+}
+
+void Session::setRackSendsShown (Rack& r, int mask)
+{
+    r.uiSendsShown = mask < 0 ? -1 : (mask & 0xff);
+    dirty = true;
+    notify();
+}
+
+int Session::hiddenBits (const RackView& v) noexcept
+{
+    return (v.io ? 0 : 1) | (v.input ? 0 : 2) | (v.inserts ? 0 : 4) | (v.sends ? 0 : 8) | (v.info ? 0 : 16);
+}
+
+Session::RackView Session::withHidden (RackView v, int hidden) noexcept
+{
+    v.io = (hidden & 1) == 0;
+    v.input = (hidden & 2) == 0;
+    v.inserts = (hidden & 4) == 0;
+    v.sends = (hidden & 8) == 0;
+    v.info = (hidden & 16) == 0;
+    return v;
+}
+
+void Session::setRackHiddenSections (Rack& r, int hidden)
+{
+    r.uiHideSections = hidden < 0 ? -1 : (hidden & 31);   // a view setting: saved, not an undo step
+    dirty = true;
+    notify();
 }
 
 void Session::addRacks (int count, bool stereoInputs)
@@ -328,6 +662,9 @@ void Session::addRacks (int count, bool stereoInputs)
 
 void Session::removeRack (Rack& rack)
 {
+    if (rack.isFolder)
+        releaseFolderMembers (rack);   // the members stay (out of the folder)
+
     for (int i = 0; i < Rack::maxSlots; ++i)
         if (auto* p = rack.getPlugin (i); p != nullptr && onPluginAboutToBeDeleted)
             onPluginAboutToBeDeleted (p);
@@ -431,6 +768,36 @@ void Session::releaseRetiredPlugins()
 }
 
 //==============================================================================
+// sends as "dB,dB,..." (one per bus) + a pre-fader bitmask
+static juce::String sendsToString (const Rack& r)
+{
+    juce::StringArray a;
+    for (auto& snd : r.sends)
+        a.add (juce::String (snd.db.load(), 1));
+    return a.joinIntoString (",");
+}
+
+static int sendPreMask (const Rack& r)
+{
+    int m = 0;
+    for (int k = 0; k < Rack::maxBuses; ++k)
+        if (r.sends[(size_t) k].pre.load())
+            m |= 1 << k;
+    return m;
+}
+
+static void sendsFromTree (Rack& r, const juce::ValueTree& t)
+{
+    const auto a = juce::StringArray::fromTokens (t["sends"].toString(), ",", "");
+    const int pre = t["sendPre"];
+
+    for (int k = 0; k < Rack::maxBuses; ++k)
+    {
+        r.sends[(size_t) k].db = k < a.size() ? juce::jlimit (Rack::sendOffDb, 12.0f, a[k].getFloatValue()) : Rack::sendOffDb;
+        r.sends[(size_t) k].pre = (pre & (1 << k)) != 0;
+    }
+}
+
 juce::ValueTree Session::captureSceneData() const
 {
     juce::ValueTree data (idScene);
@@ -446,7 +813,9 @@ juce::ValueTree Session::captureSceneData() const
           .setProperty ("bypass", r.bypassed.load(), nullptr)
           .setProperty ("solo", r.solo.load(), nullptr)
           .setProperty ("amGroup", r.automixGroup.load(), nullptr)
-          .setProperty ("amWeight", r.automixWeightDb.load(), nullptr);
+          .setProperty ("amWeight", r.automixWeightDb.load(), nullptr)
+          .setProperty ("sends", sendsToString (r), nullptr)
+          .setProperty ("sendPre", sendPreMask (r), nullptr);
 
         for (int s = 0; s < Rack::maxSlots; ++s)
         {
@@ -467,11 +836,15 @@ juce::ValueTree Session::captureSceneData() const
     data.setProperty ("master", engine.masterGainDb.load(), nullptr)
         .setProperty ("automix", engine.automixEnabled.load(), nullptr)
         .setProperty ("amOverlap", engine.automixOverlap.load(), nullptr);
+    engine.tempo.storeInScene (data);
     return data;
 }
 
 void Session::applySceneData (const juce::ValueTree& data)
 {
+    const auto busSendsBefore = engine.busSendMask();
+    engine.tempo.recallFromScene (data);   // song tempo (tempos set to be recalled)
+
     if (data.hasProperty ("automix"))
         engine.automixEnabled = (bool) data["automix"];
     if (data.hasProperty ("amOverlap"))
@@ -497,6 +870,9 @@ void Session::applySceneData (const juce::ValueTree& data)
             r->automixWeightDb = (float) rt["amWeight"];
         }
 
+        if (rt.hasProperty ("sends"))   // scenes stored before the sends leave them alone
+            sendsFromTree (*r, rt);
+
         for (const auto& st : rt)
         {
             const int s = st["index"];
@@ -510,6 +886,9 @@ void Session::applySceneData (const juce::ValueTree& data)
             restoreState (*p, st["state"].toString());
         }
     }
+
+    if (engine.busSendMask() != busSendsBefore)
+        engine.rebuildRouting();   // a send between buses turned on or off
 
 }
 
@@ -616,7 +995,10 @@ void Session::newSession()
     engine.masterGainDb = 0.0f;
     engine.automixEnabled = true;
     engine.automixOverlap = 0;
+    engine.tempo.resetToDefaults();
     editGroupsOff = 0;
+    rackView = {};
+    engine.setRoutingEnabled (false);
     engine.addRack();
     dirty = false;
     ++documentGeneration;
@@ -680,11 +1062,26 @@ juce::ValueTree Session::rackSettingsToTree (const Rack& r) const
       .setProperty ("bypass", r.bypassed.load(), nullptr)
       .setProperty ("solo", r.solo.load(), nullptr)
       .setProperty ("size", r.uiSize, nullptr)
+      .setProperty ("sendsV", r.uiSendsV, nullptr)
+      .setProperty ("sendsH", r.uiSendsH, nullptr)
+      .setProperty ("inV", r.uiInputV, nullptr)
+      .setProperty ("outV", r.uiOutputV, nullptr)
+      .setProperty ("sendsShown", r.uiSendsShown, nullptr)
+      .setProperty ("hide", r.uiHideSections, nullptr)
       .setProperty ("inRack", r.inputRackId.load(), nullptr)
       .setProperty ("latGroup", r.latencyGroup.load(), nullptr)
       .setProperty ("editGroup", r.editGroup, nullptr)
       .setProperty ("amGroup", r.automixGroup.load(), nullptr)
-      .setProperty ("amWeight", r.automixWeightDb.load(), nullptr);
+      .setProperty ("amWeight", r.automixWeightDb.load(), nullptr)
+      .setProperty ("tempo", r.tempoIndex.load(), nullptr)
+      .setProperty ("bus", r.busIndex.load(), nullptr)
+      .setProperty ("outBus", r.outputBus.load(), nullptr)
+      .setProperty ("outs", [&r] { juce::StringArray a; for (auto c : r.getExtraOutputs()) a.add (juce::String (c)); return a.joinIntoString (","); }(), nullptr)
+      .setProperty ("sends", sendsToString (r), nullptr)
+      .setProperty ("sendPre", sendPreMask (r), nullptr)
+      .setProperty ("folder", r.isFolder, nullptr)
+      .setProperty ("folderOpen", r.folderOpen, nullptr)
+      .setProperty ("inFolder", r.folderId, nullptr);
     return rt;
 }
 
@@ -710,11 +1107,30 @@ void Session::applyRackSettings (Rack& r, const juce::ValueTree& rt)
     r.bypassed = (bool) rt["bypass"];
     r.solo = (bool) rt["solo"];
     r.uiSize = rt.hasProperty ("size") ? (float) rt["size"] : 1.0f;
+    r.uiSendsV = (float) rt.getProperty ("sendsV", -1.0f);
+    r.uiSendsH = (float) rt.getProperty ("sendsH", -1.0f);
+    r.uiInputV = (float) rt.getProperty ("inV", -1.0f);
+    r.uiOutputV = (float) rt.getProperty ("outV", -1.0f);
+    r.uiSendsShown = (int) rt.getProperty ("sendsShown", -1);
+    r.uiHideSections = (int) rt.getProperty ("hide", -1);
     r.inputRackId = rt.hasProperty ("inRack") ? (int) rt["inRack"] : -1;
     r.latencyGroup = (int) rt["latGroup"];
     r.editGroup = juce::jlimit (0, Rack::maxEditGroups, (int) rt["editGroup"]);
     r.automixGroup = juce::jlimit (0, Rack::maxAutomixGroups, (int) rt["amGroup"]);
     r.automixWeightDb = (float) rt["amWeight"];
+    r.tempoIndex = juce::jlimit (0, TempoEngine::maxTempos - 1, (int) rt["tempo"]);
+    r.busIndex = juce::jlimit (0, Rack::maxBuses, (int) rt["bus"]);
+    r.outputBus = juce::jlimit (0, Rack::maxBuses, (int) rt["outBus"]);
+    {
+        // extra outputs (codes as Rack::extraOutputs); checked again when the graph is rebuilt
+        const auto codes = juce::StringArray::fromTokens (rt["outs"].toString(), ",", {});
+        for (int i = 0; i < Rack::maxExtraOutputs; ++i)
+            r.extraOutputs[(size_t) i] = i < codes.size() ? juce::jmax (0, codes[i].getIntValue()) : 0;
+    }
+    sendsFromTree (r, rt);
+    r.isFolder = (bool) rt.getProperty ("folder", false);
+    r.folderOpen = (bool) rt.getProperty ("folderOpen", true);
+    r.folderId = (int) rt.getProperty ("inFolder", -1);
 }
 
 void Session::loadPluginFromTree (Rack& r, int slot, const juce::ValueTree& pt, bool newUndoStep)
@@ -790,8 +1206,18 @@ Rack& Session::createRackFromTree (const juce::ValueTree& rt, int insertIndex)
     auto& r = engine.addRack();
     buildRack (r, rt);
 
+    // a copy of a bus becomes a new bus (next free letter), or a normal rack if none is left
+    if (const auto b = r.busIndex.load(); b > 0)
+    {
+        r.busIndex = 0;
+        if (! engine.setRackBus (r, b))
+            engine.setRackBus (r, engine.firstFreeBus());
+    }
+
     if (juce::isPositiveAndBelow (insertIndex, engine.getNumRacks() - 1))
         engine.moveRack (engine.getNumRacks() - 1, insertIndex);
+
+    engine.rebuildRouting();
 
     // keep the chain if its source still exists and no loop is created
     if (const auto src = r.inputRackId.load(); src >= 0)
@@ -948,7 +1374,10 @@ juce::ValueTree Session::toTree() const
         .setProperty ("currentScene", currentScene, nullptr)
         .setProperty ("automix", engine.automixEnabled.load(), nullptr)
         .setProperty ("amOverlap", engine.automixOverlap.load(), nullptr)
-        .setProperty ("groupsOff", editGroupsOff, nullptr);
+        .setProperty ("groupsOff", editGroupsOff, nullptr)
+        .setProperty ("routing", engine.isRoutingEnabled(), nullptr)
+        .setProperty ("viewHide", hiddenBits (rackView), nullptr)
+        .setProperty ("viewSends", rackView.sendsMask, nullptr);
 
     juce::ValueTree racksTree (idRacks);
 
@@ -965,6 +1394,7 @@ juce::ValueTree Session::toTree() const
         scenesTree.appendChild (st, nullptr);
     }
     root.appendChild (scenesTree, nullptr);
+    root.appendChild (engine.tempo.toTree(), nullptr);
     return root;
 }
 
@@ -1010,6 +1440,10 @@ void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bo
     engine.automixEnabled = root.hasProperty ("automix") ? (bool) root["automix"] : true;
     engine.automixOverlap = juce::jlimit (0, 2, (int) root["amOverlap"]);
     editGroupsOff = (int) root["groupsOff"];
+    rackView = withHidden ({}, (int) root["viewHide"]);
+    rackView.sendsMask = (int) root.getProperty ("viewSends", 0xff) & 0xff;
+    engine.setRoutingEnabled ((bool) root["routing"]);
+    engine.tempo.fromTree (root.getChildWithName ("TEMPO"));
     ++*loadGeneration;
 
     for (const auto& rt : root.getChildWithName (idRacks))
@@ -1028,7 +1462,8 @@ void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bo
         if (auto& r = engine.getRack (i); r.inputRackId >= 0 && ! engine.setRackInputSource (r, r.inputRackId))
             engine.setRackInputSource (r, -1);
 
-    engine.updateLatencyCompensation();
+    engine.rebuildRouting();
+    normalizeFolders();
 
     currentScene = juce::jmin ((int) root["currentScene"], getNumScenes() - 1);
     file = f;
@@ -1060,7 +1495,8 @@ Session::UndoState Session::captureUndoState() const
     u.tree = juce::ValueTree ("UNDO");
     u.tree.setProperty ("automix", engine.automixEnabled.load(), nullptr)
           .setProperty ("amOverlap", engine.automixOverlap.load(), nullptr)
-          .setProperty ("groupsOff", editGroupsOff, nullptr);
+          .setProperty ("groupsOff", editGroupsOff, nullptr)
+          .setProperty ("routing", engine.isRoutingEnabled(), nullptr);
 
     for (int i = 0; i < engine.getNumRacks(); ++i)
     {
@@ -1201,6 +1637,7 @@ void Session::applyUndoState (const UndoState& u)
     engine.automixEnabled = (bool) u.tree["automix"];
     engine.automixOverlap = juce::jlimit (0, 2, (int) u.tree["amOverlap"]);
     editGroupsOff = (int) u.tree["groupsOff"];
+    engine.setRoutingEnabled ((bool) u.tree["routing"]);
 
     // target instance of every (rack, slot)
     std::map<std::pair<int, int>, juce::int64> wanted;
@@ -1277,6 +1714,8 @@ void Session::applyUndoState (const UndoState& u)
     for (int i = 0; i < engine.getNumRacks(); ++i)
         if (auto& r = engine.getRack (i); ! engine.setRackInputSource (r, r.inputRackId.load()))
             engine.setRackInputSource (r, -1);
+
+    engine.rebuildRouting();
 
     // 4. instances back in place: moved ones keep their hop phase, parked ones are re-aligned
     for (const auto& rt : u.tree)

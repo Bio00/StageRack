@@ -179,8 +179,15 @@ inline int runEditSelfTest()
     // --- plugin power (Alt-click on B's slot): same plugin in C switches too; selection kept
     auto slotOf = [&] (RackComponent& rc, int n) -> juce::Component*
     {
-        int k = 0;
+        // the slots live in a viewport (they scroll when they don't fit)
+        juce::Component* holder = &rc;
         for (auto* ch : rc.getChildren())
+            if (auto* vp = dynamic_cast<juce::Viewport*> (ch); vp != nullptr && vp->isVisible() && vp->getViewedComponent() != nullptr
+                                                               && vp->getViewedComponent()->getNumChildComponents() == Rack::maxSlots)
+                holder = vp->getViewedComponent();
+
+        int k = 0;
+        for (auto* ch : holder->getChildren())
             if (dynamic_cast<juce::Slider*> (ch) == nullptr && dynamic_cast<juce::Button*> (ch) == nullptr
                 && dynamic_cast<juce::ComboBox*> (ch) == nullptr && dynamic_cast<juce::Label*> (ch) == nullptr
                 && ch->getNumChildComponents() > 0)   // slots hold their resizer (+ parameter rows)
