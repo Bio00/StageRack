@@ -1,22 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- StageRack app icon: a knob parked exactly at zero (= zero added latency).
-     macOS grid: 1024 canvas, 824 rounded square centred (100 px margin). -->
+<!-- StageRack app icon ("F4 + meter"): three rack units; the white signal enters and
+     leaves untouched and turns into an orange wave only inside the outlined plugin slot.
+     Idle units show meters.
+     macOS grid: 1024 canvas, 824 rounded square centred (100 px margin).
+     Keep a single </g>: make-icon.sh inserts the DEV band right before it. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <g transform="translate(100,100) scale(6.866667)">
     <rect x="0" y="0" width="120" height="120" rx="27" ry="27" fill="#1b1e25"/>
-    <circle cx="29.59" cy="90.41" r="2.5" fill="#3ddc84"/>
-    <circle cx="19.10" cy="73.29" r="2.5" fill="#3ddc84"/>
-    <circle cx="17.53" cy="53.27" r="2.5" fill="#3ddc84"/>
-    <circle cx="25.21" cy="34.72" r="2.5" fill="#3ddc84"/>
-    <circle cx="40.48" cy="21.69" r="2.5" fill="#3ddc84"/>
-    <circle cx="79.52" cy="21.69" r="2.5" fill="#3a404d"/>
-    <circle cx="94.79" cy="34.72" r="2.5" fill="#3a404d"/>
-    <circle cx="102.47" cy="53.27" r="2.5" fill="#3a404d"/>
-    <circle cx="100.90" cy="73.29" r="2.5" fill="#3a404d"/>
-    <circle cx="90.41" cy="90.41" r="2.5" fill="#3a404d"/>
-    <circle cx="60" cy="15" r="4" fill="#ff7a1a"/>
-    <circle cx="60" cy="62" r="31" fill="#2f3440"/>
-    <circle cx="60" cy="62" r="25" fill="#262a33"/>
-    <line x1="60" y1="62" x2="60" y2="40" stroke="#ff7a1a" stroke-width="6" stroke-linecap="round"/>
+    <rect x="18" y="24" width="84" height="20" rx="4" ry="4" fill="#2f3440"/>
+    <rect x="18" y="50" width="84" height="20" rx="4" ry="4" fill="#15171c" stroke="#ff7a1a" stroke-width="2"/>
+    <rect x="18" y="76" width="84" height="20" rx="4" ry="4" fill="#2f3440"/>
+    <circle cx="27" cy="34" r="2.5" fill="#3ddc84"/>
+    <circle cx="27" cy="86" r="2.5" fill="#3ddc84"/>
+    <rect x="35" y="32" width="44" height="4" rx="2" ry="2" fill="#3ddc84"/>
+    <rect x="82" y="32" width="2.5" height="4" rx="1" ry="1" fill="#ffc94d"/>
+    <rect x="35" y="84" width="28" height="4" rx="2" ry="2" fill="#3ddc84"/>
+    <path d="M8 60 H18 M102 60 H112" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+    <path d="M24 60 H30 C38 60 40 54.5 46 54.5 S54 65.5 60 65.5 S68 54.5 74 54.5 S82 60 90 60 H96"
+          fill="none" stroke="#ff7a1a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
 </svg>
