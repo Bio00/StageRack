@@ -76,27 +76,29 @@ SendsPanel::Grid SendsPanel::grid (int width) const noexcept
         return { 1, fitHeight > 0 ? juce::jlimit (barH, 22, fitHeight / n) : barH };
 
     // the most columns that fit; with room to spare, the column count that gives the biggest knobs
-    const auto maxCols = juce::jmax (1, width / knobCellW);
-    auto knobSize = [width] (int cols, int cellH) { return juce::jmin (110, juce::jmin (width / cols - 8, cellH - 15)); };
-    Grid best { maxCols, knobCellH };
+    const bool mini = miniKnobs (width);
+    const auto baseH = cellHFor (width), label = mini ? 11 : 15, side = mini ? 2 : 8;
+    const auto maxCols = juce::jmax (1, width / cellWFor (width));
+    auto knobSize = [=] (int cols, int cellH) { return juce::jmin (110, juce::jmin (width / cols - side, cellH - label)); };
+    Grid best { maxCols, baseH };
 
     if (fitHeight <= 0)
         return best;
 
-    auto bestSize = knobSize (maxCols, knobCellH);
+    auto bestSize = knobSize (maxCols, baseH);
 
     for (int c = 1; c <= maxCols; ++c)
     {
         const auto rows = (n + c - 1) / c;
         const auto h = fitHeight / rows;
 
-        if (h < knobCellH)
+        if (h < baseH)
             continue;
 
         if (const auto size = knobSize (c, h); size > bestSize)
         {
             bestSize = size;
-            best = { c, juce::jmin (h, size + 17) };
+            best = { c, juce::jmin (h, size + label + 2) };
         }
     }
 
@@ -208,10 +210,11 @@ void SendsPanel::paintKnob (juce::Graphics& g, int i)
     const auto db = snd.db.load();
     const auto colour = bus != nullptr ? bus->colour : theme::accent;
     const bool active = hoverCell == i || dragCell == i;
-    auto cell = cellBounds (i).reduced (2, 1);
+    auto cell = cellBounds (i).reduced (miniKnobs (getWidth()) ? 1 : 2, 1);
+    const bool small = cell.getHeight() < 40 || cell.getWidth() < 40;
 
-    auto label = cell.removeFromBottom (13);
-    const auto size = (float) juce::jmin (cell.getWidth() - 8, cell.getHeight() - 2);
+    auto label = cell.removeFromBottom (small ? 10 : 13);
+    const auto size = (float) juce::jmin (cell.getWidth() - (small ? 2 : 8), cell.getHeight() - 2);
     const auto knob = juce::Rectangle<float> (size, size).withCentre (cell.toFloat().getCentre());
     const auto centre = knob.getCentre();
     const auto radius = size * 0.5f;
@@ -240,18 +243,26 @@ void SendsPanel::paintKnob (juce::Graphics& g, int i)
 
     if (snd.pre.load())
     {
-        auto tag = juce::Rectangle<float> ((float) cell.getRight() - 19.0f, (float) cell.getY(), 19.0f, 10.0f);
-        g.setColour (theme::amber.withAlpha (0.85f));
-        g.fillRoundedRectangle (tag, 2.0f);
-        g.setColour (juce::Colours::black);
-        g.setFont (theme::font (7.5f, true));
-        g.drawText ("PRE", tag, juce::Justification::centred);
+        if (small)
+        {
+            g.setColour (theme::amber.withAlpha (0.9f));   // no room for the tag: an amber dot
+            g.fillEllipse ((float) cell.getRight() - 5.0f, (float) cell.getY(), 5.0f, 5.0f);
+        }
+        else
+        {
+            auto tag = juce::Rectangle<float> ((float) cell.getRight() - 19.0f, (float) cell.getY(), 19.0f, 10.0f);
+            g.setColour (theme::amber.withAlpha (0.85f));
+            g.fillRoundedRectangle (tag, 2.0f);
+            g.setColour (juce::Colours::black);
+            g.setFont (theme::font (7.5f, true));
+            g.drawText ("PRE", tag, juce::Justification::centred);
+        }
     }
 
-    g.setFont (theme::font (size > 60.0f ? 10.5f : 9.0f, active));
+    g.setFont (theme::font (size > 60.0f ? 10.5f : (small ? 8.0f : 9.0f), active));
     g.setColour (active ? theme::text : theme::text.withAlpha (0.8f));
-    g.drawFittedText (active ? valueText (db) + " dB" : (bus != nullptr ? bus->name : juce::String()),
-                      label, juce::Justification::centred, 1, 0.7f);
+    g.drawFittedText (active ? valueText (db) + (small ? juce::String() : juce::String (" dB")) : (bus != nullptr ? bus->name : juce::String()),
+                      label.expanded (small ? 2 : 0, 0), juce::Justification::centred, 1, 0.6f);
 }
 
 void SendsPanel::setLevel (int letter, float db, const juce::ModifierKeys& mods, float relativeDelta)

@@ -6,6 +6,8 @@
 namespace stagerack
 {
 
+class MidiControl;
+
 /** A snapshot of every rack's settings and plugin state (SuperRack "scene" / LiveProfessor "global snapshot"). */
 struct Scene
 {
@@ -179,6 +181,12 @@ public:
     void removeTempo (int index);
     void markDirty();
 
+    /** MIDI remote mappings of this session (MidiControl's tree, saved in the file; not an undo step). */
+    juce::ValueTree getMidiMap() const              { return midiMap; }
+    void setMidiMap (const juce::ValueTree& t, bool changesDocument) { midiMap = t; if (changesDocument) dirty = true; }
+    /** The app's MIDI remote (set by it): reloads its mappings when a session is opened or created. */
+    MidiControl* midiControl = nullptr;
+
     //==============================================================================
     /** Undo/redo of the edits made in StageRack (racks, plugins added/removed/moved, routing,
         gains, mutes, groups, slot views, scenes). Each markDirty() is a step. A step stores no
@@ -228,6 +236,7 @@ private:
     bool dirty = false;
     int editGroupsOff = 0;   // bit g set = group g suspended
     RackView rackView;
+    juce::ValueTree midiMap;
     std::shared_ptr<int> loadGeneration = std::make_shared<int> (0);
     std::shared_ptr<int> pendingLoads = std::make_shared<int> (0);
     int documentGeneration = 0, recallCount = 0;

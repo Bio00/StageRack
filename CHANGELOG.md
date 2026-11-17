@@ -2,6 +2,15 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.9.0-beta — 2026-11-17
+
+### Controller MIDI
+- **MIDI MAP stile Ableton** (⌘M): clicca un controllo e muovi il controller. Gain, IN, mute/solo/bypass, send, plugin on/off, parametri dei plugin (anche toccandoli nella loro finestra), MUTE ALL, automix, scene, tap tempo, banco, shift.
+- **Finestra MIDI** (⌘⌥M): limiti min/max (anche invertiti), modo (toggle, momentaneo, encoder relativi...), pick-up dei fader senza salti, LED, livello SHIFT, monitor, preset e mappa di default.
+- **LED che seguono la funzione** (mute, solo, bypass, banco, scene...), anche quando cambi le cose col mouse.
+- **Banco di rack** per controller a 8 strisce, rack controllati evidenziati.
+- **Akai MIDImix**: QUICK SETUP pronto (fader, manopole, mute, SOLO+mute = solo, rec = bypass, bank). Korg nanoKONTROL2 riconosciuto.
+
 ## 0.8.2-beta — 2026-11-17
 
 ### Correzioni

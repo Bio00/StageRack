@@ -19,7 +19,8 @@ namespace cmd
         toggleLayout, toggleScenes, automixerWindow, lightTheme, tintRacks, editGroupsOn,
         tempoWindow, tapMaster, editGroupsWindow, addTempo,
         routingOnOff, addBus, groupFolder,
-        lastCommand = groupFolder
+        midiMap, midiWindow,
+        lastCommand = midiWindow
     };
 
     /** Editing commands act on the racks only while the main window has the keyboard: the same

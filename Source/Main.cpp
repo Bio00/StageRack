@@ -18,6 +18,9 @@
 #include "UI/AutomixerWindow.h"
 #include "UI/TempoWindow.h"
 #include "UI/EditGroupsWindow.h"
+#include "UI/MidiMapOverlay.h"
+#include "UI/MidiWindow.h"
+#include "MidiLoopTest.h"
 #include "Engine/Rack.h"
 #include "Update/Updater.h"
 #include "Update/Changelog.h"
@@ -213,6 +216,19 @@ public:
             std::_Exit (0);
         }
 
+        if (args.contains ("--midi-fake-midimix"))
+        {
+            runFakeMidiMix (juce::File (args[args.indexOf ("--midi-fake-midimix") + 1]));
+            return;
+        }
+
+        if (args.contains ("--midi-loop-test"))
+        {
+            juce::Process::setDockIconVisible (false);
+            std::thread ([] { runMidiLoopTest(); }).detach();   // the message loop keeps running
+            return;
+        }
+
         if (args.contains ("--render-racks"))
         {
             // Diagnostics: --render-racks <dir>  draws racks with the automixer at work + the top bar (PNG, no device)
@@ -323,6 +339,27 @@ public:
                     }
             }
 
+            // --midi: a MIDImix (quick setup on the bank), map mode on, the bank strip 2 gain selected
+            const bool midiDemo = args.contains ("--midi");
+            std::unique_ptr<MidiControl> midiCtl;
+            if (midiDemo)
+            {
+                midiCtl = std::make_unique<MidiControl> (session);
+                midiCtl->setControllerEnabled ("demo-midimix", "MIDI Mix", true);
+                midiCtl->quickSetup ("demo-midimix");
+                MidiMapping m;
+                m.device = "demo-midimix"; m.deviceName = "MIDI Mix";
+                m.source = { MidiSource::cc, 1, 62 };
+                m.target = MidiTarget::forRack (MidiTarget::pluginParam, MidiTarget::fixedRack, engine.getRack (0).getId(), 0, 0);
+                if (auto* p = engine.getRack (0).getPlugin (0)) m.target.paramName = p->getParameters()[0]->getName (64);
+                midiCtl->addMapping (m);
+                for (auto [n, v] : { std::pair { 19, 90 }, std::pair { 23, 40 }, std::pair { 62, 64 }, std::pair { 10, 0 } })
+                    midiCtl->injectForTests ("demo-midimix", juce::MidiMessage::controllerEvent (1, n, v));
+                midiCtl->injectForTests ("demo-midimix", juce::MidiMessage::noteOn (1, 4, (juce::uint8) 127));
+                midiCtl->setMapMode (true);
+                midiCtl->setLearnTarget (MidiTarget::forRack (MidiTarget::rackGain, MidiTarget::bankRack, 1));
+            }
+
             // rack 1 talks loud, rack 2 softer, rack 3 only noise
             juce::AudioBuffer<float> in (4, 64), out (2, 64);
             juce::Random rnd (3);
@@ -378,12 +415,24 @@ public:
                     }
                     bar.updateMeters();
 
+                    std::unique_ptr<MidiMapOverlay> overlay;
+                    if (midiDemo && variant > 1)
+                        continue;
+                    if (midiDemo)
+                    {
+                        overlay = std::make_unique<MidiMapOverlay> (window, session, *midiCtl);
+                        overlay->setBounds (window.getLocalBounds());
+                        window.addAndMakeVisible (*overlay);
+                        overlay->setActive (true);
+                        overlay->setActive (true);   // a second pass: the targets of the components laid out by the first
+                    }
+
                     juce::Image img (juce::Image::ARGB, w, h, true);
                     juce::Graphics g (img);
                     g.fillAll (theme::bg);
                     window.paintEntireComponent (g, true);
                     juce::PNGImageFormat png;
-                    juce::FileOutputStream os (dir.getChildFile (juce::String (viewDemo > 0 ? "view" + juce::String (viewDemo) + "-" : routingDemo ? "routing-" : "racks-") + (vertical ? "v-" : "h-") + (variant == 4 ? "tiny-" : variant == 5 ? "dividers-" : variant >= 2 ? "small-" : "") + (light ? "light.png" : "dark.png")));
+                    juce::FileOutputStream os (dir.getChildFile (juce::String (midiDemo ? "midi-map-" : viewDemo > 0 ? "view" + juce::String (viewDemo) + "-" : routingDemo ? "routing-" : "racks-") + (vertical ? "v-" : "h-") + (variant == 4 ? "tiny-" : variant == 5 ? "dividers-" : variant >= 2 ? "small-" : "") + (light ? "light.png" : "dark.png")));
                     os.setPosition (0); os.truncate();
                     png.writeImageToStream (img, os);
                 }
@@ -398,6 +447,20 @@ public:
                     bar.paintEntireComponent (g, true);
                     juce::PNGImageFormat png;
                     juce::FileOutputStream os (dir.getChildFile ("topbar-" + juce::String (width) + (light ? "-light.png" : "-dark.png")));
+                    os.setPosition (0); os.truncate();
+                    png.writeImageToStream (img, os);
+                }
+
+                if (midiDemo)
+                {
+                    MidiPanel panel (session, *midiCtl);
+                    panel.setSize (1240, 760);
+                    panel.refreshAll();
+                    juce::Image img (juce::Image::ARGB, panel.getWidth(), panel.getHeight(), true);
+                    juce::Graphics g (img);
+                    panel.paintEntireComponent (g, true);
+                    juce::PNGImageFormat png;
+                    juce::FileOutputStream os (dir.getChildFile (light ? "midi-window-light.png" : "midi-window-dark.png"));
                     os.setPosition (0); os.truncate();
                     png.writeImageToStream (img, os);
                 }
@@ -627,6 +690,12 @@ public:
             return;
         }
 
+        if (args.contains ("--param-probe"))
+        {
+            juce::Process::setDockIconVisible (false);
+            juce::MessageManager::callAsync ([args] { runParamProbe (args); });
+            return;
+        }
         if (args.contains ("--plugin-probe"))
         {
             juce::Process::setDockIconVisible (false);
@@ -728,7 +797,7 @@ int main (int argc, char* argv[])
         if (a == stagerack::coreaudio::probeArgument)
             std::_Exit (stagerack::coreaudio::runProbeChild());   // no AppKit at all: never a Dock icon
 
-        if (a == stagerack::PluginManager::scanArgument || a == stagerack::PluginManager::latencyArgument)
+        if (a == stagerack::PluginManager::scanArgument || a == stagerack::PluginManager::latencyArgument || a == "--midi-fake-midimix")
             stagerack::markAsBackgroundProcess();
     }
 

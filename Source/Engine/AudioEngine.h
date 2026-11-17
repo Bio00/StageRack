@@ -27,6 +27,8 @@ public:
     ~AudioEngine() override;
 
     void initialiseDevice (const juce::XmlElement* savedState, bool selectDefaultOnFailure = true);
+    /** MIDI in without an audio device (tests): the enabled MIDI inputs reach the engine. */
+    void listenToMidiInputs()                                { deviceManager.removeMidiInputDeviceCallback ({}, this); deviceManager.addMidiInputDeviceCallback ({}, this); }
     juce::AudioDeviceManager& getDeviceManager() noexcept   { return deviceManager; }
 
     //==============================================================================
@@ -172,6 +174,9 @@ public:
     std::function<void (int program)> onProgramChange;
     std::function<void (int delta)> onSceneStep;
     std::atomic<int> nextSceneCC { 80 }, prevSceneCC { 81 };
+    /** MIDI remote (MidiControl::handleMidi), set once before the MIDI inputs open. Returns true
+        when a mapping used the message: scenes and tempo taps then leave it alone. */
+    std::function<bool (const juce::String& deviceId, const juce::String& deviceName, const juce::MidiMessage&)> midiRemote;
 
     //==============================================================================
     void audioDeviceIOCallbackWithContext (const float* const* inputs, int numInputs,

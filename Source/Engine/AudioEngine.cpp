@@ -1294,8 +1294,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
 }
 
 //==============================================================================
-void AudioEngine::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& m)
+void AudioEngine::handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& m)
 {
+    if (midiRemote != nullptr && source != nullptr && midiRemote (source->getIdentifier(), source->getName(), m))
+        return;   // a MIDI mapping uses it
+
     tempo.handleMidi (m);   // taps (note / CC), clock, learn
 
     if (m.isProgramChange())

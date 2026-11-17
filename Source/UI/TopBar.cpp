@@ -1,4 +1,5 @@
 #include "TopBar.h"
+#include "../Engine/MidiControl.h"
 #include "../Engine/CoreAudioProbe.h"
 #include "Theme.h"
 #include "RackViewMenu.h"
@@ -10,6 +11,12 @@ TopBar::TopBar (Session& s) : session (s)
 {
     groupsButton.setTooltip ("Edit groups window: racks of an active group follow each other's gain, mute/solo/bypass and plugins (Cmd+Shift+G = all on/off)");
     groupsButton.onClick = [this] { if (onGroupsView) onGroupsView(); };
+    midiMapButton.setTooltip ("MIDI map mode (Cmd+M): click a control, then move a knob, fader or button on your controller");
+    midiMapButton.onClick = [this] { if (onMidiMap) onMidiMap(); };
+    midiButton.setTooltip ("MIDI window (Cmd+Alt+M): controllers, mappings, ranges, LEDs, monitor");
+    midiButton.onClick = [this] { if (onMidiWindow) onMidiWindow(); };
+    addAndMakeVisible (midiMapButton);
+    addAndMakeVisible (midiButton);
     tempoButton.setTooltip ("Tempo window: tempos, tap sources (key, MIDI, clock, audio), tap settings (Cmd+T)");
     tempoButton.onClick = [this] { if (onTempoView) onTempoView(); };
     addTempoButton.setTooltip ("Add a tap tempo (it follows the master until you tap it). Right click a tempo to remove it.");
@@ -157,6 +164,22 @@ void TopBar::updateMeters()
     masterMuteButton.setToggleState (muted, juce::dontSendNotification);
     blink = muted ? (blink + 1) % 30 : 0;
     masterMuteButton.setColour (juce::TextButton::buttonOnColourId, blink < 15 ? theme::red : theme::red.darker (0.6f));
+
+    // MIDI: map mode lit; the MIDI button flashes on controller activity
+    if (auto* midi = session.midiControl)
+    {
+        midiMapButton.setColour (juce::TextButton::buttonColourId, midi->isMapMode() ? theme::midiBlue : theme::slot);
+        midiMapButton.setColour (juce::TextButton::textColourOffId, midi->isMapMode() ? juce::Colours::white : theme::text);
+
+        const auto now = juce::Time::getMillisecondCounter();
+        if (midi->getEventCount() != midiEventsSeen)
+        {
+            midiEventsSeen = midi->getEventCount();
+            midiActivityAt = now;
+        }
+        const bool active = now - midiActivityAt < 120;
+        midiButton.setColour (juce::TextButton::buttonColourId, active ? theme::midiBlue.withAlpha (0.55f) : theme::slot);
+    }
 
     if (tempoCells.size() != session.getEngine().tempo.getNumTempos())
         rebuildTempoCells();
@@ -314,6 +337,18 @@ void TopBar::paint (juce::Graphics& g)
     }
 }
 
+void TopBar::collectMidiTargets (std::vector<MidiTargetHit>& hits)
+{
+    hits.push_back ({ masterMuteButton.getBounds(), MidiTarget::global (MidiTarget::masterMute) });
+    hits.push_back ({ automixButton.getBounds(), MidiTarget::global (MidiTarget::automixOn) });
+    hits.push_back ({ prevButton.getBounds(), MidiTarget::global (MidiTarget::scenePrev) });
+    hits.push_back ({ nextButton.getBounds(), MidiTarget::global (MidiTarget::sceneNext) });
+
+    for (auto* c : tempoCells)
+        if (c->isVisible())
+            hits.push_back ({ c->getBounds(), MidiTarget::global (MidiTarget::tapTempo, c->index) });
+}
+
 void TopBar::resized()
 {
     auto r = getLocalBounds().reduced (10, 10);
@@ -323,9 +358,9 @@ void TopBar::resized()
     // minimum widths of the flexible parts; what is left goes first to the tap tempos (all of them
     // must be there), then to the scene, device and DSP areas
     const int sessionMin = 172;
-    int cpuMin = 72, deviceMin = 92;
-    int sceneMin = 232;
-    const int liveW = 68 + 4 + 84 + 4 + 70, engineButtonsW = 80, viewW = 80 + 4 + 62;
+    int cpuMin = 64, deviceMin = 80;
+    int sceneMin = 222;
+    const int liveW = 62 + 4 + 78 + 4 + 64 + 4 + 64, engineButtonsW = 80, viewW = 80 + 4 + 62;
     const int cellMax = 52, cellMin = 42, plusW = 26;
     const int n = juce::jmax (1, tempoCells.size());
     auto tempoWidth = [n, plusW] (int cell) { return n * cell + (n - 1) * 4 + 4 + plusW; };
@@ -411,11 +446,13 @@ void TopBar::resized()
     // --- live: master mute, automixer, edit groups / tempo windows
     {
         auto sec = r.removeFromLeft (liveW);
-        masterMuteButton.setBounds (sec.removeFromLeft (68));
+        masterMuteButton.setBounds (sec.removeFromLeft (62));
         sec.removeFromLeft (4);
-        stacked (sec.removeFromLeft (84), automixButton, automixViewButton);
+        stacked (sec.removeFromLeft (78), automixButton, automixViewButton);
         sec.removeFromLeft (4);
-        stacked (sec, groupsButton, tempoButton);
+        stacked (sec.removeFromLeft (64), groupsButton, tempoButton);
+        sec.removeFromLeft (4);
+        stacked (sec, midiMapButton, midiButton);
     }
     separator();
 

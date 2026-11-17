@@ -67,6 +67,7 @@ target_sources(StageRack PRIVATE
     Source/Engine/DeviceGuard.cpp
     Source/Engine/TempoEngine.cpp
     Source/Engine/TempoOutput.cpp
+    Source/Engine/MidiControl.cpp
     Source/Plugins/PluginManager.cpp
     Source/Plugins/CLAPPluginFormat.mm
     Source/UI/MainComponent.cpp
@@ -77,6 +78,8 @@ target_sources(StageRack PRIVATE
     Source/UI/AutomixerWindow.cpp
     Source/UI/TempoWindow.cpp
     Source/UI/EditGroupsWindow.cpp
+    Source/UI/MidiMapOverlay.cpp
+    Source/UI/MidiWindow.cpp
     Source/UI/SendsPanel.cpp
     Source/UI/PluginWindow.cpp
     Source/UI/PluginThumbnail.mm

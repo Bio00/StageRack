@@ -2,6 +2,7 @@
 
 #include "../Engine/Session.h"
 #include "EditController.h"
+#include "MidiTargets.h"
 
 namespace stagerack
 {
@@ -13,9 +14,15 @@ namespace stagerack
     viewport around it (scrolls the sends that do not fit). Shown only while the session's buses
     & sends are on and there is a bus to send to. */
 class SendsPanel final : public juce::Component,
-                         public juce::SettableTooltipClient
+                         public juce::SettableTooltipClient,
+                         public MidiTargetProvider
 {
 public:
+    void collectMidiTargets (std::vector<MidiTargetHit>& hits) override
+    {
+        for (int i = 0; i < (int) letters.size(); ++i)
+            hits.push_back ({ cellBounds (i), MidiTarget::forRack (MidiTarget::rackSend, MidiTarget::fixedRack, rack.getId(), letters[(size_t) i]) });
+    }
     SendsPanel (Session&, EditController&, Rack&);
 
     /** Buses changed (or appeared/disappeared): true if the number of sends changed. */
@@ -29,8 +36,12 @@ public:
         fill it (fewer columns, bigger knobs); 0 = compact. */
     void setFitHeight (int h) noexcept              { fitHeight = h; }
     /** Height of one row of sends at this width (the smallest useful view). */
-    static int getRowHeight (int width) noexcept    { return usesKnobs (width) ? knobCellH : barH; }
-    static bool usesKnobs (int width) noexcept      { return width >= minKnobsWidth; }
+    static int getRowHeight (int width) noexcept    { return cellHFor (width); }
+    /** Always knobs: small ones (no name under them, value on hover) in narrow racks. */
+    static bool usesKnobs (int) noexcept            { return true; }
+    static bool miniKnobs (int width) noexcept      { return width < minKnobsWidth; }
+    static int cellWFor (int width) noexcept        { return miniKnobs (width) ? miniCellW : knobCellW; }
+    static int cellHFor (int width) noexcept        { return miniKnobs (width) ? miniCellH : knobCellH; }
 
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
@@ -45,7 +56,7 @@ public:
     static juce::PopupMenu sendsShownMenu (Session&, EditController&, Rack&);
 
     static constexpr float minDb = -60.0f, maxDb = 6.0f;
-    static constexpr int barH = 15, knobCellW = 50, knobCellH = 48, minKnobsWidth = 100;
+    static constexpr int barH = 15, knobCellW = 50, knobCellH = 48, minKnobsWidth = 100, miniCellW = 29, miniCellH = 34;
     static float dbToPos (float db) noexcept;
     static float posToDb (float pos) noexcept;     // pos <= ~0 = off
 

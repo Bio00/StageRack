@@ -6,6 +6,7 @@
 #include "Theme.h"
 #include "EditController.h"
 #include "AppMenu.h"
+#include "../Engine/MidiControl.h"
 
 namespace stagerack
 {
@@ -121,6 +122,14 @@ private:
     void openAutomixer();
     void openTempo();
     void openEditGroups();
+    void openMidiWindow();
+    void setMidiMapMode (bool);
+    void saveMidiSettings();
+    std::unique_ptr<MidiControl> midi;
+    std::atomic<MidiControl*> midiForCallback { nullptr };   // read by the MIDI thread
+    std::unique_ptr<class MidiMapOverlay> midiOverlay;
+    std::unique_ptr<class MidiWindow> midiWindow;
+    int shownBankOffset = -1, shownBankMappings = -1;
     void toggleLightTheme();
     /** Slim strip that collapses/expands the scene column. */
     struct ScenesToggle final : juce::Component

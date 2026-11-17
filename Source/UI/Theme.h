@@ -17,6 +17,7 @@ namespace stagerack::theme
     inline juce::Colour green       { 0xff3ddc84 };
     inline juce::Colour amber       { 0xffffb341 };
     inline juce::Colour red         { 0xffff4d5e };
+    inline juce::Colour midiBlue    { 0xff7b6cff };   // MIDI map mode, bank ring
     inline juce::Colour well        { 0xff15171a };   // parameter bars, sunken areas
     inline juce::Colour meterBg     { 0xff0c0d0f };
     inline juce::Colour display     { 0xff0e1013 };   // scene display in the top bar

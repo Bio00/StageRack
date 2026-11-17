@@ -3,6 +3,7 @@
 #include "Engine/HopAligner.h"
 #include "Engine/Rack.h"
 #include "Plugins/PluginManager.h"
+#include "Plugins/ParamTwins.h"
 #include <mach/mach.h>
 #include <map>
 
@@ -150,4 +151,67 @@ inline int runPluginProbe (const juce::StringArray& args)
     std::_Exit (0);   // VST3 instances must not be destroyed off the message loop
 }
 
+} // namespace stagerack
+
+namespace stagerack
+{
+/** "StageRack --param-probe <format> <id> [--set Name=Value]... [--sweep Name]"
+    Lists the parameters (index, name, value, text, steps); --sweep writes 0..1 into one parameter
+    like a fader would (processing a block after each write) and prints what the plugin reads back. */
+inline int runParamProbe (const juce::StringArray& args)
+{
+    const auto idx = args.indexOf ("--param-probe");
+    juce::AudioPluginFormatManager fm;
+    PluginManager::addAllFormats (fm);
+    juce::OwnedArray<juce::PluginDescription> found;
+    for (auto* f : fm.getFormats())
+        if (f->getName() == args[idx + 1])
+            f->findAllTypesForFile (found, args[idx + 2]);
+    if (found.isEmpty()) { std::cout << "plugin not found" << std::endl; return 1; }
+
+    juce::String err;
+    auto p = fm.createPluginInstance (*found[0], 48000.0, 32, err);
+    if (p == nullptr) { std::cout << "create failed: " << err << std::endl; return 1; }
+    Rack::configurePlugin (*p, 48000.0, 32);
+    p->prepareToPlay (48000.0, 32);
+    juce::AudioBuffer<float> buf (juce::jmax (2, p->getTotalNumInputChannels(), p->getTotalNumOutputChannels()), 32);
+    juce::MidiBuffer midi;
+    auto run = [&] (int n) { for (int i = 0; i < n; ++i) { buf.clear(); p->processBlock (buf, midi); } };
+
+    auto list = [&]
+    {
+        for (auto* prm : p->getParameters())
+            if (prm->isAutomatable())
+                std::cout << "  [" << prm->getParameterIndex() << "] " << prm->getName (64) << " = " << prm->getValue()
+                          << " '" << prm->getCurrentValueAsText() << "' steps " << prm->getNumSteps()
+                          << (prm->isDiscrete() ? " discrete" : "") << (prm->isBoolean() ? " bool" : "")
+                          << (paramtwins::active (p->getParameters(), prm) != prm ? "  -> in use: " + paramtwins::active (p->getParameters(), prm)->getName (64) : juce::String())
+                          << std::endl;
+    };
+    run (10);
+    std::cout << "before:" << std::endl; list();
+    applySetArgs (*p, args);
+    run (10);
+    juce::Thread::sleep (300);
+    std::cout << "after --set:" << std::endl; list();
+
+    if (args.contains ("--sweep"))
+    {
+        const auto name = args[args.indexOf ("--sweep") + 1];
+        for (auto* prm : p->getParameters())
+            if (prm->getName (64).equalsIgnoreCase (name))
+                for (int k = 0; k <= 40; ++k)
+                {
+                    const auto v = (float) k / 40.0f;
+                    prm->beginChangeGesture(); prm->setValueNotifyingHost (v); prm->endChangeGesture();
+                    const auto now = prm->getValue();
+                    run (4);
+                    juce::Thread::sleep (20);
+                    std::cout << "  wrote " << v << " -> read " << now << " then " << prm->getValue()
+                              << " '" << prm->getCurrentValueAsText() << "'" << std::endl;
+                }
+    }
+    std::fflush (nullptr);
+    std::_Exit (0);
+}
 } // namespace stagerack

@@ -4,6 +4,7 @@
 #include "EditController.h"
 #include "SendsPanel.h"
 #include "ParamSlider.h"
+#include "MidiTargets.h"
 
 namespace stagerack
 {
@@ -21,9 +22,11 @@ struct OwnPopupComboBox final : public juce::ComboBox
 /** One rack: name, I/O routing, 8 plugin slots, meters, gain, mute/solo/bypass, per-core stats.
     Click/cmd/shift-click selects it, drag reorders it (alt-drag duplicates), the edge handle resizes it. */
 class RackComponent final : public juce::Component,
-                            public juce::DragAndDropTarget
+                            public juce::DragAndDropTarget,
+                            public MidiTargetProvider
 {
 public:
+    void collectMidiTargets (std::vector<MidiTargetHit>&) override;
     RackComponent (Session&, EditController&, Rack&, int index);
     ~RackComponent() override;
 

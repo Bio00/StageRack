@@ -1,4 +1,5 @@
 #include "Session.h"
+#include "MidiControl.h"
 #include <deque>
 
 namespace stagerack
@@ -998,12 +999,14 @@ void Session::newSession()
     engine.tempo.resetToDefaults();
     editGroupsOff = 0;
     rackView = {};
+    midiMap = {};
     engine.setRoutingEnabled (false);
     engine.addRack();
     dirty = false;
     ++documentGeneration;
     replacedTokens.clear();
     resetUndoHistory();
+    if (midiControl != nullptr) midiControl->loadFromSession();
     notify();
 }
 
@@ -1395,6 +1398,9 @@ juce::ValueTree Session::toTree() const
     }
     root.appendChild (scenesTree, nullptr);
     root.appendChild (engine.tempo.toTree(), nullptr);
+
+    if (midiMap.isValid() && midiMap.getNumChildren() > 0)
+        root.appendChild (midiMap.createCopy(), nullptr);
     return root;
 }
 
@@ -1444,6 +1450,7 @@ void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bo
     rackView.sendsMask = (int) root.getProperty ("viewSends", 0xff) & 0xff;
     engine.setRoutingEnabled ((bool) root["routing"]);
     engine.tempo.fromTree (root.getChildWithName ("TEMPO"));
+    midiMap = root.getChildWithName ("MIDIMAP").createCopy();
     ++*loadGeneration;
 
     for (const auto& rt : root.getChildWithName (idRacks))
@@ -1470,6 +1477,7 @@ void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bo
     dirty = markAsChanged;
     ++documentGeneration;
     resetUndoHistory();   // its plugins complete this state as they arrive (amendUndoState)
+    if (midiControl != nullptr) midiControl->loadFromSession();
     notify();
 }
 

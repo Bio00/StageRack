@@ -1,4 +1,6 @@
 #include "RackComponent.h"
+#include "../Plugins/ParamTwins.h"
+#include "../Engine/MidiControl.h"
 #include "RackViewMenu.h"
 #include "AutomixerWindow.h"
 #include "TempoWindow.h"
@@ -92,19 +94,32 @@ static juce::Array<int> defaultShownParams (juce::AudioPluginInstance& p, int ma
 /** One plugin parameter shown on the rack: drag (shift = fine), wheel, double-click = default,
     click toggles on/off parameters. Looks the parameter up on every use, so it can never
     outlive the plugin. */
-class ParamRow final : public juce::Component
+class ParamRow final : public juce::Component,
+                       public MidiTargetProvider
 {
 public:
     ParamRow (EditController& e, Rack& r, int slotIndex, int paramIndex) : edit (e), rack (r), slot (slotIndex), index (paramIndex) {}
+
+    void collectMidiTargets (std::vector<MidiTargetHit>& hits) override
+    {
+        if (auto* stored = storedParam())
+        {
+            auto* prm = paramtwins::canonical (rack.getPlugin (slot)->getParameters(), stored);   // same control as its synced twin
+            auto t = MidiTarget::forRack (MidiTarget::pluginParam, MidiTarget::fixedRack, rack.getId(), slot, prm->getParameterIndex());
+            t.paramName = prm->getName (64);
+            hits.push_back ({ getLocalBounds(), t });
+        }
+    }
 
     int getParamIndex() const noexcept { return index; }
 
     /** Repaints only when the value moved (called ~30x/s). */
     void refresh()
     {
-        if (auto* prm = param(); prm != nullptr && prm->getValue() != shownValue)
+        if (auto* prm = param(); prm != nullptr && (prm->getValue() != shownValue || prm != shownParam))
         {
             shownValue = prm->getValue();
+            shownParam = prm;   // the plugin switched to sync (or back): other name and text
             repaint();
         }
     }
@@ -265,13 +280,20 @@ public:
     }
 
 private:
-    juce::AudioProcessorParameter* param() const
+    juce::AudioProcessorParameter* storedParam() const
     {
         if (auto* p = rack.getPlugin (slot))
             if (juce::isPositiveAndBelow (index, p->getParameters().size()))
                 return p->getParameters()[index];
 
         return nullptr;
+    }
+
+    /** The one the plugin uses now: "Rate Sync" (1/8, 1/4.t...) when the plugin is in sync. */
+    juce::AudioProcessorParameter* param() const
+    {
+        auto* prm = storedParam();
+        return prm != nullptr ? paramtwins::active (rack.getPlugin (slot)->getParameters(), prm) : nullptr;
     }
 
     static bool isToggle (const juce::AudioProcessorParameter& p)
@@ -286,7 +308,7 @@ private:
 
         for (auto& [r, s] : edit.linkedSlots (rack, slot, mods))
             if (auto* p = r->getPlugin (s); p != nullptr && juce::isPositiveAndBelow (index, p->getParameters().size()))
-                result.add (p->getParameters()[index]);
+                result.add (paramtwins::active (p->getParameters(), p->getParameters()[index]));
 
         return result;
     }
@@ -309,15 +331,23 @@ private:
     EditController& edit;
     Rack& rack;
     const int slot, index;
+    const juce::AudioProcessorParameter* shownParam = nullptr;
     float shownValue = -1.0f, startValue = 0.0f, dragValue = 0.0f, lastX = 0.0f;
     bool dragging = false, altClick = false;
     juce::ModifierKeys dragMods;
 };
 
 class SlotComponent final : public juce::Component,
-                            public juce::DragAndDropTarget
+                            public juce::DragAndDropTarget,
+                            public MidiTargetProvider
 {
 public:
+    void collectMidiTargets (std::vector<MidiTargetHit>& hits) override
+    {
+        if (rack.getPlugin (index) != nullptr && ! powerArea.isEmpty())
+            hits.push_back ({ powerArea.expanded (2.0f).toNearestInt(), MidiTarget::forRack (MidiTarget::slotOn, MidiTarget::fixedRack, rack.getId(), index) });
+    }
+
     SlotComponent (Session& s, EditController& e, Rack& r, int i) : session (s), edit (e), rack (r), index (i)
     {
         addChildComponent (resizer);
@@ -2146,8 +2176,38 @@ void RackComponent::paintBadges (juce::Graphics& g)
     }
 }
 
+void RackComponent::collectMidiTargets (std::vector<MidiTargetHit>& hits)
+{
+    const auto id = rack.getId();
+    auto add = [&] (juce::Component& c, int kind)
+    {
+        if (c.isVisible() && ! c.getBounds().isEmpty())
+            hits.push_back ({ c.getBounds(), MidiTarget::forRack (kind, MidiTarget::fixedRack, id) });
+    };
+    add (gain, MidiTarget::rackGain);
+    add (inputGain, MidiTarget::rackInput);
+    add (muteButton, MidiTarget::rackMute);
+    add (soloButton, MidiTarget::rackSolo);
+    add (bypassButton, MidiTarget::rackBypass);
+}
+
 void RackComponent::paintOverChildren (juce::Graphics& g)
 {
+    // MIDI bank: the racks the controller's strips are on now (Ableton's session ring)
+    if (auto* midi = session.midiControl; midi != nullptr && midi->hasBankMappings())
+        if (const auto pos = midi->bankPosition (rack); pos >= 0)
+        {
+            auto strip = vertical ? getLocalBounds().removeFromBottom (3) : getLocalBounds().removeFromLeft (3);
+            g.setColour (theme::midiBlue.withAlpha (0.9f));
+            g.fillRect (strip);
+            g.setFont (theme::font (9.0f, true));
+            auto tag = vertical ? juce::Rectangle<int> (getWidth() - 20, getHeight() - 15, 18, 12)
+                                : juce::Rectangle<int> (5, getHeight() - 15, 18, 12);
+            g.fillRoundedRectangle (tag.toFloat(), 3.0f);
+            g.setColour (juce::Colours::white);
+            g.drawText (juce::String (pos + 1), tag, juce::Justification::centred);
+        }
+
     if (dropIndicator == 0)
         return;
 

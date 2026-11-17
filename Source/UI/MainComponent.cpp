@@ -8,6 +8,8 @@
 #include "AutomixerWindow.h"
 #include "TempoWindow.h"
 #include "EditGroupsWindow.h"
+#include "MidiMapOverlay.h"
+#include "MidiWindow.h"
 #include "../Update/Updater.h"
 #include "../Update/Changelog.h"
 #include "ChangelogWindow.h"
@@ -35,6 +37,13 @@ MainComponent::MainComponent()
     if (settings.containsKey ("workers"))
         engine.presetWorkerThreads (settings.getIntValue ("workers", -1));
 
+    // MIDI remote: the MIDI thread asks it first (a mapped control is not a scene change / tap)
+    engine.midiRemote = [this] (const juce::String& id, const juce::String& name, const juce::MidiMessage& m)
+    {
+        auto* mc = midiForCallback.load();
+        return mc != nullptr && mc->handleMidi (id, name, m);
+    };
+
     // The first CoreAudio call blocks until coreaudiod answers. If coreaudiod is stuck (a HAL
     // driver spinning it), opening the device here would hang the app before any window shows:
     // ask CoreAudio from a background thread and open the device only once it has answered.
@@ -53,6 +62,32 @@ MainComponent::MainComponent()
     edit->onUserAction = [this] { grabKeyboardFocus(); };
     edit->addChangeListener (this);
 
+    midi = std::make_unique<MidiControl> (*session);
+    if (auto xml = settings.getXmlValue ("midiControllers"))
+        midi->controllersFromTree (juce::ValueTree::fromXml (*xml));
+    if (auto xml = settings.getXmlValue ("midiDefaultMap"))
+        midi->defaultMap = juce::ValueTree::fromXml (*xml);
+    midi->selectedRack = [this]() -> Rack*
+    {
+        const auto ids = edit != nullptr ? edit->targetRacks() : juce::Array<int>();
+        return ids.isEmpty() ? nullptr : engine.findRack (ids.getFirst());
+    };
+    midi->linkedRacks = [this] (Rack& r)
+    {
+        std::vector<Rack*> v;
+        if (edit != nullptr)
+            for (auto* o : edit->linkedRacks (r, {}, EditController::Link::mix))   // its active edit group
+                v.push_back (o);
+        return v;
+    };
+    midi->onSettingsChanged = [this] { saveMidiSettings(); };
+    midi->onChange = [this]
+    {
+        if (midiOverlay != nullptr && midiOverlay->isVisible() != midi->isMapMode())
+            setMidiMapMode (midi->isMapMode());
+    };
+    midiForCallback = midi.get();
+
     topBar = std::make_unique<TopBar> (*session);
     topBar->onNew      = [this] { newSession(); };
     topBar->onOpen     = [this] { openSession(); };
@@ -63,6 +98,8 @@ MainComponent::MainComponent()
     topBar->onAutomixView = [this] { openAutomixer(); };
     topBar->onTempoView = [this] { openTempo(); };
     topBar->onGroupsView = [this] { openEditGroups(); };
+    topBar->onMidiMap = [this] { setMidiMapMode (! midi->isMapMode()); };
+    topBar->onMidiWindow = [this] { openMidiWindow(); };
     tapKeys = std::make_unique<TapKeys>();
     topBar->onToggleTheme = [this] { toggleLightTheme(); };
     topBar->deviceStatus = [this] { return deviceGuard != nullptr ? deviceGuard->getStatus() : juce::String(); };
@@ -87,8 +124,56 @@ MainComponent::MainComponent()
     addRackButton.onRightClick = [this] { showAddRacksMenu(); };
     rackContainer.addAndMakeVisible (addRackButton);
 
+    midiOverlay = std::make_unique<MidiMapOverlay> (*this, *session, *midi);
+    midiOverlay->onOpenWindow = [this] { openMidiWindow(); };
+    midiOverlay->onDone = [this] { setMidiMapMode (false); };
+    addChildComponent (*midiOverlay);
+
     autosave = std::make_unique<Autosave> (*session);
     commonConstructorTail();
+
+    if (audioReady)
+        midi->openDevices();
+}
+
+void MainComponent::saveMidiSettings()
+{
+    auto& settings = pluginManager.getSettings();
+    if (auto xml = midi->controllersToTree().createXml())
+        settings.setValue ("midiControllers", xml.get());
+    if (midi->defaultMap.isValid())
+    {
+        if (auto xml = midi->defaultMap.createXml())
+            settings.setValue ("midiDefaultMap", xml.get());
+    }
+    else
+        settings.removeValue ("midiDefaultMap");
+}
+
+void MainComponent::setMidiMapMode (bool on)
+{
+    if (midi->isMapMode() != on)
+        midi->setMapMode (on);   // calls back here through onChange
+
+    midiOverlay->setBounds (getLocalBounds());
+    midiOverlay->setVisible (on);
+    midiOverlay->setActive (on);
+    if (on) midiOverlay->toFront (true);
+    else    grabKeyboardFocus();
+    topBar->updateMeters();
+    commands.commandStatusChanged();
+}
+
+void MainComponent::openMidiWindow()
+{
+    if (midiWindow == nullptr)
+    {
+        midiWindow = std::make_unique<MidiWindow> (*session, *midi);
+        midiWindow->getPanel().onToggleMapMode = [this] { setMidiMapMode (! midi->isMapMode()); };
+        midiWindow->getPanel().onDefaultMapChanged = [this] { saveMidiSettings(); };
+    }
+    midiWindow->setVisible (true);
+    midiWindow->toFront (true);
 }
 
 void MainComponent::openPluginManager()
@@ -350,6 +435,11 @@ void MainComponent::prepareToQuit()
     automixerWindow = nullptr;
     tempoWindow = nullptr;
     editGroupsWindow = nullptr;
+    midiWindow = nullptr;
+    midiOverlay = nullptr;
+    midiForCallback = nullptr;
+    saveMidiSettings();
+    midi = nullptr;           // LEDs off
 
     session->removeChangeListener (this);
     edit->removeChangeListener (this);
@@ -393,6 +483,7 @@ void MainComponent::resized()
     scenesToggle.setBounds (r.removeFromLeft (16).reduced (0, 6));
     rackViewport.setBounds (r.reduced (6, 6));
     coreAudioWaitLabel.setBounds (rackViewport.getBounds().removeFromTop (120));
+    if (midiOverlay != nullptr) midiOverlay->setBounds (getLocalBounds());
     layoutRacks();
 }
 
@@ -623,6 +714,7 @@ void MainComponent::timerCallback()
         audioReady = true;
         removeChildComponent (&coreAudioWaitLabel);
         startAudioDevice();
+        midi->openDevices();
 
         // unless the user already started working while we waited
         if (session->getFile() == juce::File() && session->getDocumentGeneration() == waitingGeneration)
@@ -648,6 +740,16 @@ void MainComponent::timerCallback()
     for (auto* rc : rackComponents)
         if (rc->isShowing())
             rc->updateMeters();
+
+    // MIDI bank ring on the racks: redraw when the bank moves or bank mappings come / go
+    const int bankMappings = midi->hasBankMappings() ? 1 : 0;
+    if (midi->getBankOffset() != shownBankOffset || bankMappings != shownBankMappings)
+    {
+        shownBankOffset = midi->getBankOffset();
+        shownBankMappings = bankMappings;
+        for (auto* rc : rackComponents)
+            rc->repaint();
+    }
 }
 
 bool MainComponent::keyStateChanged (bool)
@@ -663,6 +765,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         return true;
 
     if (key == juce::KeyPress ('t', juce::ModifierKeys::commandModifier, 0)) { openTempo(); return true; }
+    if (key == juce::KeyPress ('m', juce::ModifierKeys::commandModifier, 0)) { setMidiMapMode (! midi->isMapMode()); return true; }
+    if (key == juce::KeyPress ('m', juce::ModifierKeys::commandModifier | juce::ModifierKeys::altModifier, 0)) { openMidiWindow(); return true; }
 
     const auto cmd = juce::ModifierKeys::commandModifier;
 
@@ -929,7 +1033,8 @@ juce::PopupMenu MainComponent::AppMenu::getMenuForIndex (int index, const juce::
         case 4:  return owner.commandItems ({ cmd::masterMute, cmd::automixOnOff, cmd::tapMaster, cmd::addTempo, 0, cmd::audioSettings, cmd::pluginManager });
         case 5:
         {
-            auto m = owner.commandItems ({ cmd::toggleLayout, cmd::toggleScenes, cmd::automixerWindow, cmd::tempoWindow, 0, cmd::lightTheme, cmd::tintRacks });
+            auto m = owner.commandItems ({ cmd::toggleLayout, cmd::toggleScenes, cmd::automixerWindow, cmd::tempoWindow, 0,
+                                           cmd::midiMap, cmd::midiWindow, 0, cmd::lightTheme, cmd::tintRacks });
             m.addSeparator();
             m.addSubMenu ("Rack View", rackViewMenu (*owner.session));
             return m;
@@ -996,6 +1101,8 @@ void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommand
         case cmd::addBus:              set ("Add Bus", "Rack", 'b', c | s); info.setActive (engine.firstFreeBus() > 0); break;
         case cmd::groupFolder:         set ("Group Into Folder", "Rack", 'g', c); info.setActive (engine.firstFreeBus() > 0 && engine.getNumRacks() > 0); break;
         case cmd::lightTheme:          set ("Light Theme", "View"); info.setTicked (theme::light); break;
+        case cmd::midiMap:             set ("MIDI Map Mode", "View", 'm', c); info.setTicked (midi != nullptr && midi->isMapMode()); break;
+        case cmd::midiWindow:          set ("MIDI Window...", "View", 'm', c | a); break;
         case cmd::tintRacks:           set ("Tinted Racks", "View"); info.setTicked (theme::tintRacks); break;
         case cmd::editGroupsOn:
         {
@@ -1070,6 +1177,8 @@ bool MainComponent::perform (const InvocationInfo& info)
             break;
         }
         case cmd::lightTheme:          toggleLightTheme(); break;
+        case cmd::midiMap:             setMidiMapMode (! midi->isMapMode()); break;
+        case cmd::midiWindow:          openMidiWindow(); break;
         case cmd::tintRacks:
             theme::tintRacks = ! theme::tintRacks;
             pluginManager.getSettings().setValue ("tintRacks", theme::tintRacks);

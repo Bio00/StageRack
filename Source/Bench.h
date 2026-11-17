@@ -8,6 +8,7 @@
 #include "PluginProbe.h"
 #include "TempoTest.h"
 #include "RoutingTest.h"
+#include "MidiTest.h"
 #include <chrono>
 #include <thread>
 
@@ -982,6 +983,7 @@ inline int runSelfTest()
 
     runTempoSelfTest (check);
     runRoutingSelfTest (check);
+    runMidiSelfTest (check);
 
     std::cout << (failures == 0 ? "ALL PASSED" : juce::String (failures) + " FAILED") << std::endl;
     return failures == 0 ? 0 : 1;
