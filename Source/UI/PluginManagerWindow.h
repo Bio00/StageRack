@@ -22,6 +22,7 @@ public:
     SettingsWindow (AudioEngine&, PluginManager&, Session&, std::function<void (bool light)> onThemeChanged,
                     std::function<void()> onCheckUpdates);
     void closeButtonPressed() override { setVisible (false); }
+    void showPage (int page);   // 0 audio, 1 performance, 2 MIDI, 3 appearance, 4 updates
 };
 
 } // namespace stagerack

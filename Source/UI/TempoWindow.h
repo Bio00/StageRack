@@ -64,13 +64,15 @@ public:
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
-    void repaintDisplay()                          { repaint(); }
+    /** Called ~30x/s: repaints only when the beat flash or the BPM shown has changed. */
+    void repaintDisplay();
     const int index;
 
 private:
     void showMenu();
     Session& session;
     bool pressed = false;
+    juce::int64 shownKey = -1;
 };
 
 /** Master + the added tempos: tempo, follow / own, what a tap is worth, and the tap sources of each one

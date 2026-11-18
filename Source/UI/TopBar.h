@@ -60,6 +60,7 @@ private:
     float totalLoad = 0.0f;
     juce::String systemProblems;   // low power / heat / memory, refreshed once a second
     int healthTick = 29;
+    juce::String shownCpuKey;   // what the DSP / dropout area shows: repainted only when it changes
     double secondsSinceLastDrop() const;
     juce::String dropoutTooltip() const;
 };

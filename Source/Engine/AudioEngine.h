@@ -211,7 +211,29 @@ private:
     std::shared_ptr<int> aliveToken = std::make_shared<int> (0);   // delayed rebuilds check it
     const std::vector<Rack*>* currentStage = nullptr;
     void rebuildGraph();
-    void rebuildGraphLocked();
+
+    // The graph is computed WITHOUT the lock (allocations, searches: tens of microseconds with
+    // many racks) and swapped in under it (a few pointer swaps). Before, it was computed under
+    // the lock and a callback arriving meanwhile had to skip its block: a click.
+    struct GraphPlan
+    {
+        struct Node
+        {
+            std::vector<Rack::Feed> feeds;
+            Rack* sourceRack = nullptr;
+            Rack* outBusRack = nullptr;
+            bool outToBus = false, feedsABus = false, isActiveBus = false;
+            int stage = -1;
+            juce::uint32 sendAllowed = 0;
+        };
+        std::vector<Rack*> list;
+        std::vector<Node> nodes;
+        std::vector<std::vector<Rack*>> stages;
+    };
+    GraphPlan planGraph (const std::vector<Rack*>& list) const;
+    void applyGraphLocked (GraphPlan&) noexcept;
+    std::vector<Rack*> rackList() const;
+    juce::uint32 seenLockMisses = 0;   // audio thread: rt::lockMisses already counted as dropouts
 
     // callback scratch (valid only during a callback)
     const float* const* cbInputs = nullptr;

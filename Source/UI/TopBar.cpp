@@ -242,8 +242,26 @@ void TopBar::updateMeters()
     if (++healthTick % 30 == 0)
         systemProblems = systemhealth::problems();
 
-    repaint (cpuArea);
-    repaint (deviceArea);
+    // DSP bars (in pixels), totals, dropouts: repaint only what changed (an idle window draws nothing)
+    {
+        juce::String key;
+        const int barH = juce::jmax (1, cpuArea.getHeight() - 32);
+        for (auto l : threadLoads)
+            key << juce::roundToInt (l * (float) barH) << ',';
+        key << juce::roundToInt (totalLoad * 100.0f) << '|' << (int) session.getEngine().dropouts.getTotal()
+            << '|' << juce::roundToInt (juce::jmin (61.0, secondsSinceLastDrop())) << '|' << systemProblems
+            << '|' << (session.getEngine().hasWorkgroup() ? 1 : 0);
+
+        if (key != shownCpuKey)
+        {
+            shownCpuKey = key;
+            repaint (cpuArea);
+        }
+    }
+
+    // the device lines change rarely (device, status, CoreAudio waiting): twice a second is plenty
+    if (healthTick % 15 == 0)
+        repaint (deviceArea);
 }
 
 void TopBar::paint (juce::Graphics& g)

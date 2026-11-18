@@ -1,3 +1,5 @@
+#include "RtLock.h"
+#include "RtGuard.h"
 #include "Rack.h"
 #include "TempoEngine.h"
 #include "WorkerPool.h"
@@ -103,6 +105,7 @@ static void updateSlotChannels (Rack::Slot& s)
 
 juce::Optional<juce::AudioPlayHead::PositionInfo> Rack::TempoPlayHead::getPosition() const
 {
+    const rt::HostScope host;   // called by the plugin, but this code is ours
     if (rack.tempo == nullptr)
         return {};
 
@@ -441,6 +444,7 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
     {
         midi.clear();
         const juce::ScopedLock cl (inst.getCallbackLock());
+        const rt::PluginScope inPlugin;   // what the plugin allocates is not ours
 
         if (inst.isSuspended())
         {
@@ -845,6 +849,7 @@ void Rack::captureTempoTap (int point, int numSamples) noexcept
 
 void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int numSamples, int threadIndex) noexcept
 {
+    const rt::HostScope host;
     const juce::ScopedNoDenormals noDenormals;
     const auto t0 = juce::Time::getHighResolutionTicks();
     hasAudio = false;
@@ -1002,9 +1007,11 @@ void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int n
     }
     else
     {
-        const juce::SpinLock::ScopedTryLockType sl (processLock);
+        // the message thread holds this only to swap a plugin / twin in or out
+        const bool locked = rt::enterWithin (processLock, 40.0);
+        const rt::ScopedExit unlock { locked ? &processLock : nullptr };
 
-        if (! sl.isLocked() || numSamples > buffer.getNumSamples())
+        if (! locked || numSamples > buffer.getNumSamples())
             return;
 
         readInput();

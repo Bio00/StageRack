@@ -10,6 +10,7 @@
 #include "PluginBrowser.h"
 #include <map>
 #include "Theme.h"
+#include "../Plugins/Sandbox/SandboxedPlugin.h"
 
 namespace stagerack
 {
@@ -420,6 +421,8 @@ public:
             g.setFont (theme::font (10.0f));
             const auto foot = b.reduced (6, 3).removeFromBottom (12);
             juce::String left = shortFormat (p->getPluginDescription().pluginFormatName);
+            if (sandbox::SandboxedPlugin::isSandboxed (p))
+                left << " ISO";   // experimental: runs in its own process
 
             if (sl.viewMode == 0 && hiddenRows > 0)
                 left << "  +" << hiddenRows << " par.";
@@ -427,7 +430,7 @@ public:
                 left << "  +" << (meters.size() - shownMeters) << " meters";
 
             g.drawText (left, foot, juce::Justification::centredLeft);
-            g.drawText (juce::String (sl.cpuMs.load(), 2) + " ms", foot, juce::Justification::centredRight);
+            g.drawText (juce::String (juce::jmax (0, shownCpu) / 100.0, 2) + " ms", foot, juce::Justification::centredRight);
         }
 
         if (bypassed)
@@ -449,7 +452,10 @@ public:
     {
         auto* p = rack.getPlugin (index);
         const auto& sl = rack.getSlot (index);
-        const int cpuHundredths = p != nullptr ? juce::roundToInt (sl.cpuMs.load() * 100.0f) : -1;
+        // the plugin's time (ms) changes on every block: refreshed 5 times a second, not 30
+        if (++statsTick % 6 == 0 || p != shownPlugin)
+            cpuNow = p != nullptr ? juce::roundToInt (sl.cpuMs.load() * 100.0f) : -1;
+        const int cpuHundredths = cpuNow;
         const bool bypassed = sl.bypassed.load();
         const bool selected = edit.isSlotSelected (rack.getId(), index);
 
@@ -485,13 +491,18 @@ public:
         if (metersMoved)
             repaint (bodyArea().toNearestInt());
 
-        if (cpuHundredths != shownCpu || bypassed != shownBypass || selected != shownSelected || thumbVersion != shownThumb)
+        if (bypassed != shownBypass || selected != shownSelected || thumbVersion != shownThumb)
         {
             shownCpu = cpuHundredths;
             shownBypass = bypassed;
             shownSelected = selected;
             shownThumb = thumbVersion;
             repaint();
+        }
+        else if (cpuHundredths != shownCpu)
+        {
+            shownCpu = cpuHundredths;
+            repaint (getLocalBounds().removeFromBottom (20));   // only the "x.xx ms" line
         }
 
         for (auto* r : rows)
@@ -1099,6 +1110,7 @@ private:
     const int index;
     juce::Rectangle<float> powerArea, viewArea;
     bool dragOver = false, shownBypass = false, shownSelected = false, showFooter = true, vertical = false;
+    int statsTick = 0, cpuNow = -1;
     int shownCpu = -2, shownView = -1, shownThumb = -1, hiddenRows = 0, shownMeters = 0, shownLatency = -1;
     static constexpr int numViews = 3;
     juce::Array<PluginMeter> meters;       // the plugin's own meters (see PluginMeters)
@@ -1884,20 +1896,31 @@ void RackComponent::updateMeters()
     peakLoad = juce::jmax (rack.peakLoad.readAndReset(), peakLoad * 0.97f);
 
     const auto totalMs = 1000.0 * rack.totalLatencySamples.load() / sr;
-    const auto group = rack.latencyGroup.load();
 
-    juce::String text;
-    text << "core " << (rack.lastThread.load() + 1)
-         << "\n" << juce::roundToInt (100.0f * rack.cpuLoad.load()) << "%  pk " << juce::roundToInt (100.0f * peakLoad) << "%"
-         << "\nlat " << juce::String (juce::jmax (latMs, totalMs), 1) << " ms";
+    // the info text (core, %, latency) is read, not watched: 5 times a second is enough, and every
+    // new text repaints the label
+    if (++meterTick % 6 == 0 && infoLabel.isVisible())
+    {
+        juce::String text;
+        text << "core " << (rack.lastThread.load() + 1)
+             << "\n" << juce::roundToInt (100.0f * rack.cpuLoad.load()) << "%  pk " << juce::roundToInt (100.0f * peakLoad) << "%"
+             << "\nlat " << juce::String (juce::jmax (latMs, totalMs), 1) << " ms";
 
-    infoLabel.setText (text, juce::dontSendNotification);
-    infoLabel.setColour (juce::Label::textColourId, peakLoad > 0.9f ? theme::amber : theme::textDim);
+        infoLabel.setText (text, juce::dontSendNotification);
+        infoLabel.setColour (juce::Label::textColourId, peakLoad > 0.9f ? theme::amber : theme::textDim);
+    }
 
     updateBadges();
 
-    repaint (inMeterArea);
-    repaint (outMeterArea);
+    // meters: repaint only when a bar moves by half a dB (silence = no repaint at all)
+    {
+        auto key = [] (float level) { return level <= 0.001f ? -1 : juce::roundToInt (2.0f * juce::Decibels::gainToDecibels (level, -60.0f)); };
+        const int k[4] = { key (inLevel[0]), key (inLevel[1]), key (outLevel[0]), key (outLevel[1]) };
+
+        if (k[0] != shownMeterKey[0] || k[1] != shownMeterKey[1]) repaint (inMeterArea);
+        if (k[2] != shownMeterKey[2] || k[3] != shownMeterKey[3]) repaint (outMeterArea);
+        std::copy (k, k + 4, shownMeterKey);
+    }
 
     if ((rack.automixGroup.load() > 0) == automixArea.isEmpty())
         resized();
@@ -1908,8 +1931,13 @@ void RackComponent::updateMeters()
     if (rack.automixGroup.load() > 0)
     {
         automixDb = rack.automixGainDb.load();
-        repaint (automixArea);
-        repaint (automixMeterArea);
+        const auto shown = session.getEngine().automixEnabled.load() ? automixDb : 999.0f;   // AUTOMIX off = grey meter
+        if (std::abs (shown - shownAutomixDb) > 0.05f)
+        {
+            shownAutomixDb = shown;
+            repaint (automixArea);
+            repaint (automixMeterArea);
+        }
     }
 
     // values changed from elsewhere (Alt on another rack, MIDI, scenes) show up here

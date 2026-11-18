@@ -1,4 +1,5 @@
 #include "PluginManager.h"
+#include "Sandbox/SandboxedPlugin.h"
 #include "CLAPPluginFormat.h"
 #include "../Engine/Rack.h"
 #include <sys/sysctl.h>
@@ -178,6 +179,12 @@ void PluginManager::saveList()
 
 void PluginManager::createPlugin (const juce::PluginDescription& desc, double sampleRate, int blockSize, Callback cb)
 {
+    if (isolatePlugins.load())
+    {
+        sandbox::SandboxedPlugin::createAsync (desc, sampleRate, blockSize, std::move (cb));
+        return;
+    }
+
     formatManager.createPluginInstanceAsync (desc, sampleRate, blockSize,
         [cb = std::move (cb)] (std::unique_ptr<juce::AudioPluginInstance> p, const juce::String& err) mutable
         {

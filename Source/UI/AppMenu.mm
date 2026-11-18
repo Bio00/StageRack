@@ -25,4 +25,14 @@ void markAsBackgroundProcess()
     }
 }
 
+void markAsAccessoryProcess()
+{
+    @autoreleasepool
+    {
+        if (auto* info = (NSMutableDictionary*) [[NSBundle mainBundle] infoDictionary];
+            [info isKindOfClass: [NSMutableDictionary class]])
+            info[@"LSUIElement"] = @YES;
+    }
+}
+
 } // namespace stagerack

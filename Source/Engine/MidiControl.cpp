@@ -1138,6 +1138,11 @@ int MidiControl::feedbackValue (const MidiMapping& m) const
 
 void MidiControl::sendFeedback (bool force)
 {
+    // nobody to light: don't even read the values (this runs 50x/s on the message thread)
+    if (feedbackSinkForTests == nullptr
+        && std::none_of (outputs.begin(), outputs.end(), [] (auto& o) { return o.second != nullptr; }))
+        return;
+
     // one value per LED address and controller: the mapping of the current shift layer wins
     struct Out { const MidiMapping* m; int value; };
     std::map<juce::String, Out> chosen;

@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #include "PluginThumbnail.h"
+#include "../Plugins/Sandbox/SandboxedPlugin.h"
 
 namespace stagerack
 {
@@ -132,6 +133,9 @@ void PluginThumbnails::requestOffscreen (juce::AudioPluginInstance& p)
 
     if (! p.hasEditor() || p.getActiveEditor() != nullptr)
         return;
+
+    if (sandbox::SandboxedPlugin::isSandboxed (&p))
+        return;   // its editor lives in another process: creating one would open the plugin's window
 
     if (auto* ed = p.createEditorAndMakeActive())
         pending.add (new OffscreenCapture (*this, p, ed));

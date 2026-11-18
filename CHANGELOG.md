@@ -2,6 +2,23 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.10.0-beta — 2026-11-18
+
+### Più leggera e reattiva
+- **Interfaccia molto più leggera**: con una sessione di 20 rack la CPU di StageRack scende da ~135% a ~63%, il thread dell'interfaccia dal 95% al 9% (la navigazione non si blocca più). Con 0 rack da ~15% a ~5%. Meter, testi e CPU degli slot si ridisegnano solo quando cambia qualcosa.
+
+### Audio più solido
+- **Niente blocchi muti quando modifichi la sessione dal vivo**: aggiungere o togliere rack, cambiare uscite o send dei bus non può più far saltare un blocco audio (il grafo si prepara a parte e si scambia in un istante).
+- Il contatore dei dropout conta anche i blocchi di un singolo rack saltati (prima invisibili).
+- Provato con le sessioni vere per minuti di azioni da concerto (scene, fader, parametri, rack aggiunti e tolti): 0 dropout a 32 e 16 campioni.
+
+### Plugin isolati (sperimentale, spento di base)
+- **SETTINGS → Performance → Plugin isolation**: ogni plugin gira in un processo suo. Se crasha, solo il suo slot passa il suono pulito e il plugin si riavvia da solo con le sue impostazioni; il resto dell'audio continua. Nessuna latenza aggiunta. Negli slot compare **ISO**.
+- **Costa molta CPU** (circa 5% di un core in più per plugin, picchi raddoppiati): da usare solo per un plugin che crasha spesso. La finestra del plugin si apre a parte; niente MIDI verso i plugin isolati.
+
+### Impostazioni
+- **Finestra SETTINGS rifatta**: sezioni a sinistra (Audio device, Performance, MIDI, Appearance, Updates), ogni pagina scorre e la finestra non esce più dallo schermo. Si ridimensiona e ricorda l'ultima sezione aperta.
+
 ## 0.9.1-beta — 2026-11-17
 
 ### Rack

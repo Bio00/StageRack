@@ -37,6 +37,9 @@ bool currentEventIsKeyDown();
 /** Call at the top of main(), before JUCE/AppKit start, in child processes: no Dock icon. */
 void markAsBackgroundProcess();
 
+/** Sandbox children: no Dock icon, but they may show a window (the plugin's editor). */
+void markAsAccessoryProcess();
+
 /** Menu item that remembers whether it was triggered from the keyboard. */
 struct KeyOriginCallback final : juce::PopupMenu::CustomCallback
 {

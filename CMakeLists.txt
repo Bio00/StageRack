@@ -7,7 +7,7 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 # Universal binary: runs natively on Apple Silicon and Intel Macs.
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Target architectures")
 
-project(StageRack VERSION 0.9.1 LANGUAGES C CXX OBJC OBJCXX)
+project(StageRack VERSION 0.10.0 LANGUAGES C CXX OBJC OBJCXX)
 
 # Pre-release label ("beta", "" for a final release). The full version ("0.2.0-beta") must match
 # the GitHub release tag ("v0.2.0-beta"): the built-in updater compares them.
@@ -59,6 +59,7 @@ target_sources(StageRack PRIVATE
     Source/Engine/WorkerPool.cpp
     Source/Engine/Rack.cpp
     Source/Engine/AudioEngine.cpp
+    Source/Engine/RtGuard.cpp
     Source/Engine/Session.cpp
     Source/Engine/Autosave.cpp
     Source/Engine/HopAligner.cpp
@@ -70,6 +71,8 @@ target_sources(StageRack PRIVATE
     Source/Engine/MidiControl.cpp
     Source/Engine/SystemHealth.mm
     Source/Plugins/PluginManager.cpp
+    Source/Plugins/Sandbox/SandboxHost.cpp
+    Source/Plugins/Sandbox/SandboxedPlugin.cpp
     Source/Plugins/CLAPPluginFormat.mm
     Source/UI/MainComponent.cpp
     Source/UI/RackComponent.cpp

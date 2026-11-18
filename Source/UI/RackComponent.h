@@ -113,6 +113,8 @@ private:
     bool tinyRouting = false;       // thinnest racks: bus names left out, "▶ B"
     bool compactRouting = false;    // short IN/OUT texts ("IN 1-2") on narrow racks
     float inLevel[2] {}, outLevel[2] {}, peakLoad = 0.0f, automixDb = 0.0f;
+    int shownMeterKey[4] { -1, -1, -1, -1 }, meterTick = 0;   // meters in 0.5 dB steps: repaint only when they move
+    float shownAutomixDb = 1000.0f;
     bool vertical = false, gainDragging = false, inGainDragging = false;
     juce::ModifierKeys gainDragMods, inGainDragMods;
     int dropIndicator = 0;          // 0 = none, -1 = before this rack, 1 = after

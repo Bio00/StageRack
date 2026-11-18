@@ -1,5 +1,8 @@
 #include "AudioEngine.h"
+#include <unordered_map>
 #include "HopAligner.h"
+#include "RtLock.h"
+#include "RtGuard.h"
 #include <map>
 
 namespace stagerack
@@ -14,6 +17,8 @@ AudioEngine::AudioEngine()
 {
     for (int i = 0; i < maxDeviceChannels; ++i)
         inputMap[(size_t) i] = outputMap[(size_t) i] = i;
+
+    racks.reserve (1024);   // adding a rack under the lock never reallocates the vector
 }
 
 void AudioEngine::setChannelMaps (const juce::BigInteger& activeIns, int numIns, const juce::BigInteger& activeOuts, int numOuts)
@@ -77,10 +82,13 @@ Rack& AudioEngine::addRackWithId (int id)
     rack->prepare (sampleRate, blockSize);
 
     auto& ref = *rack;
+    auto list = rackList();
+    list.push_back (rack.get());
+    auto plan = planGraph (list);
     {
         const juce::SpinLock::ScopedLockType sl (racksLock);
         racks.push_back (std::move (rack));
-        rebuildGraphLocked();
+        applyGraphLocked (plan);
     }
     return ref;
 }
@@ -93,8 +101,21 @@ int AudioEngine::indexOf (const Rack& rack) const
     return -1;
 }
 
+std::vector<Rack*> AudioEngine::rackList() const
+{
+    std::vector<Rack*> list;
+    list.reserve (racks.size() + 1);
+    for (auto& r : racks)
+        list.push_back (r.get());
+    return list;
+}
+
 void AudioEngine::removeRack (Rack& rack)
 {
+    auto list = rackList();
+    list.erase (std::remove (list.begin(), list.end(), &rack), list.end());
+    auto plan = planGraph (list);
+
     std::unique_ptr<Rack> doomed;
     {
         const juce::SpinLock::ScopedLockType sl (racksLock);
@@ -109,32 +130,39 @@ void AudioEngine::removeRack (Rack& rack)
             }
         }
 
-        rebuildGraphLocked();
+        applyGraphLocked (plan);
     }
-    // `doomed` (and its plugins) is destroyed here, on the message thread.
+    // `doomed` (and its plugins) and the old graph are destroyed here, on the message thread.
 }
 
 void AudioEngine::moveRack (int from, int to)
 {
-    const juce::SpinLock::ScopedLockType sl (racksLock);
-
     if (! juce::isPositiveAndBelow (from, (int) racks.size()) || ! juce::isPositiveAndBelow (to, (int) racks.size()))
         return;
 
+    auto list = rackList();
+    auto* moving = list[(size_t) from];
+    list.erase (list.begin() + from);
+    list.insert (list.begin() + to, moving);
+    auto plan = planGraph (list);
+
+    const juce::SpinLock::ScopedLockType sl (racksLock);
     auto item = std::move (racks[(size_t) from]);
     racks.erase (racks.begin() + from);
     racks.insert (racks.begin() + to, std::move (item));
-    rebuildGraphLocked();
+    applyGraphLocked (plan);
 }
 
 void AudioEngine::clearRacks()
 {
     std::vector<std::unique_ptr<Rack>> doomed;
+    std::vector<std::vector<Rack*>> oldStages;
     {
         const juce::SpinLock::ScopedLockType sl (racksLock);
         std::swap (doomed, racks);
-        stages.clear();
+        std::swap (oldStages, stages);
     }
+    racks.reserve (1024);
 }
 
 Rack* AudioEngine::findRack (int id) const
@@ -521,38 +549,76 @@ void AudioEngine::rebuildRouting()
 
 void AudioEngine::rebuildGraph()
 {
-    const juce::SpinLock::ScopedLockType sl (racksLock);
-    rebuildGraphLocked();
+    auto plan = planGraph (rackList());
+    {
+        const juce::SpinLock::ScopedLockType sl (racksLock);
+        applyGraphLocked (plan);
+    }
+    // the previous graph (now in `plan`) is freed here, outside the lock
 }
 
-void AudioEngine::rebuildGraphLocked()
+void AudioEngine::applyGraphLocked (GraphPlan& plan) noexcept
+{
+    // only swaps and stores: the audio thread waits for this at most a few microseconds
+    for (size_t i = 0; i < plan.list.size(); ++i)
+    {
+        auto& r = *plan.list[i];
+        auto& n = plan.nodes[i];
+
+        // send / bus ramps: the gains the audio thread reached until now
+        for (auto& f : n.feeds)
+            for (const auto& old : r.feeds)
+                if (old.src == f.src && old.kind == f.kind && old.send == f.send)
+                    f.gain = old.gain;
+
+        std::swap (r.feeds, n.feeds);
+        r.sourceRack = n.sourceRack;
+        r.outBusRack = n.outBusRack;
+        r.outToBus = n.outToBus;
+        r.feedsABus = n.feedsABus;
+        r.isActiveBus = n.isActiveBus;
+        r.stage = n.stage;
+        r.sendAllowed = n.sendAllowed;
+    }
+
+    std::swap (stages, plan.stages);
+}
+
+AudioEngine::GraphPlan AudioEngine::planGraph (const std::vector<Rack*>& list) const
 {
     // Everything that feeds a rack (chain source, racks routed or sending to it as a bus) runs
     // in an earlier stage of the same callback: stage = 1 + the latest stage feeding it.
+    // Runs on the message thread (the only writer of the graph) without the lock: it reads the
+    // racks' current feeds only for the ramp gains, refreshed again in applyGraphLocked.
+    GraphPlan plan;
+    plan.list = list;
+    plan.nodes.resize (list.size());
+
+    std::unordered_map<const Rack*, size_t> index;
+    for (size_t i = 0; i < list.size(); ++i)
+        index[list[i]] = i;
+
+    auto node = [&] (const Rack* r) -> GraphPlan::Node& { return plan.nodes[index.at (r)]; };
+    auto find = [&] (int id) -> Rack*
+    {
+        for (auto* r : list)
+            if (r->getId() == id)
+                return r;
+        return nullptr;
+    };
+
     const bool routing = routingEnabled.load();
     std::array<Rack*, Rack::maxBuses> buses {};
-    std::map<const Rack*, std::vector<Rack::Feed>> previous;   // keeps the send ramps going
 
-    for (auto& r : racks)
-    {
-        previous[r.get()] = std::move (r->feeds);
-        r->feeds.clear();
-        r->sourceRack = nullptr;
-        r->outBusRack = nullptr;
-        r->outToBus = false;
-        r->feedsABus = false;
-        r->isActiveBus = false;
-        r->stage = -1;
-
+    for (auto* r : list)
         if (const auto b = r->busIndex.load(); routing && b > 0 && b <= Rack::maxBuses && buses[(size_t) b - 1] == nullptr)
         {
-            buses[(size_t) b - 1] = r.get();
-            r->isActiveBus = true;
+            buses[(size_t) b - 1] = r;
+            node (r).isActiveBus = true;
         }
-    }
 
     // does `from` already reach `to` through the edges added so far (all of them, on or off)?
-    auto reaches = [] (const Rack* from, const Rack* to)
+    auto reaches = [&] (const Rack* from, const Rack* to)
     {
         std::vector<const Rack*> todo { to }, seen;
 
@@ -564,7 +630,7 @@ void AudioEngine::rebuildGraphLocked()
             if (r == from)
                 return true;
 
-            for (const auto& f : r->feeds)
+            for (const auto& f : node (r).feeds)
                 if (std::find (seen.begin(), seen.end(), f.src) == seen.end() && seen.size() < 1024)
                 {
                     seen.push_back (f.src);
@@ -581,57 +647,55 @@ void AudioEngine::rebuildGraphLocked()
             return false;   // would close a loop
 
         float g = 0.0f;
-        for (const auto& old : previous[dst])
+        for (const auto& old : dst->feeds)   // keeps the send ramps going
             if (old.src == src && old.kind == kind && old.send == send)
                 g = old.gain;
 
-        dst->feeds.push_back ({ src, kind, send, g });
+        node (dst).feeds.push_back ({ src, kind, send, g });
         return true;
     };
 
     // 1. chains (a bus takes its input from its feeds instead)
-    for (auto& r : racks)
-        if (! r->isActiveBus && r->inputRackId.load() >= 0)
-            if (auto* src = findRack (r->inputRackId.load()); src != nullptr && addFeed (src, r.get(), 0, -1))
-                r->sourceRack = src;
+    for (auto* r : list)
+        if (! node (r).isActiveBus && r->inputRackId.load() >= 0)
+            if (auto* src = find (r->inputRackId.load()); src != nullptr && addFeed (src, r, 0, -1))
+                node (r).sourceRack = src;
 
     // 2. outputs routed into buses (missing bus or loop = silent, never the device by surprise)
     if (routing)
     {
-        for (auto& r : racks)
+        for (auto* r : list)
         {
             const auto b = r->outputBus.load();
 
             if (b <= 0 || b > Rack::maxBuses)
                 continue;
 
-            r->outToBus = true;
+            node (r).outToBus = true;
 
-            if (auto* bus = buses[(size_t) b - 1]; bus != nullptr && addFeed (r.get(), bus, 1, -1))
+            if (auto* bus = buses[(size_t) b - 1]; bus != nullptr && addFeed (r, bus, 1, -1))
             {
-                r->outBusRack = bus;
-                r->feedsABus = true;
+                node (r).outBusRack = bus;
+                node (r).feedsABus = true;
             }
         }
 
         // extra outputs into buses (after every main one: a main output wins a would-be loop)
-        for (auto& r : racks)
+        for (auto* r : list)
             for (auto c : r->getExtraOutputs())
                 if (const auto k = c - Rack::outBus; k > 0 && k <= Rack::maxBuses)
-                    if (auto* bus = buses[(size_t) k - 1]; bus != nullptr && bus != r->outBusRack && addFeed (r.get(), bus, 1, -1))
-                        r->feedsABus = true;
+                    if (auto* bus = buses[(size_t) k - 1]; bus != nullptr && bus != node (r).outBusRack && addFeed (r, bus, 1, -1))
+                        node (r).feedsABus = true;
     }
 
     // 3. sends: every rack can send to every bus that does not feed it. Sends that are on are
     //    placed first; normal racks before buses, buses in letter order.
-    std::map<const Rack*, juce::uint32> allowed;
-
     if (routing)
     {
         std::vector<Rack*> order;
-        for (auto& r : racks)
-            if (! r->isActiveBus)
-                order.push_back (r.get());
+        for (auto* r : list)
+            if (! node (r).isActiveBus)
+                order.push_back (r);
         for (auto* b : buses)
             if (b != nullptr)
                 order.push_back (b);
@@ -642,47 +706,43 @@ void AudioEngine::rebuildGraphLocked()
             for (auto* r : order)
                 for (int k = 0; k < Rack::maxBuses; ++k)
                     if (buses[(size_t) k] != nullptr && r->sends[(size_t) k].isOn() == (pass == 0)
-                        && ! (pass == 1 && r->isActiveBus)
+                        && ! (pass == 1 && node (r).isActiveBus)
                         && addFeed (r, buses[(size_t) k], 2, k))
-                        allowed[r] |= 1u << k;
+                        node (r).sendAllowed |= 1u << k;
 
         for (auto* b : buses)
             if (b != nullptr)
                 for (int k = 0; k < Rack::maxBuses; ++k)
                     if (auto* to = buses[(size_t) k]; to != nullptr && to != b && ! b->sends[(size_t) k].isOn() && ! reaches (to, b))
-                        allowed[b] |= 1u << k;   // possible: turning it on adds the edge
+                        node (b).sendAllowed |= 1u << k;   // possible: turning it on adds the edge
     }
-
-    for (auto& r : racks)
-        r->sendAllowed = allowed[r.get()];
 
     std::function<int (Rack*, int)> stageOf = [&] (Rack* r, int depth) -> int
     {
-        if (r->stage >= 0)
-            return r->stage;
+        auto& n = node (r);
+        if (n.stage >= 0)
+            return n.stage;
 
         int st = 0;
 
         if (depth < 256)
-            for (const auto& f : r->feeds)
+            for (const auto& f : n.feeds)
                 st = juce::jmax (st, stageOf (f.src, depth + 1) + 1);
 
-        return r->stage = st;
+        return n.stage = st;
     };
 
-    std::vector<std::vector<Rack*>> newStages;
-
-    for (auto& r : racks)
+    for (auto* r : list)
     {
-        const auto st = stageOf (r.get(), 0);
+        const auto st = stageOf (r, 0);
 
-        if ((int) newStages.size() <= st)
-            newStages.resize ((size_t) st + 1);
+        if ((int) plan.stages.size() <= st)
+            plan.stages.resize ((size_t) st + 1);
 
-        newStages[(size_t) st].push_back (r.get());
+        plan.stages[(size_t) st].push_back (r);
     }
 
-    stages = std::move (newStages);
+    return plan;
 }
 
 void AudioEngine::updateLatencyCompensation()
@@ -1051,6 +1111,7 @@ void AudioEngine::computeAutomixGains (bool anySolo) noexcept
 
 void AudioEngine::processRackTask (void* ctx, int index, int threadIndex)
 {
+    const rt::HostScope host;
     auto& self = *static_cast<AudioEngine*> (ctx);
     (*self.currentStage)[(size_t) index]->process (self.cbInputs, self.cbNumInputs, self.cbNumSamples, threadIndex);
 }
@@ -1059,6 +1120,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
                                                     float* const* outputs, int numOutputs,
                                                     int numSamples, const juce::AudioIODeviceCallbackContext& context)
 {
+    const rt::HostScope host;
     const juce::ScopedNoDenormals noDenormals;
     const auto t0 = juce::Time::getHighResolutionTicks();
 
@@ -1068,10 +1130,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
 
     const auto callbackIndex = callbackCount.fetch_add (1, std::memory_order_relaxed);
 
-    const juce::SpinLock::ScopedTryLockType sl (racksLock);
+    // the message thread holds this only to swap a new graph in (see applyGraphLocked)
+    const bool locked = rt::enterWithin (racksLock, 60.0);
+    const rt::ScopedExit unlock { locked ? &racksLock : nullptr };
 
-    if (! sl.isLocked())
+    if (! locked)
     {
+        seenLockMisses = rt::lockMisses.load (std::memory_order_relaxed);   // counted here, once
         dropouts.note (callbackIndex, context.hostTimeNs != nullptr ? *context.hostTimeNs : (juce::uint64) 0, numSamples, sampleRate,
                        0.0, -1, 0.0f, true);
         return;
@@ -1305,8 +1370,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
                 heaviestId = r->getId();
             }
 
+        // a rack that gave up waiting for its own lock (plugin swapped in at that instant) was
+        // silent for this block: it counts as a dropout like a skipped engine block
+        const auto misses = rt::lockMisses.load (std::memory_order_relaxed);
+        const bool rackSilent = misses != seenLockMisses;
+        seenLockMisses = misses;
+
         dropouts.note (callbackIndex, context.hostTimeNs != nullptr ? *context.hostTimeNs : (juce::uint64) 0,
-                       numSamples, sampleRate, elapsed, heaviestId, heaviestMs);
+                       numSamples, sampleRate, elapsed, heaviestId, heaviestMs, rackSilent);
     }
     const auto prev = callbackLoad.load (std::memory_order_relaxed);
     callbackLoad.store (load > prev ? load : prev * 0.9 + load * 0.1, std::memory_order_relaxed);

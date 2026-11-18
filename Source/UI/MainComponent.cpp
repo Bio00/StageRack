@@ -24,6 +24,7 @@ MainComponent::MainComponent()
     theme::setLight (settings.getBoolValue ("lightTheme", false));
     theme::tintRacks = settings.getBoolValue ("tintRacks", true);
     theme::tapFlash = juce::jlimit (0, 4, settings.getIntValue ("tapFlash", 2));
+    PluginManager::isolatePlugins = settings.getBoolValue ("isolatePlugins", false);   // experimental
     lnf.applyColours();
     juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
 

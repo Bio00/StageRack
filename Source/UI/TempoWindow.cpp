@@ -221,6 +221,22 @@ void TempoCell::resized()
                 + "\nOther tap sources (" + how + "MIDI, clock, audio) in the Tempo window. Right click = more");
 }
 
+void TempoCell::repaintDisplay()
+{
+    // what paint() draws: the flash (first quarter of the beat, in 1/32 steps), the BPM to 0.1, pressed
+    auto& tempo = session.getEngine().tempo;
+    const auto ppq = tempo.getBeatPosition (index, TempoEngine::nowSec());
+    const auto frac = ppq - std::floor (ppq);
+    const juce::int64 flash = theme::tapFlash > 0 && frac < 0.25 ? 1 + (juce::int64) (frac * 128.0) : 0;
+    const auto key = flash + 64 * ((juce::int64) std::llround (tempo.getBpm (index) * 10.0) * 4 + (pressed ? 1 : 0) + (isMouseOver() ? 2 : 0));
+
+    if (key != shownKey)
+    {
+        shownKey = key;
+        repaint();
+    }
+}
+
 void TempoCell::paint (juce::Graphics& g)
 {
     auto& tempo = session.getEngine().tempo;

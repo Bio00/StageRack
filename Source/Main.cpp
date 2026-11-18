@@ -4,6 +4,9 @@
 #include "PluginProbe.h"
 #include "TempoProbe.h"
 #include "WatchTest.h"
+#include "SoakTest.h"
+#include "SandboxTest.h"
+#include "Plugins/Sandbox/SandboxHost.h"
 #include "SessionCheck.h"
 #include "EditTest.h"
 #include "EditorTest.h"
@@ -63,6 +66,14 @@ public:
     void initialise (const juce::String&) override
     {
         const auto args = getCommandLineParameterArray();
+
+        if (sandbox::isSandboxCommandLine (getCommandLineParameters()))
+        {
+            // EXPERIMENTAL plugin sandbox child: serves one plugin to the StageRack that launched it
+            if (! sandbox::startSandboxChild (getCommandLineParameters()))
+                std::_Exit (1);
+            return;
+        }
 
         if (args.contains (coreaudio::probeArgument))
         {
@@ -168,7 +179,7 @@ public:
 
         if (args.contains ("--render-settings"))
         {
-            // Diagnostics: --render-settings <dir>  draws the Settings window with the default devices (PNG)
+            // Diagnostics: --render-settings <dir>  draws every page of the Settings window (PNG; use STAGERACK_DATA_DIR: it writes settingsPage)
             juce::Process::setDockIconVisible (false);
             const juce::File dir (args[args.indexOf ("--render-settings") + 1]);
             AudioEngine engine;
@@ -179,14 +190,17 @@ public:
             engine.getDeviceManager().initialise (2, 2, nullptr, true);
             auto* w = new SettingsWindow (engine, *pm, session, [] (bool) {}, [] {});   // leaked: _Exit below
             auto* content = w->getContentComponent();
-            content->resized();
-            juce::Image img (juce::Image::ARGB, content->getWidth(), content->getHeight(), true);
-            juce::Graphics g (img);
-            content->paintEntireComponent (g, true);
-            juce::PNGImageFormat png;
-            juce::FileOutputStream os (dir.getChildFile ("settings.png"));
-            os.setPosition (0); os.truncate();
-            png.writeImageToStream (img, os);
+            for (int page = 0; page < 5; ++page)   // settings-0.png ... settings-4.png
+            {
+                w->showPage (page);
+                juce::Image img (juce::Image::ARGB, content->getWidth(), content->getHeight(), true);
+                juce::Graphics g (img);
+                content->paintEntireComponent (g, true);
+                juce::PNGImageFormat png;
+                juce::FileOutputStream os (dir.getChildFile ("settings-" + juce::String (page) + ".png"));
+                os.setPosition (0); os.truncate();
+                png.writeImageToStream (img, os);
+            }
             std::fflush (nullptr);
             std::_Exit (0);
         }
@@ -650,6 +664,24 @@ public:
             return;
         }
 
+        if (args.contains ("--sandbox-test"))
+        {
+            juce::Process::setDockIconVisible (false);
+            static std::unique_ptr<SandboxTest> test;   // drives itself on the message loop, exits with _Exit
+            test = std::make_unique<SandboxTest> (args);
+            if (test->start() != 0) std::_Exit (1);
+            return;
+        }
+
+        if (args.contains ("--soak"))
+        {
+            juce::Process::setDockIconVisible (false);
+            static std::unique_ptr<SoakTest> test;   // drives itself on the message loop, exits with _Exit
+            test = std::make_unique<SoakTest> (args);
+            if (test->start() != 0) std::_Exit (1);
+            return;
+        }
+
         if (args.contains ("--watch-test"))
         {
             juce::Process::setDockIconVisible (false);
@@ -796,6 +828,9 @@ int main (int argc, char* argv[])
 
         if (a == stagerack::coreaudio::probeArgument)
             std::_Exit (stagerack::coreaudio::runProbeChild());   // no AppKit at all: never a Dock icon
+
+        if (a.rfind ("--srk-sandbox:", 0) == 0)
+            stagerack::markAsAccessoryProcess();   // plugin sandbox child: no Dock icon, may open the plugin's window
 
         if (a == stagerack::PluginManager::scanArgument || a == stagerack::PluginManager::latencyArgument || a == "--midi-fake-midimix")
             stagerack::markAsBackgroundProcess();

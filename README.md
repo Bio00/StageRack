@@ -190,6 +190,53 @@ Per misurare un altro Mac (es. M3 base) dal Terminale, con l'app installata:
 ```
 (`Altoparlanti` su un Mac in italiano; `--threads` elenca i thread con priorità e CPU). Variabili per i test: `STAGERACK_DATA_DIR` = cartella dati separata (prove accanto a un'app aperta), `STAGERACK_WATCHLOG=1` stampa le decisioni dell'hop watch.
 
+## Interfaccia leggera (2026-11-18)
+Misurato con `sample`/`top` sull'M4 Pro, Altoparlanti a 16 campioni, finestra in primo piano, app ferma:
+
+| | prima | dopo |
+|---|---|---|
+| Sessione nuova (0 rack): CPU StageRack | ~15% | ~5% |
+| ZSP BIO (20 rack, 12 plugin): CPU StageRack | ~135-140% | ~63% (il resto è audio/plugin) |
+| ZSP BIO: thread interfaccia | 95% (sempre occupato) | ~9% |
+| ZSP BIO: WindowServer | ~41% | ~22% |
+
+Cause: la ricerca dei parametri gemelli (sync) rifatta a ogni frame da righe parametro, slot e feedback MIDI (ora in cache per parametro, ricontrollata ogni 4 s); meter, info dei rack, CPU degli slot, TopBar e celle del tempo ridisegnati 30 volte al secondo anche senza cambiamenti (ora solo quando cambia ciò che si vede: meter a passi di 0.5 dB, testi 5 volte al secondo); feedback MIDI calcolato anche senza uscite MIDI aperte.
+Caricamento di ZSP BIO: ~4.8 s dall'avvio, quasi tutto dentro i plugin (inizializzazione VST3 ~2.3 s, AU ~0.5 s) e l'avvio di CoreMIDI (~0.5 s).
+
+## Solidità del thread audio (2026-11-18)
+- **Grafo senza blocchi muti**: il grafo dei rack (catene, bus, send, stadi) ora si calcola sul thread interfaccia *fuori* dal lock e si scambia sotto il lock con pochi puntatori (`planGraph` / `applyGraphLocked`). Prima veniva calcolato sotto il lock: se il callback arrivava in quel momento saltava il blocco (blocco muto = click) a ogni aggiunta/rimozione di rack, cambio di uscita o send di un bus.
+- **Attesa limitata invece di rinunciare** (`Engine/RtLock.h`): il callback aspetta il lock del grafo fino a 60 µs e quello di un rack fino a 40 µs (chi li tiene scambia solo puntatori); se il thread interfaccia fosse sospeso proprio lì, il blocco resta muto come prima e conta come dropout (anche quello di un singolo rack, prima invisibile).
+- **Rilevatore di allocazioni** (`Engine/RtGuard`): con `--rt-guard` ogni malloc/free fatta dal *nostro* codice audio (callback, worker, rack, playhead) viene contata con lo stack; quelle dentro i plugin no. Si controlla da solo all'avvio (allocazione di prova vista / non vista).
+- **Prova lunga** `--soak <sessione> [device] --seconds N --block B [--input wav] [--rt-guard] [--quiet-ui]`: sessione vera su scheda vera (uscita muta), un ingresso diverso per rack, e intanto ogni 100 ms un'azione da concerto (richiamo scena, parametri plugin, fader, mute, ricostruzione grafo, aggiunta/rimozione rack, snapshot undo). Report ogni 10 s.
+
+Risultati (Altoparlanti, audio del Castello, rilevatore attivo):
+
+| Sessione | Blocco | Durata | Dropout | Peggior callback | Attese lock | Allocazioni nostre |
+|---|---|---|---|---|---|---|
+| ZSP BIO (20 rack) | 32 | 60 s | 0 | 0.158 ms | 1 | 0 |
+| Athesys brescia (28 plugin) | 32 | 60 s | 0 | 0.420 ms | 0 | 0 |
+| StageRack-Test (con scene) | 32 | 60 s | 0 | 0.392 ms | 0 | 0 |
+| etst2Bio03 | 32 | 60 s | 0 | 0.324 ms | 0 | 0 |
+| ZSP BIO | 16 | 120 s | 0 | 0.109 ms | 2 | 0 |
+| Athesys brescia | 16 | 120 s | 0 | 0.265 ms | 0 | 0 |
+
+Le "attese lock" sono i casi in cui il codice vecchio avrebbe prodotto un blocco muto. Bench 8 e 12 De-Feedback dopo le modifiche: 0 callback oltre budget.
+
+## Plugin isolati (SPERIMENTALE, 2026-11-18)
+SETTINGS → Performance → *Plugin isolation (experimental)*, spento di default; all'accensione chiede conferma perché **costa molta CPU**. Vale per i plugin caricati da quel momento: per applicarlo a tutti si riapre la sessione. Negli slot compare **ISO** accanto al formato.
+- Ogni plugin gira in un **processo suo** (lo stesso StageRack in modalità `--srk-sandbox`, senza icona nel Dock). Se crasha, si chiude solo quel processo: lo slot **lascia passare il suono dry**, mai silenzio, e il plugin **riparte da solo** con l'ultimo stato (aggiornato ogni 5 s e a ogni salvataggio o scena) in circa 0,5 s.
+- **Zero latenza aggiunta**: l'audio passa in memoria condivisa nello stesso callback. Il rack aspetta il processo del plugin al massimo l'80% del blocco: se è in ritardo o bloccato quel blocco passa dry e il resto dell'audio va avanti.
+- Le sessioni si salvano identiche, con lo stesso plugin e lo stesso stato: si possono riaprire con l'opzione spenta.
+- La finestra del plugin la apre il suo processo; in StageRack resta un piccolo pannello con "Show plugin window". Niente miniature né meter del plugin negli slot isolati.
+
+Misure:
+- `--sandbox-test <formato> <plugin> [blocco]`. Uscita **identica bit per bit** al plugin dentro StageRack (AUDelay, De-Feedback). I parametri arrivano al plugin. Dopo il crash simulato lo slot passa dry e il plugin torna in 0,4-0,6 s, di nuovo identico bit per bit. Con il plugin bloccato 300 ms i blocchi passano dry, poi riprende.
+- Passaggio tra processi: **~2 µs per blocco** di costo proprio (AUDelay); con De-Feedback il giro medio è ~48 µs, quasi tutto calcolo del plugin.
+- ZSP BIO, 6 plugin isolati, scheda vera, azioni da concerto (`--soak ... --isolate`): **32 campioni 0 dropout, 0 blocchi dry**; 16 campioni 4 callback saltati nei primi 10 s (processi che si scaldano), poi 80 s puliti.
+- **Costo**: CPU totale ~46% → ~76% con 6 plugin a 32 campioni (~5% di un core per plugin), peggior callback ~0.19 → ~0.49 ms. Su macOS 14.4+ il rack aspetta "dormendo" (`os_sync_wait_on_address`) dopo 20 µs; prima era ~+75%. Su macOS più vecchi gira a vuoto: costa di più.
+
+Da usare per i plugin che si sa essere fragili, non per tutti: costa margine. Non provato: plugin che usano MIDI (non passa), sidechain e bus extra (disattivati come sempre), editor dei plugin dal vivo, slice Intel.
+
 ## Concatenamento e gruppi di latenza
 - **Rack concatenati**: nel menu IN di un rack, sotto "From rack", scegli un altro rack come sorgente. Il rack riceve l'uscita dell'altro (dopo gain e mute). Con OUT: none il rack sorgente alimenta solo la catena. Il motore elabora i rack a **stadi** (prima i rack che leggono dalla scheda, poi quelli che leggono da altri rack, ognuno in parallelo), sempre **nello stesso callback, quindi senza latenza aggiunta**. Le catene circolari sono rifiutate.
 - **Gruppi di latenza** (come SuperRack): menu del rack → Latency group A-H. Ogni rack del gruppo viene ritardato fino alla latenza più alta del gruppo, compresa quella ereditata dai rack a monte, così restano allineati in fase. Il badge "LG A +x ms" mostra il ritardo applicato. Le latenze vengono ricontrollate due volte al secondo, perché un plugin può cambiarle.

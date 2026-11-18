@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <atomic>
 #include <map>
 
 namespace stagerack
@@ -36,6 +37,10 @@ public:
 
     /** Creates a plugin asynchronously; the callback always runs on the message thread. */
     void createPlugin (const juce::PluginDescription&, double sampleRate, int blockSize, Callback);
+
+    /** EXPERIMENTAL (setting "isolatePlugins"): plugins created from now on run in a child process
+        (sandbox::SandboxedPlugin). */
+    static inline std::atomic<bool> isolatePlugins { false };
 
     /** Finds a known plugin from a saved description (matching by uid/identifier). */
     std::optional<juce::PluginDescription> findKnown (const juce::PluginDescription&) const;
