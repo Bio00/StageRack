@@ -2,6 +2,11 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.11.1-beta — 2026-11-23
+
+- **Sessioni grandi molto più veloci**: con 128 rack aggiungere un bus o un rack non blocca più l'interfaccia per secondi (4.3 s → 26 ms), e ogni modifica passa da 1.4 s a meno di 20 ms. I rack esistenti non vengono più ricostruiti e i nomi dei canali della scheda sono letti una volta sola.
+- I rack che fanno il calcolo pesante (hop) in un callback vengono affidati ai core per primi: picchi un po' più bassi a 16 campioni con molte istanze.
+
 ## 0.11.0-beta — 2026-11-23
 
 ### StageRack su misura

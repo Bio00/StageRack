@@ -898,16 +898,38 @@ void MainComponent::syncRacks()
 
     if (! same)
     {
-        rackComponents.clear();
+        // keep the components of the racks that are still there (rebuilding all of them took
+        // seconds with 128 racks): only new racks get a new component
+        juce::OwnedArray<RackComponent> old;
+        old.swapWith (rackComponents);
 
         for (int i = 0; i < engine.getNumRacks(); ++i)
         {
-            auto* rc = rackComponents.add (new RackComponent (*session, *edit, engine.getRack (i), i));
+            auto& rack = engine.getRack (i);
+            RackComponent* rc = nullptr;
+
+            for (int j = 0; j < old.size(); ++j)
+                if (&old[j]->getRack() == &rack)
+                {
+                    rc = old.removeAndReturn (j);
+                    break;
+                }
+
+            if (rc != nullptr)
+            {
+                rackComponents.add (rc);
+                rc->setIndex (i);
+                rc->refresh();   // buses, routing menus may have changed
+                continue;
+            }
+
+            rc = rackComponents.add (new RackComponent (*session, *edit, rack, i));
             rc->setVertical (verticalLayout);
             rc->onResized = [this] { layoutRacks(); };
             rackContainer.addAndMakeVisible (rc);
         }
 
+        old.clear();   // removed racks
         layoutRacks();
     }
     else
@@ -943,6 +965,55 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
     sceneList->refresh();
     topBar->refresh();
     commands.commandStatusChanged();   // Undo/Redo and the ticks in the menu bar
+}
+
+void MainComponent::runUiBench()
+{
+    const int n = juce::SystemStats::getEnvironmentVariable ("STAGERACK_UI_BENCH", "128").getIntValue();
+    struct Step { const char* name; std::function<void()> fn; };
+    auto steps = std::make_shared<std::vector<Step>>();
+    steps->push_back ({ "add racks", [this, n] { session->addRacks (n, false); } });
+    steps->push_back ({ "add bus", [this] { session->addBus(); } });
+    steps->push_back ({ "add rack", [this] { session->addRacks (1, false); } });
+    steps->push_back ({ "markDirty", [this] { session->markDirty(); } });
+    steps->push_back ({ "undo", [this] { session->undo(); } });
+    steps->push_back ({ "add bus 2", [this] { session->addBus(); } });
+    auto index = std::make_shared<size_t> (0);
+    auto next = std::make_shared<std::function<void()>>();
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    *next = [safe, steps, index, next]
+    {
+        if (safe == nullptr)
+            return;
+
+        if (*index >= steps->size())
+        {
+            std::printf ("[ui-bench] done\n");
+            std::fflush (stdout);
+            std::_Exit (0);
+        }
+
+        auto& st = (*steps)[(*index)++];
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        st.fn();
+        const auto t1 = juce::Time::getMillisecondCounterHiRes();
+
+        juce::MessageManager::callAsync ([safe, next, t0, t1, name = st.name]
+        {
+            if (safe == nullptr)
+                return;
+            const auto t2 = juce::Time::getMillisecondCounterHiRes();
+            auto img = safe->createComponentSnapshot (safe->getLocalBounds(), true, 1.0f);   // full repaint
+            const auto t3 = juce::Time::getMillisecondCounterHiRes();
+            std::printf ("[ui-bench] %-10s racks %4d  action %7.1f ms  + async %7.1f ms  + paint %7.1f ms\n", name,
+                         safe->engine.getNumRacks(), t1 - t0, t2 - t1, t3 - t2);
+            std::fflush (stdout);
+            juce::Timer::callAfterDelay (300, [next] { (*next)(); });
+        });
+    };
+
+    (*next)();
 }
 
 void MainComponent::timerCallback()
@@ -992,6 +1063,12 @@ void MainComponent::timerCallback()
             dropoutLog->note ("session ready: counter restarted");
         }
         sessionSettling = settling;
+
+        if (! settling && ! uiBenchStarted && juce::SystemStats::getEnvironmentVariable ("STAGERACK_UI_BENCH", {}).isNotEmpty())
+        {
+            uiBenchStarted = true;
+            runUiBench();
+        }
     }
 
     engine.tempo.poll();   // audio taps / beat tracking (timestamps are exact: the timer's lag doesn't matter)

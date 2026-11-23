@@ -18,6 +18,7 @@ AudioEngine::AudioEngine()
     for (int i = 0; i < maxDeviceChannels; ++i)
         inputMap[(size_t) i] = outputMap[(size_t) i] = i;
 
+    orderedStage.reserve (1024);
     racks.reserve (1024);   // adding a rack under the lock never reallocates the vector
 }
 
@@ -952,6 +953,13 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // freeze the window; seen after a Dante device was reopened)
     deviceIoLatencySamples = device->getInputLatencyInSamples() + device->getOutputLatencyInSamples();
 
+    {
+        DeviceChannels c { device->getInputChannelNames(), device->getOutputChannelNames(),
+                           device->getActiveInputChannels(), device->getActiveOutputChannels() };
+        const std::lock_guard<std::mutex> l (channelsLock);
+        deviceChannels = std::move (c);
+    }
+
     setChannelMaps (device->getActiveInputChannels(), device->getInputChannelNames().size(),
                     device->getActiveOutputChannels(), device->getOutputChannelNames().size());
     prepare (device->getCurrentSampleRate(), device->getCurrentBufferSizeSamples(), device->getWorkgroup());
@@ -1109,6 +1117,20 @@ void AudioEngine::computeAutomixGains (bool anySolo) noexcept
     }
 }
 
+bool AudioEngine::hasHopNow (Rack& r, juce::uint64 index) noexcept
+{
+    for (int i = 0; i < Rack::maxSlots; ++i)
+    {
+        auto& s = r.getSlot (i);
+        const auto hop = s.hopCalls.load (std::memory_order_relaxed);
+        const auto phase = s.hopPhase.load (std::memory_order_relaxed);
+
+        if (hop > 1 && phase >= 0 && (int) (index % (juce::uint64) hop) == phase)
+            return true;
+    }
+    return false;
+}
+
 void AudioEngine::processRackTask (void* ctx, int index, int threadIndex)
 {
     const rt::HostScope host;
@@ -1211,9 +1233,30 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
                             f.src->soloFeeds = true;
     }
 
+    const bool hopFirst = hopFirstOrder.load (std::memory_order_relaxed);
+
     for (const auto& stageRacks : stages)
     {
         currentStage = &stageRacks;
+
+        if (hopFirst && stageRacks.size() > 1 && stageRacks.size() <= orderedStage.capacity())
+        {
+            orderedStage.clear();   // capacity kept: no allocation
+
+            for (auto* r : stageRacks)
+                if (hasHopNow (*r, callbackIndex))
+                    orderedStage.push_back (r);
+
+            if (! orderedStage.empty() && orderedStage.size() < stageRacks.size())
+            {
+                for (auto* r : stageRacks)
+                    if (! hasHopNow (*r, callbackIndex))
+                        orderedStage.push_back (r);
+
+                currentStage = &orderedStage;
+            }
+        }
+
         pool.run ((int) stageRacks.size(), &AudioEngine::processRackTask, this, parallelMode.load (std::memory_order_relaxed));
     }
 

@@ -1812,12 +1812,13 @@ void RackComponent::fillRoutingBoxes()
 
     juce::StringArray ins, outs;
 
-    if (auto* dev = session.getEngine().getDeviceManager().getCurrentAudioDevice())
+    if (session.getEngine().getDeviceManager().getCurrentAudioDevice() != nullptr)
     {
-        const auto activeIns = dev->getActiveInputChannels();
-        const auto activeOuts = dev->getActiveOutputChannels();
-        ins = dev->getInputChannelNames();
-        outs = dev->getOutputChannelNames();
+        auto ch = session.getEngine().getDeviceChannels();   // cached at device start: no CoreAudio query per rack
+        const auto activeIns = ch.activeIns;
+        const auto activeOuts = ch.activeOuts;
+        ins = std::move (ch.ins);
+        outs = std::move (ch.outs);
 
         // only channels that are enabled in the device setup
         for (int c = ins.size(); --c >= 0;)

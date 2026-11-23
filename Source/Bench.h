@@ -432,6 +432,7 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
         }
     } proxy (engine);
     engine.hopAlignEnabled = ! args.contains ("--noalign");
+    AudioEngine::hopFirstOrder = ! args.contains ("--no-hop-order");
 
     // --input <file> [startSec]: rack r hears the file's left channel from startSec + 37 s * r
     // (different moments of a real recording = different "microphones"). Default: noise.

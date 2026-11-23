@@ -28,6 +28,7 @@ class RackComponent final : public juce::Component,
 public:
     void collectMidiTargets (std::vector<MidiTargetHit>&) override;
     RackComponent (Session&, EditController&, Rack&, int index);
+    void setIndex (int i)   { if (i != index) { index = i; repaint(); } }
     ~RackComponent() override;
 
     Rack& getRack() noexcept        { return rack; }
@@ -74,7 +75,7 @@ private:
     Session& session;
     EditController& edit;
     Rack& rack;
-    const int index;
+    int index;
 
     juce::Label nameLabel, infoLabel;
     juce::ComboBox inputBox;

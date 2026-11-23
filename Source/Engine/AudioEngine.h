@@ -116,6 +116,10 @@ public:
     int hopsAdopted = 0;    // hops found moved by watchHops (tests, status)
     /** Racks in the order their hops should be placed: most series partners first. */
     std::vector<Rack*> alignmentOrder() const;
+    /** Channel names and enabled channels of the running device, read once when it starts
+        (asking CoreAudio per rack made adding a bus with 128 racks take seconds). */
+    struct DeviceChannels { juce::StringArray ins, outs; juce::BigInteger activeIns, activeOuts; };
+    DeviceChannels getDeviceChannels() const   { const std::lock_guard<std::mutex> l (channelsLock); return deviceChannels; }
     std::atomic<int> deviceIoLatencySamples { 0 };   // device input + output latency, read when the device starts
     bool logWatch = false;   // tests: print what watchHops decides
     int seriesRespreads = 0; // instances moved by watchHops off a phase shared with a series partner
@@ -175,6 +179,9 @@ public:
     double getCallbackLoad() const noexcept                  { return callbackLoad.load (std::memory_order_relaxed); }
     bool hasWorkgroup() const noexcept                       { return workgroupActive; }
     bool isRunningParallel() const noexcept                  { return parallelMode.load (std::memory_order_relaxed); }
+    /** Racks whose plugins do their hop in this callback are handed to the cores first
+        (a heavy rack picked up last makes the callback = light work + hop). */
+    static inline std::atomic<bool> hopFirstOrder { true };
     bool forceParallel = false;                              // disables the adaptive mode (benchmarks)
 
     /** Called on the message thread on MIDI program change (0-based) or the next/prev CCs. */
@@ -213,6 +220,10 @@ private:
     std::atomic<bool> routingEnabled { false };
     std::shared_ptr<int> aliveToken = std::make_shared<int> (0);   // delayed rebuilds check it
     const std::vector<Rack*>* currentStage = nullptr;
+    mutable std::mutex channelsLock;
+    DeviceChannels deviceChannels;
+    std::vector<Rack*> orderedStage;   // the stage with this callback's hops first (capacity reserved)
+    static bool hasHopNow (Rack& r, juce::uint64 index) noexcept;
     void rebuildGraph();
 
     // The graph is computed WITHOUT the lock (allocations, searches: tens of microseconds with

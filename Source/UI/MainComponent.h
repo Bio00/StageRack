@@ -63,6 +63,8 @@ private:
     void timerCallback() override;
     bool quitPrepared = false;
     void syncRacks();
+    void runUiBench();   // STAGERACK_UI_BENCH=<racks>: times UI actions, prints, quits
+    bool uiBenchStarted = false;
     void layoutRacks();
     void setVerticalLayout (bool);
     void setLightTheme (bool);
