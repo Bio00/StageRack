@@ -2,7 +2,7 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
-## 0.11.0-beta — 2026-11-22
+## 0.11.0-beta — 2026-11-23
 
 ### StageRack su misura
 - **SETTINGS → Features**: spegni le funzioni che non usi (Snapshot, Automixer, Tap tempo, Controller MIDI, Edit group, Bus e send). Spariscono da barra, menu e rack e smettono di agire; le sessioni conservano tutto e riaccendendo torna com'era.
