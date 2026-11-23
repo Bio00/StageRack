@@ -39,7 +39,12 @@ public:
         settings, once. After it only the components are left (nothing to save): the app
         then exits without tearing them down, so a plugin that damaged the heap cannot turn
         a clean quit into a crash report. */
-    void prepareToQuit();
+    /** Saves, closes windows and the device, destroys the plugins. With armQuitWatchdog (the
+        app's shutdown only) the process quits anyway if that teardown takes longer than
+        quitTimeoutSeconds: everything is saved before, so a plugin that never returns from its
+        destructor (seen: De-Feedback AU waiting on itself) cannot hang the quit. */
+    void prepareToQuit (bool armQuitWatchdog = false);
+    static constexpr int quitTimeoutSeconds = 5;
 
     void paint (juce::Graphics&) override;
     void resized() override;

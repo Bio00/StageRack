@@ -799,7 +799,7 @@ public:
             // session, which goes away), and a window in full screen would even be re-created
             // by JUCE on a look-and-feel change.
             mainWindow->removeFromDesktop();
-            mainWindow->getMain().prepareToQuit();
+            mainWindow->getMain().prepareToQuit (true);   // with the 5 s watchdog
         }
 
         update::runPendingInstall();   // "Install and restart": the installer waits for this process to exit

@@ -1016,6 +1016,38 @@ inline int runSelfTest()
             check (alive == 2 && s.getNumRetiredPlugins() == 2, "deleting a rack parks its plugins");
             s.newSession();
             check (alive == 0 && s.getNumRetiredPlugins() == 0, "closing the session frees the parked plugins");
+
+            // tidy: free what undo cannot bring back, keep at most maxParkedPlugins for undo
+            const auto quiet = Session::parkedQuietMs;
+            const auto maxParked = Session::maxParkedPlugins;
+            auto tidyAll = [&s] { int n = 0; while (s.tidyParkedPlugins()) ++n; return n; };
+
+            auto& t = s.addRack();
+            t.setPlugin (0, std::make_unique<Probe> (alive));
+            s.markDirty();
+            s.removePlugin (t, 0);                                     // an undo step holds it
+            s.retirePlugin (std::make_unique<Probe> (alive));          // like a re-spread leftover
+            check (tidyAll() == 0 && alive == 2, "tidy: nothing freed before the quiet time");
+            Session::parkedQuietMs = 0;
+            check (tidyAll() == 1 && alive == 1 && s.getNumRetiredPlugins() == 1, "tidy: leftover freed, the one undo can restore kept");
+            check (s.undo() && t.getPlugin (0) != nullptr && alive == 1, "tidy: undo still brings the kept instance back");
+
+            Session::maxParkedPlugins = 2;
+            for (int i = 0; i < 4; ++i)
+            {
+                auto& x = s.addRack();
+                x.setPlugin (0, std::make_unique<Probe> (alive));
+                s.markDirty();
+                s.removeRack (x);
+            }
+            tidyAll();
+            check (s.getNumRetiredPlugins() == 2 && alive == 3, "tidy: above the limit the oldest undo steps go and their instances are freed");
+            check (s.undo() && s.getNumRetiredPlugins() == 1 && alive == 3, "tidy: the newest deletion is still undoable (same instance back)");
+
+            Session::parkedQuietMs = quiet;
+            Session::maxParkedPlugins = maxParked;
+            s.newSession();
+            check (alive == 0, "tidy: session close frees the rest");
         }
 
         Autosave::setDirectoryForTests ({});

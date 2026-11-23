@@ -306,7 +306,8 @@ juce::String Session::getRespreadStatus() const
 {
     auto s = respreader->status();
     if (! retired.empty())
-        s << (s.isEmpty() ? "" : "  |  ") << (int) retired.size() << " old instance(s) parked, freed when the session closes";
+        s << (s.isEmpty() ? "" : "  |  ") << (int) retired.size() << " old instance(s) parked (kept for undo, freed after "
+          << (int) (parkedQuietMs / 1000) << " s when not needed, at most " << maxParkedPlugins << ")";
     return s;
 }
 
@@ -786,7 +787,10 @@ void Session::retirePlugin (std::unique_ptr<juce::AudioPluginInstance> p)
     if (closingSession)
         p.reset();
     else
+    {
+        retiredAt[p.get()] = juce::Time::getMillisecondCounter();
         retired.push_back (std::move (p));
+    }
 }
 
 void Session::releaseRetiredPlugins()
@@ -794,6 +798,7 @@ void Session::releaseRetiredPlugins()
     // destroyed one at a time, newest first (same order as a normal teardown)
     while (! retired.empty())
         retired.pop_back();
+    retiredAt.clear();
 }
 
 //==============================================================================
@@ -1681,6 +1686,7 @@ juce::AudioPluginInstance* Session::takeInstance (juce::int64 token, std::map<ju
         {
             auto* p = it->release();
             retired.erase (it);
+            retiredAt.erase (p);
             return p;
         }
 
@@ -1842,6 +1848,102 @@ void Session::applyUndoState (const UndoState& u)
     dirty = true;
     undoCurrent = captureUndoState();
     notify();
+}
+
+//==============================================================================
+std::set<juce::int64> Session::tokensInUndoHistory() const
+{
+    std::set<juce::int64> tokens;
+    auto add = [&tokens] (const UndoState& u)
+    {
+        for (const auto& rt : u.tree)
+            for (const auto& st : rt)
+                if (st.hasProperty ("token"))
+                    tokens.insert ((juce::int64) st["token"]);
+    };
+
+    for (const auto& u : undoStack) add (u);
+    for (const auto& u : redoStack) add (u);
+    add (undoCurrent);
+    return tokens;
+}
+
+/** Writes the re-spread replacements into the steps themselves (old token -> its twin), so
+    the map can go. Tokens are addresses: once an instance is freed, a new one may get the
+    same address, and a leftover "old -> twin" entry would then redirect the newcomer. */
+void Session::resolveReplacedTokens()
+{
+    if (replacedTokens.empty())
+        return;
+
+    auto resolve = [this] (juce::int64 t)
+    {
+        for (int g = 0; g < 64; ++g)
+            if (auto it = replacedTokens.find (t); it != replacedTokens.end()) t = it->second; else break;
+        return t;
+    };
+
+    auto rewrite = [&resolve] (UndoState& u)
+    {
+        for (auto rt : u.tree)
+            for (auto st : rt)
+                if (st.hasProperty ("token"))
+                    if (const auto t = (juce::int64) st["token"], r = resolve (t); r != t)
+                        st.setProperty ("token", r, nullptr);
+    };
+
+    for (auto& u : undoStack) rewrite (u);
+    for (auto& u : redoStack) rewrite (u);
+    rewrite (undoCurrent);
+    replacedTokens.clear();
+}
+
+bool Session::tidyParkedPlugins()
+{
+    if (retired.empty() || closingSession || applyingUndo || *pendingLoads > 0 || isRespreading())
+        return false;
+
+    resolveReplacedTokens();
+    auto inHistory = tokensInUndoHistory();
+
+    auto countHeld = [&] { int n = 0; for (auto& p : retired) n += inHistory.count (tokenOf (p.get())) > 0 ? 1 : 0; return n; };
+
+    // too many kept for undo: the oldest steps go first (like any limited undo)
+    if (countHeld() > maxParkedPlugins)
+    {
+        while (countHeld() > maxParkedPlugins && (! undoStack.empty() || ! redoStack.empty()))
+        {
+            if (! undoStack.empty()) undoStack.erase (undoStack.begin());
+            else                     redoStack.erase (redoStack.begin());   // the farthest redo
+            inHistory = tokensInUndoHistory();
+        }
+    }
+
+    // free the oldest instance that has rested long enough and no step needs
+    const auto now = juce::Time::getMillisecondCounter();
+    auto victim = retired.end();
+    juce::uint32 oldestAge = 0;
+
+    for (auto it = retired.begin(); it != retired.end(); ++it)
+    {
+        const auto at = retiredAt.find (it->get());
+        const auto age = at != retiredAt.end() ? now - at->second : parkedQuietMs;
+
+        if (age >= parkedQuietMs && inHistory.count (tokenOf (it->get())) == 0 && age >= oldestAge)
+        {
+            victim = it;
+            oldestAge = age;
+        }
+    }
+
+    if (victim == retired.end())
+        return false;
+
+    auto p = std::move (*victim);
+    retired.erase (victim);
+    retiredAt.erase (p.get());
+    p.reset();   // message thread, parked for seconds: never processed since, its helpers idle
+    return true;
 }
 
 } // namespace stagerack

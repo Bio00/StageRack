@@ -1,6 +1,7 @@
 #include "Updater.h"
 #include "../UI/ChangelogWindow.h"
 #include <unistd.h>
+#include <mutex>
 
 namespace stagerack::update
 {
@@ -412,7 +413,14 @@ void clearPendingInstall()                        { pendingInstall() = nullptr; 
 
 void runPendingInstall()
 {
-    if (auto f = std::exchange (pendingInstall(), nullptr))
+    // the quit watchdog may call this from its own thread while the message thread does too
+    static std::mutex lock;
+    std::function<void()> f;
+    {
+        const std::lock_guard<std::mutex> l (lock);
+        f = std::exchange (pendingInstall(), nullptr);
+    }
+    if (f)
         f();
 }
 

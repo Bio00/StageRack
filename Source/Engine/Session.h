@@ -2,6 +2,8 @@
 
 #include "AudioEngine.h"
 #include "../Plugins/PluginManager.h"
+#include <map>
+#include <set>
 
 namespace stagerack
 {
@@ -105,6 +107,16 @@ public:
     void retirePlugin (std::unique_ptr<juce::AudioPluginInstance>);
     void releaseRetiredPlugins();
     int getNumRetiredPlugins() const noexcept { return (int) retired.size(); }
+
+    /** Keeps the parked instances few (call from the message thread a few times per second).
+        A parked instance is freed once it has rested parkedQuietMs (its threads are idle by
+        then) and no undo/redo step can bring it back: the re-spread leftovers, for instance.
+        Above maxParkedPlugins the oldest undo steps are dropped until the instances they hold
+        can go. One instance per call, never while plugins load, a re-spread runs or undo
+        applies. Returns true if one was freed. */
+    bool tidyParkedPlugins();
+    static inline int maxParkedPlugins = 16;            // not const: the tests lower them
+    static inline juce::uint32 parkedQuietMs = 10000;
 
     /** Called when a live re-spread replaced an instance by its twin (before the old one is
         deleted), so an open editor can move to the new instance. */
@@ -258,6 +270,9 @@ private:
     std::unique_ptr<LiveRespreader> respreader;
     double watchQuietUntilMs = 0;   // hop watch paused during / just after a live re-spread
     std::vector<std::unique_ptr<juce::AudioPluginInstance>> retired;   // see retirePlugin()
+    std::map<const juce::AudioPluginInstance*, juce::uint32> retiredAt;   // when it was parked
+    std::set<juce::int64> tokensInUndoHistory() const;
+    void resolveReplacedTokens();
     bool closingSession = false;
 };
 

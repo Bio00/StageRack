@@ -14,6 +14,8 @@
 #include "../Update/Changelog.h"
 #include "ChangelogWindow.h"
 #include "../Engine/CoreAudioProbe.h"
+#include <thread>
+#include <cstdio>
 
 namespace stagerack
 {
@@ -646,7 +648,7 @@ MainComponent::~MainComponent()
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
 }
 
-void MainComponent::prepareToQuit()
+void MainComponent::prepareToQuit (bool armQuitWatchdog)
 {
     if (quitPrepared)
         return;
@@ -686,6 +688,20 @@ void MainComponent::prepareToQuit()
     }
 
     pluginManager.saveAll();   // before any plugin is destroyed: a crash after this loses nothing
+
+    if (armQuitWatchdog)
+    {
+        // Only teardown is left (device close, plugin destructors). If it never returns, quit
+        // anyway: nothing is lost, and the user does not have to force quit.
+        std::thread ([]
+        {
+            std::this_thread::sleep_for (std::chrono::seconds (quitTimeoutSeconds));
+            std::fprintf (stderr, "StageRack: teardown took more than %d s (a plugin or the audio device did not return), quitting anyway\n", quitTimeoutSeconds);
+            update::runPendingInstall();
+            std::fflush (nullptr);
+            std::_Exit (0);
+        }).detach();
+    }
 
     rackComponents.clear();
     if (audioReady)
@@ -1040,6 +1056,10 @@ void MainComponent::timerCallback()
         engine.updateLatencyCompensation();
         session->watchHops();
     }
+
+    // parked instances (re-spread leftovers, removed plugins): freed when undo no longer needs them
+    if (latencyCheckCounter % 6 == 0)
+        session->tidyParkedPlugins();
 
     // dropouts of the audio thread -> dropouts.log (with what the Mac was doing then)
     dropoutLog->poll ([this] (int id) { auto* r = engine.findRack (id); return r != nullptr ? r->name : juce::String (id); },
