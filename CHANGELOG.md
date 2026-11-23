@@ -2,6 +2,11 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.11.3-beta — 2026-11-23
+
+- **Le istanze di plugin tolte vengono liberate da sole**: quando togli o sostituisci un plugin, l'istanza resta "parcheggiata" per l'undo e ora viene distrutta dopo 10 secondi se nessun passo di undo la usa (al massimo 16 parcheggiate: oltre, si perdono i passi di undo più vecchi). Prima restavano tutte fino alla chiusura della sessione e pesavano su memoria, thread e interfaccia (visto: 87 De-Feedback parcheggiati).
+- **Chiusura che non si blocca più**: se un plugin si blocca mentre viene chiuso (successo con De-Feedback AU), dopo 5 secondi StageRack esce comunque, dopo aver salvato. Un aggiornamento in attesa viene installato lo stesso.
+
 ## 0.11.2-beta — 2026-11-23
 
 - **Il "core tenuto sveglio" si accende solo se serve**: ogni plugin parte senza e lo ottiene alla prima attesa lunga misurata (ricordato per tipo di plugin). **De-Feedback in versione AU non ne ha bisogno**: con 1 istanza usa circa 6 volte meno CPU del VST3, con 4 circa la metà, stessi callback persi (0). Consiglio: usare De-Feedback AU.
