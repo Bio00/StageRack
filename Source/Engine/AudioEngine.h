@@ -1,4 +1,5 @@
 #pragma once
+#include <set>
 
 #include <array>
 
@@ -113,6 +114,7 @@ public:
         on later, un-bypassed, state recalled) is adopted; if it now shares a callback while a
         freer phase exists, its (rackId, slot) is returned for a live re-spread. */
     std::vector<std::pair<int, int>> watchHops();
+    std::set<juce::String> wakeNeedTypes;   // message thread: plugin types that needed CoreWakeAssist
     int hopsAdopted = 0;    // hops found moved by watchHops (tests, status)
     /** Racks in the order their hops should be placed: most series partners first. */
     std::vector<Rack*> alignmentOrder() const;
@@ -275,6 +277,7 @@ private:
 
     CoreWakeAssist wakeAssist { 4 };
     juce::uint64 lastHopCallback = 0;   // audio thread only
+    juce::uint64 assistCoversUntil = 0; // audio thread only: last callback the armed assist is for
     std::atomic<int> wakeAssistMode { 0 };
 
 public:

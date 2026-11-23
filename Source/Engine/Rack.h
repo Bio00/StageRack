@@ -1,4 +1,5 @@
 #pragma once
+#include "../Plugins/AuWorkgroup.h"
 
 #include <JuceHeader.h>
 #include <array>
@@ -72,6 +73,12 @@ public:
         // EverClean computes the whole hop on the calling thread (~0). The core wake assist
         // is only useful for the first kind.
         std::atomic<float> hopWaitMs { -1.0f };
+        // Does this instance need CoreWakeAssist? It starts without; an unassisted hop after an
+        // idle gap that waits long for the plugin's helper turns it on for good (De-Feedback
+        // VST3 waits ~0.34 ms; its AU version and EverClean ~0.02, where the assist burnt a
+        // core for nothing). Remembered per plugin type (AudioEngine::watchHops).
+        std::atomic<int> wakeNeed { 0 };
+        float wakeProbeMs = 0.0f;   // audio thread: worst unassisted wait seen
         // message thread only (watchHops)
         const void* watchPlugin = nullptr;
         juce::uint64 watchSince = 0;
@@ -82,6 +89,7 @@ public:
         // The fields below are written by the message thread under processLock, then only
         // by the audio thread until handoverDone; afterwards `twin` holds the retired instance.
         std::unique_ptr<juce::AudioPluginInstance> twin;
+        auwg::Context au, auTwin;   // AU render context observers of plugin / twin (workgroup)
         int twinHopCalls = 0, twinHopPhase = -1;
         int twinWarmSamples = 0, twinFadeSamples = 0, twinPos = 0;
         juce::uint64 twinFirstCallback = 0;        // callback the twin's alignment assumed it starts in
@@ -96,6 +104,8 @@ public:
 
     /** Index of the device callback being processed (set by the engine before each callback). */
     juce::uint64 callbackIndex = 0;
+    static inline std::atomic<bool> wakeProbeNow { false };
+    static constexpr float wakeNeedMs = 0.08f;   // unassisted wait above this = the assist helps   // set by the engine: this callback's hops are unassisted after an idle gap
 
     //==============================================================================
     // Message thread

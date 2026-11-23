@@ -225,6 +225,18 @@ std::vector<std::pair<int, int>> AudioEngine::watchHops()
                 continue;
             }
 
+            // CoreWakeAssist need, per plugin type: a new instance of a type that needed it
+            // starts with it (no slow first hop)
+            if (s.hopCalls.load() > 1)
+            {
+                const auto id = s.plugin->getPluginDescription().createIdentifierString();
+
+                if (s.wakeNeed.load() == 1)
+                    wakeNeedTypes.insert (id);
+                else if (wakeNeedTypes.count (id) > 0)
+                    s.wakeNeed = 1;
+            }
+
             if (s.watchPlugin != s.plugin.get() || now < s.watchSince)
             {
                 // new instance (or the device restarted): its log starts now
@@ -892,10 +904,14 @@ void AudioEngine::setWakeAssistMode (int mode)
 
 void AudioEngine::armWakeAssist (juce::uint64 index) noexcept
 {
+    Rack::wakeProbeNow.store (false, std::memory_order_relaxed);
+
     if (wakeAssistMode.load (std::memory_order_relaxed) != 0)
         return;
 
-    // Soonest scheduled hop (0 = in this callback).
+    // Soonest scheduled hop (0 = in this callback): of every plugin (they keep the cores
+    // awake) and of the ones the assist is for.
+    int soonestAny = std::numeric_limits<int>::max();
     int soonest = std::numeric_limits<int>::max();
 
     for (auto& r : racks)
@@ -906,22 +922,38 @@ void AudioEngine::armWakeAssist (juce::uint64 index) noexcept
             const auto hop = s.hopCalls.load (std::memory_order_relaxed);
             const auto phase = s.hopPhase.load (std::memory_order_relaxed);
 
+            if (hop <= 1 || phase < 0)
+                continue;
+
+            const auto d = (phase - (int) (index % (juce::uint64) hop) + hop) % hop;
+            soonestAny = juce::jmin (soonestAny, d);
+
             // plugins that compute their hop on the calling thread (measured: no waiting)
-            // gain nothing from a woken core, e.g. EverClean
+            // gain nothing from a woken core, e.g. EverClean; the others are tried without
+            // the assist first (wakeNeed, see Rack::Slot)
             const auto wait = s.hopWaitMs.load (std::memory_order_relaxed);
 
-            if (hop > 1 && phase >= 0 && (wait < 0.0f || wait > 0.005f))
-                soonest = juce::jmin (soonest, (phase - (int) (index % (juce::uint64) hop) + hop) % hop);
+            if ((wait < 0.0f || wait > 0.005f) && s.wakeNeed.load (std::memory_order_relaxed) == 1)
+                soonest = juce::jmin (soonest, d);
         }
+    }
+
+    if (soonestAny == std::numeric_limits<int>::max())
+        return;
+
+    const auto periodMs = 1000.0 * blockSize / juce::jmax (1.0, sampleRate);
+
+    if (soonestAny == 0)
+    {
+        // a hop now after an idle gap, not covered by the assist: a valid probe
+        const auto gapMs = (double) (index - lastHopCallback) * periodMs;
+        Rack::wakeProbeNow.store (gapMs > 0.8 && index > assistCoversUntil, std::memory_order_relaxed);
+        lastHopCallback = index;
     }
 
     if (soonest == std::numeric_limits<int>::max())
         return;
 
-    if (soonest == 0)
-        lastHopCallback = index;
-
-    const auto periodMs = 1000.0 * blockSize / juce::jmax (1.0, sampleRate);
     const auto leadCallbacks = juce::jmax (1, (int) std::ceil (wakeLeadMs.load (std::memory_order_relaxed) / periodMs));
 
     // Only when the cores would have gone idle before that hop: with dense hops (many
@@ -932,6 +964,7 @@ void AudioEngine::armWakeAssist (juce::uint64 index) noexcept
     {
         const auto period = juce::Time::secondsToHighResolutionTicks (blockSize / juce::jmax (1.0, sampleRate));
         wakeAssist.armUntil (juce::Time::getHighResolutionTicks() + period * (soonest + 1));
+        assistCoversUntil = index + (juce::uint64) soonest;
     }
 }
 
@@ -952,6 +985,10 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // read once here: the UI must not ask CoreAudio on every paint (a busy coreaudiod would
     // freeze the window; seen after a Dante device was reopened)
     deviceIoLatencySamples = device->getInputLatencyInSamples() + device->getOutputLatencyInSamples();
+
+    // the IO workgroup, handed to the Audio Units that ask for it (see AuWorkgroup.h);
+    // callbacks are stopped here, so the old one can go
+    auwg::releaseWorkgroup (auwg::current.exchange (auwg::copyDeviceWorkgroup (device->getName())));
 
     {
         DeviceChannels c { device->getInputChannelNames(), device->getOutputChannelNames(),

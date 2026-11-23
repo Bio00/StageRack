@@ -134,6 +134,7 @@ std::unique_ptr<juce::AudioPluginInstance> Rack::setPlugin (int slot, std::uniqu
         p->setPlayHead (&playHead);
 
     Slot temp;
+    temp.au = auwg::Context (p.get());
     temp.plugin = std::move (p);
     updateSlotChannels (temp);
 
@@ -142,6 +143,7 @@ std::unique_ptr<juce::AudioPluginInstance> Rack::setPlugin (int slot, std::uniqu
         auto& s = slots[(size_t) slot];
         dropTwin (s);
         std::swap (s.plugin, temp.plugin);
+        s.au.swap (temp.au);
         s.numChannels = temp.numChannels;
         s.mono = temp.mono;
         s.bypassed = false;
@@ -151,6 +153,8 @@ std::unique_ptr<juce::AudioPluginInstance> Rack::setPlugin (int slot, std::uniqu
         s.heavyCount = 0;
         s.lightMs = 1.0e9f;
         s.hopWaitMs = -1.0f;
+        s.wakeNeed = 0;
+        s.wakeProbeMs = 0.0f;
         s.shownParams.clearQuick();
         s.paramsChosen = false;
         s.viewMode = defaultViewMode;
@@ -175,6 +179,7 @@ void Rack::moveSlot (int from, int to)
     dropTwin (a);   // a hand-over is short: simply restart it later if needed
     dropTwin (b);
     std::swap (a.plugin, b.plugin);
+    a.au.swap (b.au);
     std::swap (a.numChannels, b.numChannels);
     std::swap (a.mono, b.mono);
     std::swap (a.shownParams, b.shownParams);
@@ -187,6 +192,11 @@ void Rack::moveSlot (int from, int to)
     a.hopPhase = b.hopPhase.load();
     b.hopCalls = ah;
     b.hopPhase = ap;
+
+    const int an = a.wakeNeed;
+    a.wakeNeed = b.wakeNeed.load();
+    b.wakeNeed = an;
+    std::swap (a.wakeProbeMs, b.wakeProbeMs);
 
     const bool ab = a.bypassed.load();
     a.bypassed = b.bypassed.load();
@@ -209,6 +219,7 @@ bool Rack::beginHandover (int slot, std::unique_ptr<juce::AudioPluginInstance>& 
     if (! juce::isPositiveAndBelow (slot, maxSlots) || twin == nullptr || isAsync())
         return false;
 
+    auwg::Context twinAu (twin.get());   // reads an AU property: not under the lock
     const juce::SpinLock::ScopedLockType sl (processLock);
     auto& s = slots[(size_t) slot];
 
@@ -225,6 +236,7 @@ bool Rack::beginHandover (int slot, std::unique_ptr<juce::AudioPluginInstance>& 
     s.twinPos = 0;
     s.twinFirstCallback = firstCallback;
     s.handoverDone = false;
+    s.auTwin.swap (twinAu);   // the old one is released after the lock
     s.twin = std::move (twin);
     return true;
 }
@@ -449,6 +461,13 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
         const juce::ScopedLock cl (inst.getCallbackLock());
         const rt::PluginScope inPlugin;   // what the plugin allocates is not ours
 
+        if (auwg::enabled.load (std::memory_order_relaxed))
+        {
+            auto* wg = auwg::current.load (std::memory_order_relaxed);
+            s.au.notify (inst, wg);       // each checks it belongs to `inst`
+            s.auTwin.notify (inst, wg);
+        }
+
         if (inst.isSuspended())
         {
             // leave the signal untouched
@@ -511,6 +530,15 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
                 const auto wait = juce::jmax (0.0f, ms - (float) (threadCpuMs() - cpu0));
                 const auto old = s.hopWaitMs.load (std::memory_order_relaxed);
                 s.hopWaitMs.store (old < 0.0f ? wait : old + 0.05f * (wait - old), std::memory_order_relaxed);
+
+                // unassisted hop after an idle gap: a long wait means the assist helps (for good)
+                if (wakeProbeNow.load (std::memory_order_relaxed))
+                {
+                    s.wakeProbeMs = juce::jmax (s.wakeProbeMs, wait);
+
+                    if (wait > wakeNeedMs)
+                        s.wakeNeed.store (1, std::memory_order_relaxed);
+                }
             }
 
             const auto n = s.heavyCount.load (std::memory_order_relaxed);
@@ -554,6 +582,7 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
         {
             // the twin is now the slot's plugin; the old instance waits in `twin` for collectHandover()
             std::swap (s.plugin, s.twin);
+            s.au.swap (s.auTwin);
             s.hopCalls.store (s.twinHopCalls, std::memory_order_relaxed);
             s.hopPhase.store (s.twinHopPhase, std::memory_order_relaxed);
             s.handoverDone.store (true, std::memory_order_release);

@@ -433,6 +433,7 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
     } proxy (engine);
     engine.hopAlignEnabled = ! args.contains ("--noalign");
     AudioEngine::hopFirstOrder = ! args.contains ("--no-hop-order");
+    auwg::enabled = ! args.contains ("--no-au-workgroup");
 
     // --input <file> [startSec]: rack r hears the file's left channel from startSec + 37 s * r
     // (different moments of a real recording = different "microphones"). Default: noise.
@@ -551,7 +552,7 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
             }
 
         std::cout << "      rack 1 hop wait (wall - CPU, smoothed): " << juce::String (engine.getRack (0).getSlot (0).hopWaitMs.load(), 3)
-                  << " ms -> wake assist " << (engine.getRack (0).getSlot (0).hopWaitMs.load() > 0.005f ? "used" : "skipped") << std::endl;
+                  << " ms, probe " << juce::String (engine.getRack (0).getSlot (0).wakeProbeMs, 3) << " ms -> wake need " << engine.getRack (0).getSlot (0).wakeNeed.load() << std::endl;
         std::cout << "  " << label << " wake-assist=" << (engine.getWakeAssistMode() == 0 ? "auto" : engine.getWakeAssistMode() == 1 ? "always" : "off") << " workgroup=" << (proxy.workgroup ? "yes" : "no")
                   << "  callbacks " << (n - skip) << "  avg " << juce::String (sum / juce::jmax (1, n - skip), 3)
                   << " ms  worst " << juce::String (worst, 3) << " ms  over budget (" << juce::String (proxy.period, 2)

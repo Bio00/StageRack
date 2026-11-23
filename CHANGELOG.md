@@ -2,6 +2,11 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.11.2-beta — 2026-11-23
+
+- **Il "core tenuto sveglio" si accende solo se serve**: ogni plugin parte senza e lo ottiene alla prima attesa lunga misurata (ricordato per tipo di plugin). **De-Feedback in versione AU non ne ha bisogno**: con 1 istanza usa circa 6 volte meno CPU del VST3, con 4 circa la metà, stessi callback persi (0). Consiglio: usare De-Feedback AU.
+- Gli Audio Unit ricevono il workgroup audio della scheda (API di Apple che JUCE non usa).
+
 ## 0.11.1-beta — 2026-11-23
 
 - **Sessioni grandi molto più veloci**: con 128 rack aggiungere un bus o un rack non blocca più l'interfaccia per secondi (4.3 s → 26 ms), e ogni modifica passa da 1.4 s a meno di 20 ms. I rack esistenti non vengono più ricostruiti e i nomi dei canali della scheda sono letti una volta sola.
