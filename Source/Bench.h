@@ -56,9 +56,8 @@ inline int runBenchmark (const juce::StringArray& args)
     const auto id = args[idx + 2];
     const int numRacks = juce::jmax (1, args[idx + 3].getIntValue() > 0 ? args[idx + 3].getIntValue() : 8);
     const int bs = args[idx + 4].getIntValue() > 0 ? args[idx + 4].getIntValue() : 128;
-    const int asyncBlock = args[idx + 5].getIntValue();   // optional: run every rack async at this block
-    if (args[idx + 6].isNotEmpty()) Rack::asyncSafetyMs = (float) args[idx + 6].getDoubleValue();   // ms
-    const int perRack = args[idx + 7].getIntValue() > 0 ? args[idx + 7].getIntValue() : 2;
+    const auto perRackIdx = args.indexOf ("--per-rack");
+    const int perRack = perRackIdx > 0 && args[perRackIdx + 1].getIntValue() > 0 ? args[perRackIdx + 1].getIntValue() : 2;
     const double sr = 48000.0;
 
     juce::AudioPluginFormatManager fm;
@@ -83,7 +82,6 @@ inline int runBenchmark (const juce::StringArray& args)
             juce::MemoryBlock mb;
             p->getStateInformation (mb);
             std::cout << "STATE (" << mb.getSize() << " bytes): " << mb.toString().substring (0, 1500) << std::endl;
-            juce::File ("/private/tmp/claude-501/-Users-bio--claude-spares-spare-lbu4Gv/72f1c0e3-1d8c-4250-b834-c694f6f26316/scratchpad/defeedback_state.bin").replaceWithData (mb.getData(), mb.getSize());
             for (auto* prm : p->getParameters())
                 std::cout << "  [" << prm->getParameterIndex() << "] " << prm->getName (64) << " = "
                           << prm->getCurrentValueAsText() << "  (" << prm->getValue() << ")" << std::endl;
@@ -94,7 +92,7 @@ inline int runBenchmark (const juce::StringArray& args)
     std::cout << "Plugin: " << found[0]->name << " (" << found[0]->pluginFormatName << "), "
               << numRacks << " racks x " << perRack << " plugins, " << bs << " samples @ 48 kHz" << std::endl;
 
-    auto run = [&] (int workers, bool force, int async) -> double
+    auto run = [&] (int workers, bool force) -> double
     {
         AudioEngine engine;
         engine.presetWorkerThreads (workers);
@@ -117,9 +115,6 @@ inline int runBenchmark (const juce::StringArray& args)
 
         engine.prepare (sr, bs, {});
 
-        for (int r = 0; r < engine.getNumRacks(); ++r)
-            engine.getRack (r).setAsyncFactor (async / bs);
-
         juce::AudioBuffer<float> in (2, bs), out (2, bs);
         juce::Random rnd;
         for (int c = 0; c < 2; ++c)
@@ -134,7 +129,7 @@ inline int runBenchmark (const juce::StringArray& args)
         trace.reserve ((size_t) (warmup + blocks));
 
         // Paced like a real device (one callback per buffer period) on a realtime thread,
-        // like the CoreAudio IO thread, so async threads get real time.
+        // like the CoreAudio IO thread.
         struct DeviceThread final : juce::Thread
         {
             explicit DeviceThread (std::function<void()> f) : juce::Thread ("bench io"), fn (std::move (f)) {}
@@ -152,13 +147,6 @@ inline int runBenchmark (const juce::StringArray& args)
                 const auto t0 = juce::Time::getHighResolutionTicks();
                 engine.audioDeviceIOCallbackWithContext (in.getArrayOfReadPointers(), 2, out.getArrayOfWritePointers(), 2, bs, ctx);
                 const auto ms = juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - t0) * 1000.0;
-
-                if (b == warmup)
-                    for (int r = 0; r < engine.getNumRacks(); ++r)
-                    {
-                    engine.getRack (r).xruns = 0;
-                    engine.getRack (r).peakLoad.readAndReset();
-                }
 
                 trace.push_back ((float) ms);
 
@@ -179,41 +167,27 @@ inline int runBenchmark (const juce::StringArray& args)
         while (io.isThreadRunning())
             juce::Thread::sleep (20);
 
-        int xr = 0, latency = 0;
-        float peak = 0;
-        for (int r = 0; r < engine.getNumRacks(); ++r)
-        {
-            peak = juce::jmax (peak, engine.getRack (r).peakLoad.readAndReset());
-            xr += engine.getRack (r).xruns.load();
-            latency = juce::jmax (latency, engine.getRack (r).getAddedLatencySamples());
-        }
 
         const auto avg = total / blocks;
         const auto budget = 1000.0 * bs / sr;
- std::cout << (async > 0 ? "  [async " + juce::String (async) + "] " : (force ? "  [forced] " : "  [adaptive] ")) << "threads=" << engine.getPool().getNumThreads()
+ std::cout << (force ? "  [forced] " : "  [adaptive] ") << "threads=" << engine.getPool().getNumThreads()
                   << "  avg " << juce::String (avg, 3) << " ms (" << juce::String (100.0 * avg / budget, 1) << "% of buffer)"
-                  << "  worst " << juce::String (worst, 3) << " ms  late callbacks " << late 
-                  << (async > 0 ? "  async xruns " + juce::String (xr) + "  +lat " + juce::String (1000.0 * latency / sr, 2) + " ms  chain peak " + juce::String (peak * 100.0f, 0) + "% of block" : juce::String())
-                  << std::endl;
+                  << "  worst " << juce::String (worst, 3) << " ms  late callbacks " << late << std::endl;
 
         if (args.contains ("--trace"))
         {
             juce::String csv;
             for (auto v : trace) csv << juce::String (v, 4) << "\n";
-            juce::File ("/private/tmp/claude-501/-Users-bio--claude-spares-spare-lbu4Gv/72f1c0e3-1d8c-4250-b834-c694f6f26316/scratchpad/trace_" + juce::String (workers) + (force ? "f" : "") + ".csv").replaceWithText (csv);
+            juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("trace_" + juce::String (workers) + (force ? "f" : "") + ".csv").replaceWithText (csv);
         }
 
         engine.audioDeviceStopped();
         return avg;
     };
 
-    const bool asyncOnly = args.contains ("--async-only");
-    const auto single = asyncOnly ? 0.0 : run (0, false, 0);
-    const auto adaptive = asyncOnly ? 0.0 : run (-1, false, 0);
-    const auto forced = asyncOnly ? 0.0 : run (-1, true, 0);
-
-    if (asyncBlock > 0)
-        run (-1, false, asyncBlock);
+    const auto single = run (0, false);
+    const auto adaptive = run (-1, false);
+    const auto forced = run (-1, true);
 
     if (single > 0 && adaptive > 0 && forced > 0)
         std::cout << "Speed-up avg: adaptive x" << juce::String (single / adaptive, 2)

@@ -78,7 +78,6 @@ public:
     }
 
     /** A new device / session: the next event writes a fresh header line. */
-    void newContext() { headerWritten = false; }
 
 private:
     AudioEngine& engine;

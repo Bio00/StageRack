@@ -39,7 +39,6 @@ MainComponent::MainComponent()
     engine.prevSceneCC = settings.getIntValue ("prevSceneCC", 81);
     engine.osc.setEnabled (settings.getBoolValue ("oscIn", false) && features::has (features::tempo),   // OSC drives the tempos
                            settings.getIntValue ("oscPort", OscInput::defaultPort));
-    Rack::asyncSafetyMs = (float) settings.getDoubleValue ("asyncSafetyMs", 3.0);
     engine.hopAlignEnabled = settings.getBoolValue ("hopAlign", true);
     engine.logWatch = std::getenv ("STAGERACK_WATCHLOG") != nullptr;   // diagnostics: print the hop watch decisions
     if (engine.logWatch) std::setvbuf (stdout, nullptr, _IOLBF, 0);

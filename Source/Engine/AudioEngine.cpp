@@ -212,9 +212,6 @@ std::vector<std::pair<int, int>> AudioEngine::watchHops()
 
     for (auto& r : racks)
     {
-        if (r->isAsync())
-            continue;
-
         for (int i = 0; i < Rack::maxSlots; ++i)
         {
             auto& s = r->getSlot (i);
@@ -826,7 +823,7 @@ void AudioEngine::alignAllRacks()
     // Racks in series with many others first (see alignmentOrder)
     for (auto* r : alignmentOrder())
     {
-        if (r->isAsync() || ! hopAlignEnabled)
+        if (! hopAlignEnabled)
             continue;
 
         for (int i = 0; i < Rack::maxSlots; ++i)
@@ -854,7 +851,7 @@ void AudioEngine::alignNewPlugin (juce::AudioPluginInstance& p, Rack& rack, int&
     hopCalls = 0;
     hopPhase = -1;
 
-    if (rack.isAsync() || ! hopAlignEnabled)
+    if (! hopAlignEnabled)
         return;
 
     // The plugin goes live in the next callback (measured: a twin started exactly at
@@ -874,7 +871,7 @@ void AudioEngine::alignNewPlugin (juce::AudioPluginInstance& p, Rack& rack, int&
 
 void AudioEngine::realignRack (Rack& rack)
 {
-    if (rack.isAsync() || ! hopAlignEnabled)
+    if (! hopAlignEnabled)
         return;
 
     rack.withChainLocked ([&]

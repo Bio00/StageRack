@@ -50,7 +50,6 @@ class BeatTracker
 public:
     void addOnset (double timeSec);
     void clear()                                   { onsets.clear(); }
-    int getNumOnsets() const noexcept              { return (int) onsets.size(); }
 
     struct Result { double bpm = 0.0, beatTime = 0.0, confidence = 0.0; };
     /** false = not enough onsets. centreBpm: the search covers centre / sqrt 2 .. centre * sqrt 2. */

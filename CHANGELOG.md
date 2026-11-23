@@ -172,7 +172,7 @@ Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note
 | De-Feedback | 0 callback persi fino a 16 istanze | 0 persi fino a 12 istanze |
 | EverClean | 0 callback persi fino a 16 istanze, **15-85% di CPU in meno** | 1-2 istanze al limite (qualche click), da 4 in su no |
 
-EverClean calcola ogni blocco in un solo thread (~0.3 ms): a 16 campioni (budget 0.33 ms) non ci sta. **Con EverClean usa 32 campioni o più.** Tabelle complete nel README.
+EverClean calcola ogni blocco in un solo thread (~0.3 ms): a 16 campioni (budget 0.33 ms) non ci sta. **Con EverClean usa 32 campioni o più.** Tabelle complete in docs/MISURE.md.
 
 ## 0.5.2-beta — 2026-11-16
 
@@ -214,7 +214,7 @@ Scena parlata di 41 s con 4 voci, rientri tra microfoni e rumore di sala, fatta 
 | Miglioramento parlato / (rientri + rumore) | 12,3 dB | 11,5 dB | 11,5 dB |
 | Primi 20 ms di ogni frase | −4,2 dB | −5,3 dB | −7,1 dB |
 
-Il nostro in modalità Share si comporta come il Dugan vero (che anche lui divide il guadagno quando parlano in due). Le voci di prova sono sintetiche: **provalo con i tuoi microfoni prima di uno spettacolo**. Tabella completa nel README.
+Il nostro in modalità Share si comporta come il Dugan vero (che anche lui divide il guadagno quando parlano in due). Le voci di prova sono sintetiche: **provalo con i tuoi microfoni prima di uno spettacolo**. Tabella completa nel manuale (docs/MANUALE.md).
 
 ## 0.4.0-beta — 2026-11-11
 

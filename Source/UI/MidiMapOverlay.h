@@ -32,7 +32,6 @@ public:
     bool keyPressed (const juce::KeyPress&) override;
 
     /** For tests and renders: the targets found on screen now. */
-    int getNumTargetsShown() const noexcept        { return (int) shown.size(); }
 
 private:
     void timerCallback() override;

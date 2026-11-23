@@ -183,7 +183,6 @@ public:
         without the app (CLI tools) the loaded one is written back unchanged. */
     std::function<juce::ValueTree()> captureAppSettings;
     std::function<void (const juce::ValueTree&)> applyAppSettings;
-    juce::ValueTree getLoadedAppSettings() const    { return loadedAppSettings; }
     /** Plugins of a loaded session still being created (their state isn't in toTree() yet). */
     int getPendingLoads() const noexcept            { return *pendingLoads; }
     /** Changes whenever the document is replaced or saved (new, open, save). */

@@ -28,7 +28,6 @@ public:
 
     /** Buses changed (or appeared/disappeared): true if the number of sends changed. */
     bool update();
-    int getNumSends() const noexcept                { return (int) letters.size(); }
     bool wantsToBeShown() const noexcept            { return ! letters.empty(); }
 
     /** Height all the sends need at this width (knobs or bars), given the room set with setFitHeight. */

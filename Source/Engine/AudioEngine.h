@@ -180,7 +180,6 @@ public:
 
     double getCallbackLoad() const noexcept                  { return callbackLoad.load (std::memory_order_relaxed); }
     bool hasWorkgroup() const noexcept                       { return workgroupActive; }
-    bool isRunningParallel() const noexcept                  { return parallelMode.load (std::memory_order_relaxed); }
     /** Racks whose plugins do their hop in this callback are handed to the cores first
         (a heavy rack picked up last makes the callback = light work + hop). */
     static inline std::atomic<bool> hopFirstOrder { true };

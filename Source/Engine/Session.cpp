@@ -145,7 +145,7 @@ private:
             ++done;
 
             auto* rack = session.engine.findRack (current.rackId);
-            if (rack == nullptr || rack->isAsync() || rack->getPlugin (current.slot) != current.original
+            if (rack == nullptr || rack->getPlugin (current.slot) != current.original
                 || rack->isHandingOver (current.slot))
                 continue;
 

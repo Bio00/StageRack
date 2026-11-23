@@ -27,15 +27,8 @@ struct PeakMeter
 /**
     A rack: a stereo bus with up to `maxSlots` plugins in series.
     Racks are independent of each other, which is what lets the engine
-    process them in parallel on separate cores.
-
-    Two processing modes:
-    - sync:  the chain runs inside the device callback, at the device block size.
-    - async: the chain runs on its own realtime thread at a larger internal block
-             (factor x device block, e.g. 64 while the device runs at 32). Heavy frame-based plugins
-             (De-Feedback, denoisers...) then spread their CPU spikes over several
-             device callbacks instead of having to finish within one tiny buffer.
-             Cost: asyncBlock + safety + 2 x deviceBlock samples of extra latency, on this rack only.
+    process them in parallel on separate cores. The chain always runs inside the
+    device callback, at the device block size (zero added latency).
 */
 class Rack
 {
@@ -123,7 +116,7 @@ public:
     /** Starts a seamless hand-over of `slot` to `twin` (same plugin, same state, prepared for
         this rack): the twin processes the live input in parallel for `warmSamples`, then the
         output crossfades to it over `fadeSamples`. No gap, no latency change. Returns false
-        (and gives the twin back through `twin`) if the slot is empty, async or busy. */
+        (and gives the twin back through `twin`) if the slot is empty or busy. */
     bool beginHandover (int slot, std::unique_ptr<juce::AudioPluginInstance>& twin, int hopCalls, int hopPhase, juce::uint64 firstCallback,
                         int warmSamples, int fadeSamples);
     bool isHandingOver (int slot) const noexcept;
@@ -146,26 +139,15 @@ public:
     Slot& getSlot (int slot) noexcept               { return slots[(size_t) slot]; }
     int getNumPlugins() const noexcept;
 
-    /** Plugin latency + the extra buffering of async mode (this rack only, no upstream/compensation). */
+    /** Plugin latency (this rack only, no upstream/compensation). */
     int getLatencySamples() const noexcept;
 
     void prepare (double sampleRate, int deviceBlockSize);
     void release();
 
-    /** 0 = sync (device callback). 2/4/8 = async thread with an internal block of
-        factor x device block, so async is always engaged whatever the device buffer. */
-    void setAsyncFactor (int factor);
-    int getAsyncFactor() const noexcept             { return asyncFactor; }
-    int getDeviceBlockSize() const noexcept         { return deviceBlockSize; }
-    bool isAsync() const noexcept                   { return asyncActive.load (std::memory_order_acquire); }
-    int getAddedLatencySamples() const noexcept;
-
-    /** Extra async buffering (ms) that absorbs a plugin's occasional CPU spikes
-        (global; applied on the next prepare / async change). */
-    static inline std::atomic<float> asyncSafetyMs { 3.0f };
 
     double getSampleRate() const noexcept           { return sampleRate; }
-    /** Block size the plugins are prepared with (device block, or the async block). */
+    /** Block size the plugins are prepared with (= device block). */
     int getBlockSize() const noexcept               { return pluginBlockSize; }
 
     //==============================================================================
@@ -301,10 +283,9 @@ public:
     std::atomic<float> cpuLoad { 0.0f };     // chain time / block duration (0..1+)
     PeakMeter peakLoad;                      // max cpuLoad since last read
     std::atomic<float> callbackMs { 0.0f };  // time spent on the device callback
-    std::atomic<int> lastThread { 0 };       // -1 = own async thread
+    std::atomic<int> lastThread { 0 };       // worker index the chain last ran on
     std::atomic<int> lastCpu { -1 };         // CPU core the chain last ran on (0-3 = E-cores on M4 Pro)
     std::atomic<float> cpuTimeMs { 0.0f };   // thread CPU time used by the chain (vs cpuMs = wall time)
-    std::atomic<int> xruns { 0 };            // async buffer under/overruns
 
     //==============================================================================
     // Audio thread
@@ -316,19 +297,12 @@ public:
     bool producedAudio() const noexcept             { return hasAudio; }
 
 private:
-    class AsyncWorker;
-
     void runChain (juce::AudioBuffer<float>&, int numSamples) noexcept;   // processLock held
     void processSlot (Slot&, juce::AudioBuffer<float>&, int numSamples) noexcept;
-    void processAsyncBlock() noexcept;                                    // async thread
-    void exchangeAsync (int numSamples) noexcept;                         // device thread
-    void stopAsync();
-    void startAsyncIfNeeded();
 
     const int id;
     std::array<Slot, maxSlots> slots;
     juce::SpinLock processLock;     // plugin chain structure
-    juce::SpinLock asyncLock;       // async FIFOs vs. mode changes
 
     juce::AudioBuffer<float> buffer;       // device-side rack bus
     juce::AudioBuffer<float> preBuffer;    // pre-fader copy, only while a pre-fader send is on
@@ -369,7 +343,7 @@ private:
 
 public:
     /** Automix detector tuning (global; applied on the next prepare). Tuned against speech
-        with --automix-probe, see README. */
+        with --automix-probe, see docs/MANUALE.md (Automixer). */
     static inline std::atomic<float> automixAvgMs { 5.0f }, automixHoldMs { 40.0f }, automixReleaseDbPerSec { 100.0f },
                                      automixHighPassHz { 200.0f }, automixLowPassHz { 4000.0f };
 private:
@@ -381,7 +355,6 @@ private:
     };
     TempoPlayHead playHead { *this };
 
-    juce::AudioBuffer<float> workBuffer;   // async thread chain buffer
     juce::AudioBuffer<float> twinBuffer;   // hand-over: the twin's copy of the slot input
     std::vector<std::unique_ptr<juce::AudioPluginInstance>> discarded;   // message thread, see takeDiscarded()
     void dropTwin (Slot&);                 // processLock held
@@ -390,14 +363,6 @@ private:
     double sampleRate = 48000.0;
     int deviceBlockSize = 512, pluginBlockSize = 512;
     bool hasAudio = false;
-
-    // async
-    int asyncFactor = 0;
-    std::atomic<bool> asyncActive { false };
-    int asyncPrefill = 0;
-    juce::AbstractFifo inFifo { 2 }, outFifo { 2 };
-    juce::AudioBuffer<float> inRing, outRing;
-    std::unique_ptr<AsyncWorker> asyncWorker;
 
     JUCE_DECLARE_NON_COPYABLE (Rack)
 };

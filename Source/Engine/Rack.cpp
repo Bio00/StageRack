@@ -11,44 +11,6 @@ namespace stagerack
 {
 
 //==============================================================================
-/** Realtime thread that runs an async rack's chain whenever a full internal block is buffered. */
-class Rack::AsyncWorker final : public juce::Thread
-{
-public:
-    explicit AsyncWorker (Rack& r) : juce::Thread ("StageRack async rack " + juce::String (r.getId())), rack (r) {}
-
-    void wake() noexcept
-    {
-        signal.fetch_add (1, std::memory_order_release);
-        signal.notify_one();
-    }
-
-    void requestQuit()
-    {
-        signalThreadShouldExit();
-        wake();
-    }
-
-    void run() override
-    {
-        uint32_t seen = signal.load (std::memory_order_acquire);
-
-        while (! threadShouldExit())
-        {
-            while (rack.inFifo.getNumReady() >= rack.pluginBlockSize && ! threadShouldExit())
-                rack.processAsyncBlock();
-
-            signal.wait (seen, std::memory_order_acquire);
-            seen = signal.load (std::memory_order_acquire);
-        }
-    }
-
-private:
-    Rack& rack;
-    std::atomic<uint32_t> signal { 0 };
-};
-
-//==============================================================================
 Rack::Rack (int uniqueId) : id (uniqueId)
 {
     delayLine.setSize (2, maxCompensation);
@@ -61,7 +23,6 @@ Rack::Rack (int uniqueId) : id (uniqueId)
 
 Rack::~Rack()
 {
-    stopAsync();
     release();
 }
 
@@ -216,7 +177,7 @@ void Rack::dropTwin (Slot& s)
 bool Rack::beginHandover (int slot, std::unique_ptr<juce::AudioPluginInstance>& twin, int hopCalls, int hopPhase, juce::uint64 firstCallback,
                           int warmSamples, int fadeSamples)
 {
-    if (! juce::isPositiveAndBelow (slot, maxSlots) || twin == nullptr || isAsync())
+    if (! juce::isPositiveAndBelow (slot, maxSlots) || twin == nullptr)
         return false;
 
     auwg::Context twinAu (twin.get());   // reads an AU property: not under the lock
@@ -293,14 +254,9 @@ int Rack::getNumPlugins() const noexcept
     return n;
 }
 
-int Rack::getAddedLatencySamples() const noexcept
-{
-    return isAsync() ? asyncPrefill : 0;
-}
-
 int Rack::getLatencySamples() const noexcept
 {
-    int total = getAddedLatencySamples();
+    int total = 0;
     for (auto& s : slots)
         if (s.plugin != nullptr)
             total += s.plugin->getLatencySamples();
@@ -310,14 +266,12 @@ int Rack::getLatencySamples() const noexcept
 //==============================================================================
 void Rack::prepare (double sr, int devBlock)
 {
-    stopAsync();
-
     {
         const juce::SpinLock::ScopedLockType sl (processLock);
 
         sampleRate = sr;
         deviceBlockSize = devBlock;
-        pluginBlockSize = asyncFactor >= 2 ? devBlock * asyncFactor : devBlock;
+        pluginBlockSize = devBlock;
 
         buffer.setSize (maxPluginChannels, juce::jmax (deviceBlockSize, pluginBlockSize), false, true, false);
         buffer.clear();
@@ -327,8 +281,6 @@ void Rack::prepare (double sr, int devBlock)
         tempoTapBuffer.clear();
         tempoTapValid = {};
         preValid = false;
-        workBuffer.setSize (maxPluginChannels, pluginBlockSize, false, true, false);
-        workBuffer.clear();
         twinBuffer.setSize (maxPluginChannels, juce::jmax (deviceBlockSize, pluginBlockSize), false, true, false);
         twinBuffer.clear();
         midi.ensureSize (2048);
@@ -360,77 +312,15 @@ void Rack::prepare (double sr, int devBlock)
             }
         }
     }
-
-    startAsyncIfNeeded();
 }
 
 void Rack::release()
 {
-    stopAsync();
-
     const juce::SpinLock::ScopedLockType sl (processLock);
 
     for (auto& s : slots)
         if (s.plugin != nullptr)
             s.plugin->releaseResources();
-}
-
-void Rack::setAsyncFactor (int factor)
-{
-    asyncFactor = factor >= 2 ? juce::jmin (factor, 16) : 0;
-    prepare (sampleRate, deviceBlockSize);
-}
-
-void Rack::stopAsync()
-{
-    asyncActive.store (false, std::memory_order_release);
-
-    {
-        // wait for the device thread to leave its async section
-        const juce::SpinLock::ScopedLockType al (asyncLock);
-    }
-
-    if (asyncWorker != nullptr)
-    {
-        asyncWorker->requestQuit();
-        asyncWorker->stopThread (2000);
-        asyncWorker = nullptr;
-    }
-}
-
-void Rack::startAsyncIfNeeded()
-{
-    if (asyncFactor < 2)
-        return;
-
-    const int b = pluginBlockSize, d = deviceBlockSize;
-    asyncPrefill = b + 2 * d + juce::roundToInt (juce::jlimit (0.0f, 50.0f, asyncSafetyMs.load()) * sampleRate / 1000.0);
-    const int capacity = 2 * asyncPrefill + 4 * b + 4 * d + 64;
-
-    {
-        const juce::SpinLock::ScopedLockType al (asyncLock);
-
-        inFifo.setTotalSize (capacity);
-        outFifo.setTotalSize (capacity);
-        inRing.setSize (2, capacity, false, true, false);
-        outRing.setSize (2, capacity, false, true, false);
-        inRing.clear();
-        outRing.clear();
-
-        // Pre-roll of silence: gives the async thread a whole internal block of time
-        // per block, whatever the alignment with the device callbacks.
-        int s1, n1, s2, n2;
-        outFifo.prepareToWrite (asyncPrefill, s1, n1, s2, n2);
-        outFifo.finishedWrite (n1 + n2);
-        xruns = 0;
-    }
-
-    asyncWorker = std::make_unique<AsyncWorker> (*this);
-
-    if (! asyncWorker->startRealtimeThread (WorkerPool::realtimeOptionsFor (b, sampleRate)))
-        asyncWorker->startThread (juce::Thread::Priority::highest);
-
-    asyncActive.store (true, std::memory_order_release);
 }
 
 static double threadCpuMs() noexcept
@@ -511,45 +401,41 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
 
     // on the expected hop call, also measure the thread's own CPU time (see hopWaitMs)
     const auto hop = s.hopCalls.load (std::memory_order_relaxed);
-    const bool hopCall = hop > 1 && (int) (callbackIndex % (juce::uint64) hop) == s.hopPhase.load (std::memory_order_relaxed)
-                         && ! isAsync();
+    const bool hopCall = hop > 1 && (int) (callbackIndex % (juce::uint64) hop) == s.hopPhase.load (std::memory_order_relaxed);
     const auto cpu0 = hopCall ? threadCpuMs() : 0.0;
     const auto tp = juce::Time::getHighResolutionTicks();
 
     run (p, view);
 
-    if (! isAsync())
+    // hop watch: heavy = well above an ordinary call (same rule as HopAligner)
+    const auto ms = (float) (juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - tp) * 1000.0);
+
+    if (ms > juce::jmax (s.lightMs * 4.0f, s.lightMs + 0.03f))
     {
-        // hop watch: heavy = well above an ordinary call (same rule as HopAligner)
-        const auto ms = (float) (juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - tp) * 1000.0);
-
-        if (ms > juce::jmax (s.lightMs * 4.0f, s.lightMs + 0.03f))
+        if (hopCall)
         {
-            if (hopCall)
+            const auto wait = juce::jmax (0.0f, ms - (float) (threadCpuMs() - cpu0));
+            const auto old = s.hopWaitMs.load (std::memory_order_relaxed);
+            s.hopWaitMs.store (old < 0.0f ? wait : old + 0.05f * (wait - old), std::memory_order_relaxed);
+
+            // unassisted hop after an idle gap: a long wait means the assist helps (for good)
+            if (wakeProbeNow.load (std::memory_order_relaxed))
             {
-                const auto wait = juce::jmax (0.0f, ms - (float) (threadCpuMs() - cpu0));
-                const auto old = s.hopWaitMs.load (std::memory_order_relaxed);
-                s.hopWaitMs.store (old < 0.0f ? wait : old + 0.05f * (wait - old), std::memory_order_relaxed);
+                s.wakeProbeMs = juce::jmax (s.wakeProbeMs, wait);
 
-                // unassisted hop after an idle gap: a long wait means the assist helps (for good)
-                if (wakeProbeNow.load (std::memory_order_relaxed))
-                {
-                    s.wakeProbeMs = juce::jmax (s.wakeProbeMs, wait);
-
-                    if (wait > wakeNeedMs)
-                        s.wakeNeed.store (1, std::memory_order_relaxed);
-                }
+                if (wait > wakeNeedMs)
+                    s.wakeNeed.store (1, std::memory_order_relaxed);
             }
+        }
 
-            const auto n = s.heavyCount.load (std::memory_order_relaxed);
-            s.heavyAt[n % Slot::heavyRing].store (callbackIndex, std::memory_order_relaxed);
-            s.heavyCount.store (n + 1, std::memory_order_release);
-            s.lightMs += 0.0005f * (ms - s.lightMs);
-        }
-        else
-        {
-            s.lightMs = ms < s.lightMs ? ms : s.lightMs + 0.002f * (ms - s.lightMs);
-        }
+        const auto n = s.heavyCount.load (std::memory_order_relaxed);
+        s.heavyAt[n % Slot::heavyRing].store (callbackIndex, std::memory_order_relaxed);
+        s.heavyCount.store (n + 1, std::memory_order_release);
+        s.lightMs += 0.0005f * (ms - s.lightMs);
+    }
+    else
+    {
+        s.lightMs = ms < s.lightMs ? ms : s.lightMs + 0.002f * (ms - s.lightMs);
     }
 
     if (handover)
@@ -618,84 +504,6 @@ void Rack::runChain (juce::AudioBuffer<float>& buf, int numSamples) noexcept
     const auto load = (float) (ms / (1000.0 * numSamples / sampleRate));
     cpuLoad.store (load, std::memory_order_relaxed);
     peakLoad.push (load);
-}
-
-void Rack::processAsyncBlock() noexcept
-{
-    const juce::ScopedNoDenormals noDenormals;
-    const int b = pluginBlockSize;
-    int s1, n1, s2, n2;
-
-    inFifo.prepareToRead (b, s1, n1, s2, n2);
-    for (int ch = 0; ch < 2; ++ch)
-    {
-        workBuffer.copyFrom (ch, 0, inRing, ch, s1, n1);
-        if (n2 > 0) workBuffer.copyFrom (ch, n1, inRing, ch, s2, n2);
-    }
-    inFifo.finishedRead (n1 + n2);
-
-    {
-        const juce::SpinLock::ScopedLockType sl (processLock);
-        runChain (workBuffer, b);
-    }
-
-    lastThread.store (-1, std::memory_order_relaxed);
-
-    if (outFifo.getFreeSpace() < b)
-    {
-        xruns.fetch_add (1, std::memory_order_relaxed);
-        return;
-    }
-
-    outFifo.prepareToWrite (b, s1, n1, s2, n2);
-    for (int ch = 0; ch < 2; ++ch)
-    {
-        outRing.copyFrom (ch, s1, workBuffer, ch, 0, n1);
-        if (n2 > 0) outRing.copyFrom (ch, s2, workBuffer, ch, n1, n2);
-    }
-    outFifo.finishedWrite (n1 + n2);
-}
-
-void Rack::exchangeAsync (int numSamples) noexcept
-{
-    int s1, n1, s2, n2;
-
-    // device -> async thread
-    if (inFifo.getFreeSpace() >= numSamples)
-    {
-        inFifo.prepareToWrite (numSamples, s1, n1, s2, n2);
-        for (int ch = 0; ch < 2; ++ch)
-        {
-            inRing.copyFrom (ch, s1, buffer, ch, 0, n1);
-            if (n2 > 0) inRing.copyFrom (ch, s2, buffer, ch, n1, n2);
-        }
-        inFifo.finishedWrite (n1 + n2);
-    }
-    else
-    {
-        xruns.fetch_add (1, std::memory_order_relaxed);
-    }
-
-    if (inFifo.getNumReady() >= pluginBlockSize)
-        asyncWorker->wake();
-
-    // async thread -> device
-    const int ready = juce::jmin (numSamples, outFifo.getNumReady());
-
-    outFifo.prepareToRead (ready, s1, n1, s2, n2);
-    for (int ch = 0; ch < 2; ++ch)
-    {
-        buffer.copyFrom (ch, 0, outRing, ch, s1, n1);
-        if (n2 > 0) buffer.copyFrom (ch, n1, outRing, ch, s2, n2);
-    }
-    outFifo.finishedRead (n1 + n2);
-
-    if (ready < numSamples)
-    {
-        buffer.clear (0, ready, numSamples - ready);
-        buffer.clear (1, ready, numSamples - ready);
-        xruns.fetch_add (1, std::memory_order_relaxed);
-    }
 }
 
 void Rack::applyCompensation (int numSamples) noexcept
@@ -1027,19 +835,6 @@ void Rack::process (const float* const* deviceInputs, int numDeviceInputs, int n
         hasAudio = true;
     };
 
-    if (asyncActive.load (std::memory_order_acquire))
-    {
-        const juce::SpinLock::ScopedTryLockType al (asyncLock);
-
-        // re-check: a mode change may have started while we were taking the lock
-        if (! al.isLocked() || ! asyncActive.load (std::memory_order_acquire) || numSamples > buffer.getNumSamples())
-            return;
-
-        readInput();
-        exchangeAsync (numSamples);
-        applyGainAndMeter();
-    }
-    else
     {
         // the message thread holds this only to swap a plugin / twin in or out
         const bool locked = rt::enterWithin (processLock, 40.0);
