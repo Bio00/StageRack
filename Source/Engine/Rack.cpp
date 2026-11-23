@@ -116,6 +116,12 @@ std::unique_ptr<juce::AudioPluginInstance> Rack::setPlugin (int slot, std::uniqu
         s.hopWaitMs = -1.0f;
         s.wakeNeed = 0;
         s.wakeProbeMs = 0.0f;
+        s.bypassState = Slot::bpActive;
+        s.wet = 1.0f;
+        s.drainLeft = s.drainQuiet = 0;
+        s.owed = 0;
+        s.ringPos = 0;
+        s.bypassRing.clear();
         s.shownParams.clearQuick();
         s.paramsChosen = false;
         s.viewMode = defaultViewMode;
@@ -162,6 +168,16 @@ void Rack::moveSlot (int from, int to)
     const bool ab = a.bypassed.load();
     a.bypassed = b.bypassed.load();
     b.bypassed = ab;
+
+    const int abs = a.bypassState;
+    a.bypassState = b.bypassState.load();
+    b.bypassState = abs;
+    std::swap (a.wet, b.wet);
+    std::swap (a.drainLeft, b.drainLeft);
+    std::swap (a.drainQuiet, b.drainQuiet);
+    std::swap (a.owed, b.owed);
+    std::swap (a.bypassRing, b.bypassRing);
+    std::swap (a.ringPos, b.ringPos);
 }
 
 //==============================================================================
@@ -283,6 +299,8 @@ void Rack::prepare (double sr, int devBlock)
         preValid = false;
         twinBuffer.setSize (maxPluginChannels, juce::jmax (deviceBlockSize, pluginBlockSize), false, true, false);
         twinBuffer.clear();
+        dryBuffer.setSize (maxPluginChannels, juce::jmax (deviceBlockSize, pluginBlockSize), false, true, false);
+        dryBuffer.clear();
         midi.ensureSize (2048);
         gain.reset (sr, 0.02);
         gain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (gainDb.load()));
@@ -310,6 +328,11 @@ void Rack::prepare (double sr, int devBlock)
                 s.hopCalls = 0;   // prepareToPlay reset its frame phase: the engine re-aligns
                 s.hopPhase = -1;
             }
+
+            s.owed = 0;   // calls counted against the old phase
+            s.bypassRing.setSize (2, Slot::bypassRingSize, false, true, false);
+            s.bypassRing.clear();
+            s.ringPos = 0;
         }
     }
 }
@@ -331,6 +354,155 @@ static double threadCpuMs() noexcept
 }
 
 //==============================================================================
+void Rack::callPlugin (Slot& s, juce::AudioPluginInstance& inst, juce::AudioBuffer<float>& b, bool bypassed) noexcept
+{
+    midi.clear();
+    const juce::ScopedLock cl (inst.getCallbackLock());
+    const rt::PluginScope inPlugin;   // what the plugin allocates is not ours
+
+    if (auwg::enabled.load (std::memory_order_relaxed))
+    {
+        auto* wg = auwg::current.load (std::memory_order_relaxed);
+        s.au.notify (inst, wg);       // each checks it belongs to `inst`
+        s.auTwin.notify (inst, wg);
+    }
+
+    if (inst.isSuspended())
+    {
+        // leave the signal untouched
+    }
+    else if (bypassed)
+    {
+        inst.processBlockBypassed (b, midi);
+    }
+    else
+    {
+        inst.processBlock (b, midi);
+    }
+}
+
+void Rack::readDelayedDry (const Slot& s, juce::AudioBuffer<float>& dest, int numSamples, int latency) noexcept
+{
+    // the ring already holds this callback's input (processSlot), ringPos is past it
+    constexpr int mask = Slot::bypassRingSize - 1;
+    const int start = s.ringPos - numSamples - latency;
+
+    for (int ch = 0; ch < dest.getNumChannels(); ++ch)
+    {
+        const auto* r = s.bypassRing.getReadPointer (juce::jmin (ch, s.bypassRing.getNumChannels() - 1));
+        auto* d = dest.getWritePointer (ch);
+
+        for (int i = 0; i < numSamples; ++i)
+            d[i] = r[(start + i) & mask];
+    }
+}
+
+void Rack::processBypassTransition (Slot& s, juce::AudioBuffer<float>& view, int numSamples,
+                                    bool trueBypass, bool bypassedNow, int latency) noexcept
+{
+    // Bypass on:  crossfade to dry (10 ms) -> drain: silence in until its output stays quiet
+    //             (reverb/delay tails die out inside, so nothing stale comes back) -> idle,
+    //             not called at all.
+    // Bypass off: if it was idle, first catch up the calls it missed (modulo its hop, one extra
+    //             silent call per callback, dry still heard) so its hop stays on the phase the
+    //             spread gave it; then crossfade back in.
+    auto& p = *s.plugin;
+    const int numCh = view.getNumChannels();
+    juce::AudioBuffer<float> scratch (dryBuffer.getArrayOfWritePointers(), numCh, numSamples);
+
+    if (trueBypass && s.wet <= 0.0f)
+    {
+        if (s.drainLeft > 0)
+        {
+            scratch.clear();
+            callPlugin (s, p, scratch, false);
+
+            float peak = 0.0f;
+            for (int ch = 0; ch < numCh; ++ch)
+                peak = juce::jmax (peak, scratch.getMagnitude (ch, 0, numSamples));
+
+            s.drainQuiet = peak < 1.0e-5f ? s.drainQuiet + numSamples : 0;   // -100 dBFS
+            s.drainLeft -= numSamples;
+
+            if (s.drainQuiet >= (int) (sampleRate * 0.3))
+                s.drainLeft = 0;
+        }
+        else
+        {
+            ++s.owed;
+            s.bypassState.store (Slot::bpIdle, std::memory_order_relaxed);
+        }
+
+        if (latency > 0)
+            readDelayedDry (s, view, numSamples, latency);   // dry, as late as the plugin would be
+        return;   // dry: the signal is untouched
+    }
+
+    s.bypassState.store (Slot::bpTransition, std::memory_order_relaxed);
+
+    if (! trueBypass && s.wet <= 0.0f && s.owed > 0)
+    {
+        const auto hop = s.hopCalls.load (std::memory_order_relaxed);
+        const auto debt = hop > 1 ? (int) (s.owed % hop) : 0;
+
+        if (debt > 0)
+        {
+            scratch.clear();
+            callPlugin (s, p, scratch, bypassedNow);            // the missed call, on silence
+
+            for (int ch = 0; ch < numCh; ++ch)
+                scratch.copyFrom (ch, 0, view, ch, 0, numSamples);
+            callPlugin (s, p, scratch, bypassedNow);            // this callback's call, not heard yet
+
+            if (latency > 0)
+                readDelayedDry (s, view, numSamples, latency);
+            s.owed = debt - 1;
+            return;
+        }
+
+        s.owed = 0;
+    }
+
+    s.drainLeft = s.drainQuiet = 0;
+
+    if (latency > 0)
+        readDelayedDry (s, scratch, numSamples, latency);   // lined up with the plugin's output
+    else
+        for (int ch = 0; ch < numCh; ++ch)
+            scratch.copyFrom (ch, 0, view, ch, 0, numSamples);
+
+    callPlugin (s, p, view, bypassedNow && ! trueBypass);
+
+    // equal-gain crossfade (dry and processed are highly correlated)
+    const float step = (trueBypass ? -1.0f : 1.0f) / (float) juce::jmax (1.0, sampleRate * 0.01);
+    float w = s.wet;
+
+    for (int ch = 0; ch < numCh; ++ch)
+    {
+        auto* d = view.getWritePointer (ch);
+        const auto* dry = scratch.getReadPointer (ch);
+        w = s.wet;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            w = juce::jlimit (0.0f, 1.0f, w + step);
+            d[i] = dry[i] + w * (d[i] - dry[i]);
+        }
+    }
+
+    s.wet = w;
+
+    if (s.wet <= 0.0f)
+    {
+        s.drainLeft = (int) (sampleRate * 10.0);   // noisy plugins (analog models) never go quiet
+        s.drainQuiet = 0;
+    }
+    else if (s.wet >= 1.0f)
+    {
+        s.bypassState.store (Slot::bpActive, std::memory_order_relaxed);
+    }
+}
+
 void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) noexcept
 {
     auto& p = *s.plugin;
@@ -344,33 +516,52 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
     const int viewChannels = s.mono ? 1 : n;
     juce::AudioBuffer<float> view (buf.getArrayOfWritePointers(), viewChannels, numSamples);
     const bool bypassedNow = s.bypassed.load (std::memory_order_relaxed);
+    auto run = [&] (juce::AudioPluginInstance& inst, juce::AudioBuffer<float>& b) { callPlugin (s, inst, b, bypassedNow); };
 
-    auto run = [&] (juce::AudioPluginInstance& inst, juce::AudioBuffer<float>& b)
+    // True bypass (see Slot::bypassState). Plugins with latency keep their own bypass, which
+    // delays the dry signal as the latency compensation expects; so does a slot handing over.
+    int latency = p.getLatencySamples();
+
+    if (latency > 0)
     {
-        midi.clear();
-        const juce::ScopedLock cl (inst.getCallbackLock());
-        const rt::PluginScope inPlugin;   // what the plugin allocates is not ours
+        if (latency + numSamples < Slot::bypassRingSize && viewChannels <= s.bypassRing.getNumChannels()
+            && s.bypassRing.getNumSamples() == Slot::bypassRingSize)
+        {
+            constexpr int mask = Slot::bypassRingSize - 1;
 
-        if (auwg::enabled.load (std::memory_order_relaxed))
-        {
-            auto* wg = auwg::current.load (std::memory_order_relaxed);
-            s.au.notify (inst, wg);       // each checks it belongs to `inst`
-            s.auTwin.notify (inst, wg);
-        }
+            for (int ch = 0; ch < s.bypassRing.getNumChannels(); ++ch)
+            {
+                const auto* x = view.getReadPointer (juce::jmin (ch, viewChannels - 1));
+                auto* r = s.bypassRing.getWritePointer (ch);
 
-        if (inst.isSuspended())
-        {
-            // leave the signal untouched
-        }
-        else if (bypassedNow)
-        {
-            inst.processBlockBypassed (b, midi);
+                for (int i = 0; i < numSamples; ++i)
+                    r[(s.ringPos + i) & mask] = x[i];
+            }
+
+            s.ringPos = (s.ringPos + numSamples) & mask;
         }
         else
         {
-            inst.processBlock (b, midi);
+            latency = -1;   // no room to delay the dry signal: the plugin's own bypass
         }
-    };
+    }
+
+    const bool trueBypass = bypassedNow && latency >= 0 && s.twin == nullptr;
+
+    if ((trueBypass || s.wet < 1.0f) && numSamples <= dryBuffer.getNumSamples() && latency >= 0)
+    {
+        processBypassTransition (s, view, numSamples, trueBypass, bypassedNow, latency);
+
+        if (s.mono)
+            buf.copyFrom (1, 0, buf, 0, 0, numSamples);
+
+        s.cpuMs.store ((float) (juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - t0) * 1000.0),
+                       std::memory_order_relaxed);
+        return;
+    }
+
+    if (s.bypassState.load (std::memory_order_relaxed) != Slot::bpActive)
+        s.bypassState.store (Slot::bpActive, std::memory_order_relaxed);
 
     // Hand-over in progress: the twin gets the very same input.
     const bool handover = s.twin != nullptr && ! s.handoverDone.load (std::memory_order_relaxed)
@@ -486,7 +677,8 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
 void Rack::runChain (juce::AudioBuffer<float>& buf, int numSamples) noexcept
 {
     const auto t0 = juce::Time::getHighResolutionTicks();
-    const auto c0 = threadCpuMs();
+    const bool measureCpu = measureCpuTime.load (std::memory_order_relaxed);   // a syscall: only for --bench
+    const auto c0 = measureCpu ? threadCpuMs() : 0.0;
 
     if (! bypassed.load (std::memory_order_relaxed))
         for (auto& s : slots)
@@ -496,7 +688,8 @@ void Rack::runChain (juce::AudioBuffer<float>& buf, int numSamples) noexcept
     const auto ms = juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - t0) * 1000.0;
     cpuMs.store ((float) ms, std::memory_order_relaxed);
 
-    cpuTimeMs.store ((float) (threadCpuMs() - c0), std::memory_order_relaxed);
+    if (measureCpu)
+        cpuTimeMs.store ((float) (threadCpuMs() - c0), std::memory_order_relaxed);
 
     size_t cpu = 0;
     if (pthread_cpu_number_np (&cpu) == 0)

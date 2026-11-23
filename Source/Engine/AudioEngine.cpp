@@ -247,6 +247,15 @@ std::vector<std::pair<int, int>> AudioEngine::watchHops()
             if (now < s.watchSince + perSecond / 2)
                 continue;
 
+            // true bypass (fading, draining, idle): not called as usual, its hop keeps its
+            // phase (Rack::processBypassTransition catches up on resume)
+            if (s.bypassState.load() != Rack::Slot::bpActive)
+            {
+                s.watchSince = now;   // on resume its log starts afresh
+                s.watchSeen = 0;
+                continue;
+            }
+
             // heavy callbacks logged since watchSince, oldest first
             std::vector<juce::uint64> at;
             const auto count = s.heavyCount.load (std::memory_order_acquire);
@@ -841,6 +850,7 @@ void AudioEngine::alignAllRacks()
                                                          [] { return (juce::uint64) 0; });
             slot.hopCalls = res.hopCalls;
             slot.hopPhase = res.phase;
+            slot.owed = 0;   // its phase now counts from here (true bypass catch-up)
         }
     }
 }
@@ -889,6 +899,7 @@ void AudioEngine::realignRack (Rack& rack)
                                                          [this] { return callbackCount.load() + 1; });
             slot.hopCalls = res.hopCalls;
             slot.hopPhase = res.phase;
+            slot.owed = 0;   // its phase now counts from here (true bypass catch-up)
         }
     });
 }
@@ -919,7 +930,7 @@ void AudioEngine::armWakeAssist (juce::uint64 index) noexcept
             const auto hop = s.hopCalls.load (std::memory_order_relaxed);
             const auto phase = s.hopPhase.load (std::memory_order_relaxed);
 
-            if (hop <= 1 || phase < 0)
+            if (hop <= 1 || phase < 0 || s.bypassState.load (std::memory_order_relaxed) == Rack::Slot::bpIdle)
                 continue;
 
             const auto d = (phase - (int) (index % (juce::uint64) hop) + hop) % hop;
@@ -1159,7 +1170,8 @@ bool AudioEngine::hasHopNow (Rack& r, juce::uint64 index) noexcept
         const auto hop = s.hopCalls.load (std::memory_order_relaxed);
         const auto phase = s.hopPhase.load (std::memory_order_relaxed);
 
-        if (hop > 1 && phase >= 0 && (int) (index % (juce::uint64) hop) == phase)
+        if (hop > 1 && phase >= 0 && (int) (index % (juce::uint64) hop) == phase
+            && s.bypassState.load (std::memory_order_relaxed) != Rack::Slot::bpIdle)
             return true;
     }
     return false;
@@ -1315,13 +1327,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
         const auto budgetMs = 1000.0 * numSamples / juce::jmax (1.0, sampleRate);
         const auto decay = std::pow (0.5, numSamples / (2.0 * juce::jmax (1.0, sampleRate))); // ~2 s half-life
         peakParallelGainMs = juce::jmax (workMs - heaviestMs, peakParallelGainMs * decay);
+        peakSerialWorkMs = juce::jmax (workMs, peakSerialWorkMs * decay);
 
+        // Parallel only pays when the serial work is a real share of the budget: otherwise the
+        // IO thread does it all with a wide margin, and waking the workers every callback (3000
+        // times/s at 16 samples, each spinning after its batch) costs more than it saves. At
+        // small buffers a fraction of the budget alone is tiny (8% of 16 samples = 27 us, which
+        // twenty racks with no plugins already exceeded).
         if (parallelMode.load (std::memory_order_relaxed))
         {
-            if (peakParallelGainMs < budgetMs * 0.04)
+            if (peakParallelGainMs < budgetMs * 0.04 || peakSerialWorkMs < budgetMs * 0.20)
                 parallelMode.store (false, std::memory_order_relaxed);
         }
-        else if (peakParallelGainMs > budgetMs * 0.08)
+        else if (peakParallelGainMs > budgetMs * 0.08 && peakSerialWorkMs > budgetMs * 0.30)
         {
             parallelMode.store (true, std::memory_order_relaxed);
         }

@@ -88,6 +88,21 @@ public:
         juce::uint64 twinFirstCallback = 0;        // callback the twin's alignment assumed it starts in
         std::atomic<int> twinLateBy { 0 };         // diagnostics: how many callbacks later it really started
         std::atomic<bool> handoverDone { false };
+
+        // True bypass: a bypassed plugin with no latency is not called at all (JUCE's bypass of
+        // VST3/AU still runs the plugin's own render, e.g. Waves at full cost). Audio thread
+        // only, except `bypassState` (read by the engine and watchHops).
+        enum { bpActive = 0, bpTransition = 1, bpIdle = 2 };
+        std::atomic<int> bypassState { bpActive };  // 1 = fading / draining / catching up, 2 = not called
+        float wet = 1.0f;          // plugin output mix (0 = dry), ramps over bypassFadeMs
+        int drainLeft = 0;         // samples it still gets silence to let its tail die out
+        int drainQuiet = 0;        // consecutive silent output samples while draining
+        juce::int64 owed = 0;      // callbacks it missed while idle (its hop phase is kept on resume)
+        // Plugins with latency: their input, so a bypass can play the dry signal delayed by the
+        // same latency (the compensation counts it) instead of running the plugin's own bypass.
+        static constexpr int bypassRingSize = 8192;   // max latency 8191 samples, 1-2 channels
+        juce::AudioBuffer<float> bypassRing;
+        int ringPos = 0;
     };
 
     explicit Rack (int uniqueId);
@@ -285,6 +300,7 @@ public:
     std::atomic<float> callbackMs { 0.0f };  // time spent on the device callback
     std::atomic<int> lastThread { 0 };       // worker index the chain last ran on
     std::atomic<int> lastCpu { -1 };         // CPU core the chain last ran on (0-3 = E-cores on M4 Pro)
+    static inline std::atomic<bool> measureCpuTime { false };   // fills cpuTimeMs (costs a syscall per rack per callback)
     std::atomic<float> cpuTimeMs { 0.0f };   // thread CPU time used by the chain (vs cpuMs = wall time)
 
     //==============================================================================
@@ -299,6 +315,9 @@ public:
 private:
     void runChain (juce::AudioBuffer<float>&, int numSamples) noexcept;   // processLock held
     void processSlot (Slot&, juce::AudioBuffer<float>&, int numSamples) noexcept;
+    void callPlugin (Slot&, juce::AudioPluginInstance&, juce::AudioBuffer<float>&, bool bypassed) noexcept;
+    void processBypassTransition (Slot&, juce::AudioBuffer<float>& view, int numSamples, bool trueBypass, bool bypassedNow, int latency) noexcept;
+    static void readDelayedDry (const Slot&, juce::AudioBuffer<float>& dest, int numSamples, int latency) noexcept;
 
     const int id;
     std::array<Slot, maxSlots> slots;
@@ -356,6 +375,7 @@ private:
     TempoPlayHead playHead { *this };
 
     juce::AudioBuffer<float> twinBuffer;   // hand-over: the twin's copy of the slot input
+    juce::AudioBuffer<float> dryBuffer;    // true bypass: dry copy for the crossfade, silent drain input
     std::vector<std::unique_ptr<juce::AudioPluginInstance>> discarded;   // message thread, see takeDiscarded()
     void dropTwin (Slot&);                 // processLock held
     juce::MidiBuffer midi;

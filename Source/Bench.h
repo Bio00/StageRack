@@ -217,6 +217,7 @@ inline int numEfficiencyCpus()
     outputs are muted. Reports callbacks whose processing took longer than the buffer period. */
 inline int runDeviceBenchmark (const juce::StringArray& args)
 {
+    Rack::measureCpuTime = true;   // cpuOnHop below
     const auto idx = args.indexOf ("--bench-device");
     const auto formatName = args[idx + 1];
     const auto id = args[idx + 2];

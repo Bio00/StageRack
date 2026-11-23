@@ -42,6 +42,7 @@ scripts/release.sh                      # package + test + tag v<versione> + rel
 - Core in idle profondo: svegliare un core costa ~0.25 ms → **CoreWakeAssist** solo per tipi di plugin che aspettano davvero (`wakeNeed`, misurato al primo hop dopo una pausa).
 - Il workgroup CoreAudio è decisivo (CLPC alza il clock). Scartati (nessun effetto o peggio): spin dei worker, promozione QoS dei thread del plugin, ballast, AMX warm-up, `VECLIB_MAXIMUM_THREADS=1`, offload dei rack, ASYNC, SDK VST3 diretto (involucro JUCE ~3 µs).
 - Risultati: 1-16 DF @32 = 0 persi; 12 DF @16 = 0 persi. Senza spread 8 DF → ~1700 persi.
+- **Bypass vero** (`Rack::processBypassTransition`): il bypass JUCE di VST3/AU fa girare il plugin; il nostro lo ferma (fade 10 ms, drain della coda, recupero hop alla ripresa, dry ritardato per i plugin con latenza). Parallelo solo se il lavoro seriale supera il 30% del budget: a vuoto i worker costavano ~35% CPU @16.
 - Crash/blocchi di De-Feedback (heap corruption in creazione/distruzione, deadlock in dispose) sono **del plugin**: mitigati con parcheggio istanze, autosave, timeout di uscita 5 s. Non disassemblare plugin commerciali.
 
 ## Trappole

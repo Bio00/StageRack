@@ -421,6 +421,144 @@ inline void runRoutingSelfTest (const std::function<void (bool, const juce::Stri
         s2.newSession();
         check (! s2.toTree().getChildWithName ("APPSETTINGS").isValid(), "a new session has no app settings of its own");
     }
+    {
+        // True bypass: a bypassed plugin is not called (after a fade and a drain), its hop
+        // phase is kept on resume, and the crossfades have no jumps.
+        struct CountingPlugin final : juce::AudioPluginInstance
+        {
+            int calls = 0;
+            float tail = 0.0f;
+            const juce::String getName() const override                        { return "Counting Test"; }
+            void prepareToPlay (double, int) override                            {}
+            void releaseResources() override                                     {}
+            void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer&) override
+            {
+                ++calls;
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                {
+                    const auto x = b.getSample (0, i);
+                    tail = 0.95f * tail + 0.05f * x;          // a "reverb": rings after the input stops
+                    for (int ch = 0; ch < b.getNumChannels(); ++ch)
+                        b.setSample (ch, i, 0.5f * x + tail);
+                }
+            }
+            double getTailLengthSeconds() const override                         { return 0.0; }
+            bool acceptsMidi() const override                                    { return false; }
+            bool producesMidi() const override                                   { return false; }
+            bool hasEditor() const override                                      { return false; }
+            juce::AudioProcessorEditor* createEditor() override                  { return nullptr; }
+            int getNumPrograms() override                                        { return 1; }
+            int getCurrentProgram() override                                     { return 0; }
+            void setCurrentProgram (int) override                                {}
+            const juce::String getProgramName (int) override                     { return {}; }
+            void changeProgramName (int, const juce::String&) override          {}
+            void getStateInformation (juce::MemoryBlock&) override               {}
+            void setStateInformation (const void*, int) override                 {}
+            void fillInPluginDescription (juce::PluginDescription& d) const override { d.name = getName(); d.pluginFormatName = "Test"; }
+        };
+
+        AudioEngine e;
+        auto& r = e.addRack();
+        r.inputChannel = 0; r.stereoInput = false; r.outputChannel = 0;
+        auto plugin = std::make_unique<CountingPlugin>();
+        auto* cp = plugin.get();
+        Rack::configurePlugin (*plugin, sr, bs);
+        r.setPlugin (0, std::move (plugin));
+        e.prepare (sr, bs, {});
+        auto& slot = r.getSlot (0);
+
+        const auto offline = cp->calls;                      // prepare's hop detection runs it offline
+        runBlocks (e, 100, 0.5f);
+        check (cp->calls - offline == 100 && near (out.getSample (0, bs - 1), 0.75f), "true bypass: plugin runs while on (calls " + juce::String (cp->calls) + ", out " + juce::String (out.getSample (0, bs - 1)) + ")");
+
+        slot.hopCalls = 4;                                   // as if aligned: hop every 4 callbacks
+        slot.hopPhase = 0;
+        const auto before = cp->calls;
+        slot.bypassed = true;
+
+        float maxJump = 0.0f, last = out.getSample (0, bs - 1);
+        for (int k = 0; k < 20; ++k)                         // fade (10 ms = 7.5 blocks of 64)
+        {
+            runBlocks (e, 1, 0.5f);
+            for (int i = 0; i < bs; ++i) { maxJump = juce::jmax (maxJump, std::abs (out.getSample (0, i) - last)); last = out.getSample (0, i); }
+        }
+        check (near (out.getSample (0, bs - 1), 0.5f) && maxJump < 0.01f, "true bypass: dry after a click-free fade");
+
+        runBlocks (e, 2000, 0.5f);                           // drain (0.3 s of quiet output) then idle
+        const auto idleCalls = cp->calls;
+        runBlocks (e, 1001, 0.5f);
+        check (cp->calls == idleCalls && slot.bypassState == Rack::Slot::bpIdle && near (out.getSample (0, bs - 1), 0.5f),
+               "true bypass: not called at all once idle (was " + juce::String (idleCalls - before) + " calls of fade + drain)");
+        check (cp->tail < 1.0e-4f, "true bypass: its tail was drained with silence, nothing stale on resume");
+
+        slot.bypassed = false;
+        maxJump = 0.0f; last = out.getSample (0, bs - 1);
+        for (int k = 0; k < 40; ++k)
+        {
+            runBlocks (e, 1, 0.5f);
+            for (int i = 0; i < bs; ++i) { maxJump = juce::jmax (maxJump, std::abs (out.getSample (0, i) - last)); last = out.getSample (0, i); }
+        }
+        const auto cb = (juce::uint64) e.getCallbackCount();
+        check ((juce::uint64) (cp->calls - offline) % 4 == cb % 4 && slot.bypassState == Rack::Slot::bpActive,
+               "true bypass: on resume the missed calls are caught up (hop phase kept: calls "
+                 + juce::String (cp->calls) + ", callbacks " + juce::String ((juce::int64) cb) + ")");
+        check (maxJump < 0.02f && out.getSample (0, bs - 1) > 0.7f, "true bypass: click-free fade back in");
+    }
+
+    {
+        // A plugin with latency: bypassed, the dry signal comes out as late as the plugin's
+        // (the compensation counts it), without calling it.
+        struct DelayPlugin final : juce::AudioPluginInstance
+        {
+            int calls = 0;
+            std::vector<float> line = std::vector<float> (48, 0.0f);
+            int pos = 0;
+            DelayPlugin()                                                        { setLatencySamples (48); }
+            const juce::String getName() const override                        { return "Delay Test"; }
+            void prepareToPlay (double, int) override                            {}
+            void releaseResources() override                                     {}
+            void processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer&) override
+            {
+                ++calls;
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                {
+                    const auto x = b.getSample (0, i), y = line[(size_t) pos];
+                    line[(size_t) pos] = x;
+                    pos = (pos + 1) % 48;
+                    for (int ch = 0; ch < b.getNumChannels(); ++ch)
+                        b.setSample (ch, i, 0.5f * y);   // delayed, -6 dB
+                }
+            }
+            double getTailLengthSeconds() const override                         { return 0.0; }
+            bool acceptsMidi() const override                                    { return false; }
+            bool producesMidi() const override                                   { return false; }
+            bool hasEditor() const override                                      { return false; }
+            juce::AudioProcessorEditor* createEditor() override                  { return nullptr; }
+            int getNumPrograms() override                                        { return 1; }
+            int getCurrentProgram() override                                     { return 0; }
+            void setCurrentProgram (int) override                                {}
+            const juce::String getProgramName (int) override                     { return {}; }
+            void changeProgramName (int, const juce::String&) override          {}
+            void getStateInformation (juce::MemoryBlock&) override               {}
+            void setStateInformation (const void*, int) override                 {}
+            void fillInPluginDescription (juce::PluginDescription& d) const override { d.name = getName(); d.pluginFormatName = "Test"; }
+        };
+
+        AudioEngine e;
+        auto& r = e.addRack();
+        r.inputChannel = 0; r.stereoInput = false; r.outputChannel = 0;
+        auto plugin = std::make_unique<DelayPlugin>();
+        auto* dp = plugin.get();
+        Rack::configurePlugin (*plugin, sr, bs);
+        r.setPlugin (0, std::move (plugin));
+        e.prepare (sr, bs, {});
+        r.getSlot (0).bypassed = true;
+        runBlocks (e, 1000, 0.0f);                           // fade, drain, idle
+        const auto idleCalls = dp->calls;
+        runBlocks (e, 1, 0.0f, true);                        // impulse at sample 0
+        check (dp->calls == idleCalls && std::abs (out.getSample (0, 48)) > 0.9f && std::abs (out.getSample (0, 0)) < 1.0e-6f,
+               "true bypass with latency: not called, dry delayed by the plugin's 48 samples");
+    }
 }
 
 } // namespace stagerack

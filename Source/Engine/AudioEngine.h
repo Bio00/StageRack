@@ -288,7 +288,7 @@ public:
 
 private:
     std::atomic<bool> parallelMode { false };   // adaptive: only fan out when the load is worth it
-    double peakParallelGainMs = 0.0;
+    double peakParallelGainMs = 0.0, peakSerialWorkMs = 0.0;
     juce::LinearSmoothedValue<float> masterGain { 1.0f };
     std::atomic<double> callbackLoad { 0.0 };
 
