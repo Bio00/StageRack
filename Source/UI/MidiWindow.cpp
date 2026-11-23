@@ -95,11 +95,11 @@ void MidiPanel::addTargetMenu (juce::PopupMenu& m, Session& session, MidiControl
     g (global, "Automix on / off", MidiTarget::automixOn);
     g (global, "Clear solos", MidiTarget::clearSolos);
     global.addSeparator();
-    g (global, "Next scene", MidiTarget::sceneNext);
-    g (global, "Previous scene", MidiTarget::scenePrev);
+    g (global, "Next snapshot", MidiTarget::sceneNext);
+    g (global, "Previous snapshot", MidiTarget::scenePrev);
     for (int i = 0; i < juce::jmax (8, session.getNumScenes()); ++i)
-        g (scenes, "Scene " + juce::String (i + 1) + (i < session.getNumScenes() ? ": " + session.getScene (i).name : juce::String()), MidiTarget::sceneRecall, i);
-    global.addSubMenu ("Recall scene", scenes);
+        g (scenes, "Snapshot " + juce::String (i + 1) + (i < session.getNumScenes() ? ": " + session.getScene (i).name : juce::String()), MidiTarget::sceneRecall, i);
+    global.addSubMenu ("Recall snapshot", scenes);
     global.addSeparator();
     g (global, "Bank <  (previous racks)", MidiTarget::bankPrev);
     g (global, "Bank >  (next racks)", MidiTarget::bankNext);
@@ -260,7 +260,7 @@ public:
         setTooltip (col == colMode ? "How the control acts: Auto (faders/knobs absolute, buttons toggle), Toggle, Momentary (on while held), "
                                      "Trigger, or a Relative encoder type"
                   : col == colTakeover ? "Absolute faders and knobs: Pick-up = the value moves only once the control reaches it "
-                                         "(no jumps after a bank change, a scene or the mouse); Value scaling = they meet gradually; None = jump"
+                                         "(no jumps after a bank change, a snapshot or the mouse); Value scaling = they meet gradually; None = jump"
                   : "Shift layer: a control can do one thing normally and another while the Shift control is held");
         onChange = [this]
         {

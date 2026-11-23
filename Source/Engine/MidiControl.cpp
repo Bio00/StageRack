@@ -907,10 +907,10 @@ juce::String MidiControl::describeTarget (const MidiTarget& t, bool withRack) co
         }
         case MidiTarget::masterMute:  return "MUTE ALL";
         case MidiTarget::automixOn:   return "Automix on/off";
-        case MidiTarget::sceneNext:   return "Next scene";
-        case MidiTarget::scenePrev:   return "Previous scene";
+        case MidiTarget::sceneNext:   return "Next snapshot";
+        case MidiTarget::scenePrev:   return "Previous snapshot";
         case MidiTarget::sceneRecall:
-            return "Scene " + juce::String (t.index + 1)
+            return "Snapshot " + juce::String (t.index + 1)
                  + (juce::isPositiveAndBelow (t.index, session.getNumScenes()) ? ": " + session.getScene (t.index).name : juce::String());
         case MidiTarget::bankNext:    return "Bank >";
         case MidiTarget::bankPrev:    return "Bank <";

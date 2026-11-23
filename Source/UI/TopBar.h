@@ -3,6 +3,8 @@
 #include "../Engine/Session.h"
 #include "TempoWindow.h"
 #include "MidiTargets.h"
+#include "../Engine/Features.h"
+#include <array>
 
 namespace stagerack
 {
@@ -37,7 +39,46 @@ public:
 
     static constexpr int preferredHeight = 76;
 
+    //==============================================================================
+    // Customisable (user request 2026-11-22): every block can be hidden and moved. The layout is an
+    // app setting ("topBarLayout": keys in order, "-key" = hidden); blocks of a function switched off
+    // in SETTINGS > Features are never shown.
+    enum Item { itSession, itSnapshots, itMute, itAutomix, itGroups, itTempoWindow, itMidi, itTempos,
+                itDsp, itDevice, itPluginsSettings, itView, itLayoutTheme, numItems };
+    static juce::String itemKey (int);
+    static juce::String itemName (int);
+    static int itemFeature (int);                  // features::Feature, -1 = always available
+    void setLayoutString (const juce::String&);
+    juce::String getLayoutString() const;
+    static juce::String defaultLayoutString();
+    const std::vector<int>& getOrder() const noexcept   { return order; }
+    bool isItemHidden (int i) const noexcept            { return hidden[(size_t) i]; }
+    bool isItemShown (int i) const;                     // not hidden and its feature on
+    void setItemHidden (int, bool);
+    void moveItem (int item, int newIndex);
+    void featuresChanged();                             // SETTINGS > Features changed: layout again
+    void itemsChanged();                                // layout again + onLayoutChanged
+    std::function<void (const juce::String&)> onLayoutChanged;   // save it
+    std::function<void()> onDeviceClicked;                       // the audio device info: audio settings
+
+    /** Edit mode: the blocks don't react, they are dragged to a new place (the Customize window is open). */
+    void setCustomizing (bool);
+    void showCustomizeWindow();
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void paintOverChildren (juce::Graphics&) override;
+
 private:
+    std::vector<int> order;
+    std::array<bool, numItems> hidden {};
+    std::array<juce::Rectangle<int>, numItems> itemArea;   // laid out blocks (edit mode, drag targets)
+    bool customizing = false;
+    int dragItem = -1, dropIndex = -1;
+    int dropIndexAt (int x) const;
+    std::vector<juce::Component*> componentsOf (int item);
+    std::unique_ptr<juce::DocumentWindow> customizeWindow;
+    void showContextMenu (juce::Point<int>);
+
     Session& session;
 
     juce::TextButton prevButton { juce::String::charToString (0x25C0) }, nextButton { juce::String::charToString (0x25B6) };

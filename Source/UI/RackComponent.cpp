@@ -136,6 +136,44 @@ public:
         const auto v = juce::jlimit (0.0f, 1.0f, prm->getValue());
         const auto colour = rack.colour;
 
+        // narrow slots (tall rows): the whole name on its own line, below it the bar with the
+        // value in bold in the middle (one line had room only for "Ec.. 2.80": user 2026-11-22)
+        if (isTwoLine())
+        {
+            auto nameLine = getLocalBounds().removeFromTop (12);
+            g.setColour (theme::text.withAlpha (0.85f));
+            g.setFont (theme::font (9.5f));
+            g.drawFittedText (prm->getName (24), nameLine.reduced (1, 0), juce::Justification::centredLeft, 1, 0.6f);
+
+            auto bar = getLocalBounds().withTrimmedTop (12).toFloat().reduced (0.0f, 0.5f);
+            g.setColour (theme::well);
+            g.fillRoundedRectangle (bar, 3.0f);
+            juce::String value;
+
+            if (isToggle (*prm))
+            {
+                const bool on = v >= 0.5f;
+                g.setColour (on ? colour : theme::outline);
+                g.fillRoundedRectangle (bar.reduced (1.0f), 3.0f);
+                g.setColour (on ? juce::Colours::black : theme::textDim);
+                value = on ? "ON" : "OFF";
+            }
+            else
+            {
+                g.setColour (colour.withAlpha (isMouseOverOrDragging() ? 0.6f : 0.42f));
+                g.fillRoundedRectangle (bar.withWidth (juce::jmax (3.0f, bar.getWidth() * v)), 3.0f);
+                g.setColour (theme::text);
+                value = prm->getCurrentValueAsText().trim();
+                const auto font = theme::font (11.0f, true);
+                if (juce::GlyphArrangement::getStringWidth (font, value) > bar.getWidth() - 4.0f)
+                    value = value.removeCharacters (" ");
+            }
+
+            g.setFont (theme::font (11.0f, true));
+            g.drawFittedText (value, bar.toNearestInt().reduced (2, 0), juce::Justification::centred, 1, 0.65f);
+            return;
+        }
+
         g.setColour (theme::well);
         g.fillRoundedRectangle (b, 3.0f);
 
@@ -161,17 +199,40 @@ public:
         if (toggle)
             text.removeFromRight (30);
 
-        // narrow slots: name only, the value replaces it while hovering/dragging
+        // narrow slots: a short name (dim) and the value (bold), both always there; the value gets
+        // the room it needs (units dropped if it still does not fit), the name what is left
         const bool narrow = getWidth() < 120;
-        const bool showValueOnly = narrow && ! toggle && (isMouseOverOrDragging() || dragging);
+
+        if (narrow && ! toggle)
+        {
+            text = getLocalBounds().reduced (3, 0);
+            const auto valueFont = theme::font (9.5f, true);
+            auto value = prm->getCurrentValueAsText().trim();
+            auto widthOf = [&valueFont] (const juce::String& t) { return juce::GlyphArrangement::getStringWidth (valueFont, t); };
+            const auto maxValueW = (float) text.getWidth() * 0.7f;
+
+            if (widthOf (value) > maxValueW) value = value.removeCharacters (" ");
+            if (widthOf (value) > maxValueW)
+                if (const auto num = value.initialSectionContainingOnly ("+-0123456789.,"); num.isNotEmpty())
+                    value = num;
+
+            const auto valueW = juce::jmin (maxValueW, widthOf (value) + 1.0f);
+            g.setColour (theme::text);
+            g.setFont (valueFont);
+            g.drawFittedText (value, text.removeFromRight (juce::roundToInt (valueW)), juce::Justification::centredRight, 1, 0.7f);
+
+            if (text.getWidth() > 10)
+            {
+                g.setColour (theme::text.withAlpha (0.65f));
+                g.setFont (theme::font (9.0f));
+                g.drawFittedText (prm->getName (text.getWidth() / 5), text.withTrimmedRight (2), juce::Justification::centredLeft, 1, 0.8f);
+            }
+            return;
+        }
 
         g.setColour (theme::text);
         g.setFont (theme::font (narrow ? 9.5f : 10.0f, true));
-
-        if (showValueOnly)
-            g.drawFittedText (prm->getCurrentValueAsText(), text, juce::Justification::centred, 1, 0.7f);
-        else
-            g.drawFittedText (prm->getName (32), text, juce::Justification::centredLeft, 1, 0.75f);
+        g.drawFittedText (prm->getName (32), text, juce::Justification::centredLeft, 1, 0.75f);
 
         if (! toggle && ! narrow)
         {
@@ -181,12 +242,17 @@ public:
         }
     }
 
+    /** Rows of narrow slots are taller: name line + value bar. */
+    static constexpr int twoLineHeight = 27;
+    bool isTwoLine() const noexcept { return getHeight() >= twoLineHeight - 3; }
+
     void mouseEnter (const juce::MouseEvent&) override { repaint(); }
     void mouseExit (const juce::MouseEvent&) override  { repaint(); }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
         auto* prm = param();
+        entry.mouseDown();
 
         if (prm == nullptr || e.mods.isPopupMenu())
             return;
@@ -255,6 +321,16 @@ public:
 
             for (auto* other : linkedParams (dragMods))
                 other->endChangeGesture();
+
+            // a plain click: type the value (the plugin parses it: "-6", "-6 dB", "2.5 kHz"...)
+            entry.mouseUp (*this, e,
+                           [this] { auto* p = param(); return p != nullptr ? p->getCurrentValueAsText() : juce::String(); },
+                           [this] (const juce::String& t)
+                           {
+                               if (auto* p = param())
+                                   set (*p, juce::jlimit (0.0f, 1.0f, p->getValueForText (t)), {});
+                               repaint();
+                           });
         }
 
         dragging = false;
@@ -269,15 +345,15 @@ public:
 
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
-        // slots that don't all fit scroll: then the wheel (two fingers) scrolls, it doesn't edit
-        if (auto* vp = findParentComponentOfClass<juce::Viewport>(); vp != nullptr && (vp->canScrollVertically() || vp->canScrollHorizontally()))
+        // the wheel (two fingers) scrolls the slots / the racks; it edits only with Ctrl held
+        if (! e.mods.isCtrlDown())
         {
             juce::Component::mouseWheelMove (e, w);
             return;
         }
 
         if (auto* prm = param(); prm != nullptr && ! isToggle (*prm))
-            set (*prm, juce::jlimit (0.0f, 1.0f, prm->getValue() + w.deltaY * (ParamSlider::isFine (e.mods) ? 0.01f : 0.05f)), e.mods);
+            set (*prm, juce::jlimit (0.0f, 1.0f, prm->getValue() + w.deltaY * (e.mods.isShiftDown() ? 0.01f : 0.05f)), e.mods.withoutFlags (juce::ModifierKeys::ctrlModifier));
     }
 
 private:
@@ -329,6 +405,7 @@ private:
         refresh();
     }
 
+    ValueEntry entry;
     EditController& edit;
     Rack& rack;
     const int slot, index;
@@ -336,6 +413,62 @@ private:
     float shownValue = -1.0f, startValue = 0.0f, dragValue = 0.0f, lastX = 0.0f;
     bool dragging = false, altClick = false;
     juce::ModifierKeys dragMods;
+};
+
+/** A ticked line of a popup menu that does NOT close the menu when clicked: several parameters
+    (or meters) can be switched on and off in one go (user request 2026-11-23). */
+class ToggleMenuRow final : public juce::PopupMenu::CustomComponent
+{
+public:
+    ToggleMenuRow (juce::String t, std::function<bool()> isOnFn, std::function<void()> toggleFn)
+        : juce::PopupMenu::CustomComponent (false), text (std::move (t)), isOn (std::move (isOnFn)), toggle (std::move (toggleFn)) {}
+
+    void getIdealSize (int& w, int& h) override
+    {
+        w = juce::jmin (320, 34 + (int) juce::GlyphArrangement::getStringWidth (theme::font (13.0f), text));
+        h = 22;
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds();
+        if (isItemHighlighted())
+        {
+            g.setColour (theme::accent.withAlpha (0.3f));
+            g.fillRect (r);
+        }
+
+        auto box = r.removeFromLeft (26).withSizeKeepingCentre (13, 13).toFloat();
+        const bool on = isOn();
+        g.setColour (on ? theme::accent : theme::outline);
+        g.drawRoundedRectangle (box, 2.5f, 1.2f);
+        if (on)
+        {
+            juce::Path tick;
+            tick.startNewSubPath (box.getX() + 2.5f, box.getCentreY());
+            tick.lineTo (box.getCentreX() - 0.5f, box.getBottom() - 3.0f);
+            tick.lineTo (box.getRight() - 2.5f, box.getY() + 2.5f);
+            g.strokePath (tick, juce::PathStrokeType (1.8f));
+        }
+
+        g.setColour (on ? theme::text : theme::textDim);
+        g.setFont (theme::font (13.0f, on));
+        g.drawFittedText (text, r.withTrimmedRight (6), juce::Justification::centredLeft, 1, 0.8f);
+    }
+
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (e.mouseWasClicked() && toggle)
+        {
+            toggle();
+            repaint();
+        }
+    }
+
+private:
+    juce::String text;
+    std::function<bool()> isOn;
+    std::function<void()> toggle;
 };
 
 class SlotComponent final : public juce::Component,
@@ -389,8 +522,9 @@ public:
         // --- header: power button, name, view toggle
         const auto header = headerArea();
         const bool narrowHeader = header.getWidth() < 90;
+        const bool dense = isDense();   // thinnest racks: the name gets two lines
 
-        powerArea = header.withWidth (18.0f).reduced (1.0f);
+        powerArea = dense ? header.withSize (15.0f, 15.0f) : header.withWidth (18.0f).reduced (1.0f);
         g.setColour (bypassed ? theme::outline : theme::green);
         drawPowerIcon (g, powerArea, bypassed ? theme::textDim : juce::Colour (0xff0d1f14), ! bypassed);
 
@@ -402,9 +536,19 @@ public:
         }
 
         g.setColour (bypassed ? theme::textDim : theme::text);
-        g.setFont (theme::font (narrowHeader ? 11.0f : 12.0f, true));
-        auto nameArea = header.withTrimmedLeft (21.0f).withTrimmedRight (viewArea.isEmpty() ? 0.0f : 20.0f);
-        g.drawFittedText (p->getName(), nameArea.toNearestInt(), juce::Justification::centredLeft, 1, narrowHeader ? 0.55f : 0.7f);
+
+        if (dense)
+        {
+            // name beside the power button and, when it does not fit, on a second line under both
+            g.setFont (theme::font (10.0f, true));
+            g.drawFittedText (p->getName(), header.withTrimmedLeft (17.0f).toNearestInt(), juce::Justification::topLeft, 2, 0.8f);
+        }
+        else
+        {
+            g.setFont (theme::font (narrowHeader ? 11.0f : 12.0f, true));
+            auto nameArea = header.withTrimmedLeft (21.0f).withTrimmedRight (viewArea.isEmpty() ? 0.0f : 20.0f);
+            g.drawFittedText (p->getName(), nameArea.toNearestInt(), juce::Justification::centredLeft, 1, narrowHeader ? 0.55f : 0.7f);
+        }
 
         // --- body
         const auto body = bodyArea();
@@ -419,18 +563,21 @@ public:
         {
             g.setColour (theme::textDim);
             g.setFont (theme::font (10.0f));
-            const auto foot = b.reduced (6, 3).removeFromBottom (12);
-            juce::String left = shortFormat (p->getPluginDescription().pluginFormatName);
+            auto foot = b.reduced (dense ? 4.0f : 6.0f, 3.0f).removeFromBottom (12);
+            juce::String left = dense ? juce::String() : shortFormat (p->getPluginDescription().pluginFormatName);
             if (sandbox::SandboxedPlugin::isSandboxed (p))
-                left << " ISO";   // experimental: runs in its own process
+                left << (left.isEmpty() ? "ISO" : " ISO");   // experimental: runs in its own process
 
             if (sl.viewMode == 0 && hiddenRows > 0)
-                left << "  +" << hiddenRows << " par.";
+                left << (dense ? "+" : "  +") << hiddenRows << (dense ? "" : " par.");
             else if (sl.viewMode == 2 && meters.size() > shownMeters)
-                left << "  +" << (meters.size() - shownMeters) << " meters";
+                left << (dense ? "+" : "  +") << (meters.size() - shownMeters) << (dense ? "" : " meters");
 
-            g.drawText (left, foot, juce::Justification::centredLeft);
-            g.drawText (juce::String (juce::jmax (0, shownCpu) / 100.0, 2) + " ms", foot, juce::Justification::centredRight);
+            // the plugin's time on the right, the rest in what is left (never on top of each other)
+            const auto cpu = juce::String (juce::jmax (0, shownCpu) / 100.0, 2) + (dense ? "" : " ms");
+            const auto cpuW = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), cpu) + 2.0f;
+            g.drawText (cpu, foot.removeFromRight (cpuW), juce::Justification::centredRight);
+            g.drawFittedText (left, foot.withTrimmedRight (3.0f).toNearestInt(), juce::Justification::centredLeft, 1, 0.8f);
         }
 
         if (bypassed)
@@ -524,9 +671,14 @@ public:
             if (meterPlugin != p)
             {
                 meterPlugin = p;
-                meters = findMeters (*p);
-                meterValues.clearQuick();
+                allMeters = findMeters (*p);
             }
+
+            meters.clearQuick();
+            for (const auto& m : allMeters)
+                if (! sl.hiddenMeters.contains (m.name))
+                    meters.add (m);
+            meterValues.clearQuick();
 
             if (sl.viewMode == 0)
                 for (auto i : sl.shownParams)
@@ -551,8 +703,9 @@ public:
             resizer.setBounds (getWidth() - 5, 0, 5, getHeight());
 
         // parameters in a grid: one column per ~104 px, as many rows as fit (column by column)
-        constexpr int rowH = 17, colW = 104;
+        constexpr int colW = 104;
         auto body = bodyArea().toNearestInt();
+        const int rowH = body.getWidth() < 100 ? ParamRow::twoLineHeight : 17;   // narrow: name above the value
         const int cols = juce::jmax (1, body.getWidth() / colW);
         int rowsFit = juce::jmax (0, body.getHeight() / rowH);
 
@@ -715,15 +868,18 @@ private:
         float startSize = 1.0f, startLength = 1.0f;
     };
 
+    /** Slots of the thinnest racks: two-line name, short footer. */
+    bool isDense() const noexcept   { return getWidth() < 84; }
+
     juce::Rectangle<float> headerArea() const
     {
-        return getLocalBounds().toFloat().reduced (2.0f).reduced (5.0f, 4.0f).withHeight (18.0f);
+        return getLocalBounds().toFloat().reduced (2.0f).reduced (isDense() ? 3.0f : 5.0f, 4.0f).withHeight (isDense() ? 26.0f : 18.0f);
     }
 
     juce::Rectangle<float> bodyArea() const
     {
-        auto b = getLocalBounds().toFloat().reduced (2.0f).reduced (6.0f, 4.0f);
-        b.removeFromTop (21.0f);
+        auto b = getLocalBounds().toFloat().reduced (2.0f).reduced (isDense() ? 3.0f : 6.0f, 4.0f);
+        b.removeFromTop (isDense() ? 28.0f : 21.0f);
 
         if (vertical) b.removeFromBottom (3.0f);
         else          b.removeFromRight (3.0f);
@@ -786,12 +942,20 @@ private:
             return;
 
         const auto entry = PluginThumbnails::get().find (&p);
+        const bool hasPicture = entry.image.isValid() && ! PluginThumbnails::looksBlank (entry.image);
+        const auto fitted = hasPicture ? juce::RectanglePlacement (juce::RectanglePlacement::centred)
+                                             .appliedTo (entry.image.getBounds().toFloat(), body)
+                                       : juce::Rectangle<float>();
 
-        if (entry.image.isValid() && ! PluginThumbnails::looksBlank (entry.image))
+        // a picture too small to read (thin rack, short slot) = the plugin's name, big
+        if (! hasPicture || fitted.getHeight() < 40.0f || fitted.getWidth() < 64.0f)
+        {
+            paintBigName (g, body, p, bypassed);
+            return;
+        }
+
         {
             const auto img = entry.image;
-            const auto fitted = juce::RectanglePlacement (juce::RectanglePlacement::centred)
-                                    .appliedTo (img.getBounds().toFloat(), body);
             juce::Graphics::ScopedSaveState ss (g);
             juce::Path clip;
             clip.addRoundedRectangle (fitted, 3.0f);
@@ -801,18 +965,46 @@ private:
             return;
         }
 
-        // no picture (not captured yet, or an editor drawn with Metal/OpenGL): a simple card
-        g.setColour (rack.colour.withAlpha (0.18f));
+    }
+
+    /** The plugin's name as large as the body allows (mini view without a readable picture). */
+    void paintBigName (juce::Graphics& g, juce::Rectangle<float> body, juce::AudioPluginInstance& p, bool bypassed)
+    {
+        g.setColour (rack.colour.withAlpha (bypassed ? 0.08f : 0.18f));
         g.fillRoundedRectangle (body, 4.0f);
-        g.setColour (theme::text.withAlpha (0.9f));
-        g.setFont (theme::font (juce::jlimit (11.0f, 18.0f, body.getHeight() * 0.28f), true));
-        g.drawFittedText (p.getName(), body.reduced (4.0f).withTrimmedBottom (body.getHeight() * 0.35f).toNearestInt(),
-                          juce::Justification::centredBottom, 1, 0.7f);
-        g.setColour (theme::textDim);
-        g.setFont (theme::font (10.0f));
-        g.drawFittedText (p.getPluginDescription().manufacturerName,
-                          body.reduced (4.0f).withTrimmedTop (body.getHeight() * 0.62f).toNearestInt(),
-                          juce::Justification::centredTop, 1, 0.8f);
+
+        auto inner = body.reduced (4.0f, 2.0f);
+        const bool maker = inner.getHeight() >= 44.0f;
+        if (maker)
+            inner.removeFromBottom (13.0f);
+
+        // as many lines as give the biggest letters (thin racks: one word per line)
+        const auto name = p.getName().trim();
+        const auto words = juce::StringArray::fromTokens (name, " ", "");
+        int longest = 1;
+        for (auto& w : words)
+            longest = juce::jmax (longest, w.length());
+
+        int lines = 1;
+        float size = 0.0f;
+        for (int n = 1; n <= juce::jmin (4, juce::jmax (1, words.size())); ++n)
+        {
+            const auto chars = (float) juce::jmax (longest, (name.length() + n - 1) / n);
+            const auto fit = juce::jmin (inner.getHeight() / (float) n * 0.78f, inner.getWidth() / (chars * 0.6f));
+            if (fit > size + 0.5f) { size = fit; lines = n; }
+        }
+        size = juce::jlimit (10.0f, 26.0f, size);
+        g.setColour (theme::text.withAlpha (bypassed ? 0.5f : 0.95f));
+        g.setFont (theme::font (size, true));
+        g.drawFittedText (name, inner.toNearestInt(), juce::Justification::centred, lines, 0.6f);
+
+        if (maker)
+        {
+            g.setColour (theme::textDim);
+            g.setFont (theme::font (10.0f));
+            g.drawFittedText (p.getPluginDescription().manufacturerName,
+                              body.reduced (4.0f).removeFromBottom (13.0f).toNearestInt(), juce::Justification::centred, 1, 0.8f);
+        }
     }
 
     /** Meters view: the plugin's own meters (gain reduction, levels...) as bars. */
@@ -1045,24 +1237,33 @@ private:
                              + juce::String (sl.hopPhase + 1) + "/" + juce::String (sl.hopCalls),
                            false, false, nullptr);
 
+            // parameters and meters: ticks that keep the menu open, several in one go
             juce::PopupMenu params;
             const auto& all = p->getParameters();
-            const auto shown = rack.getSlot (index).shownParams;
 
             for (int i = 0; i < all.size() && i < 128; ++i)
-                params.addItem (juce::PopupMenu::Item (all[i]->getName (48).isNotEmpty() ? all[i]->getName (48) : "Parameter " + juce::String (i + 1))
-                                    .setTicked (shown.contains (i))
-                                    .setAction (act ([i] (SlotComponent& s)
-                                    {
-                                        auto& sl = s.rack.getSlot (s.index);
-                                        sl.paramsChosen = true;
+            {
+                const auto name = all[i]->getName (48).isNotEmpty() ? all[i]->getName (48) : "Parameter " + juce::String (i + 1);
+                params.addCustomItem (-1, std::make_unique<ToggleMenuRow> (name,
+                    [safe, i] { return safe != nullptr && safe->rack.getSlot (safe->index).shownParams.contains (i); },
+                    [safe, i]
+                    {
+                        if (safe == nullptr)
+                            return;
 
-                                        if (sl.shownParams.contains (i)) sl.shownParams.removeFirstMatchingValue (i);
-                                        else                             sl.shownParams.add (i);
+                        auto& sl = safe->rack.getSlot (safe->index);
+                        if (! sl.paramsChosen)
+                            sl.shownParams = defaultShownParams (*safe->rack.getPlugin (safe->index));
+                        sl.paramsChosen = true;
 
-                                        s.syncRows();
-                                        s.session.markDirty();
-                                    })));
+                        if (sl.shownParams.contains (i)) sl.shownParams.removeFirstMatchingValue (i);
+                        else                             sl.shownParams.add (i);
+
+                        if (sl.viewMode != 0) sl.viewMode = 0;   // picking parameters = showing them
+                        safe->syncRows();
+                        safe->session.markDirty();
+                    }), nullptr);
+            }
 
             params.addSeparator();
             params.addItem ("Default selection", act ([] (SlotComponent& s)
@@ -1080,6 +1281,39 @@ private:
                 s.session.markDirty();
             }));
             m.addSubMenu ("Parameters on rack", params);
+
+            juce::PopupMenu meterMenu;
+            const auto found = findMeters (*p);
+
+            for (const auto& meter : found)
+                meterMenu.addCustomItem (-1, std::make_unique<ToggleMenuRow> (meter.name,
+                    [safe, n = meter.name] { return safe != nullptr && ! safe->rack.getSlot (safe->index).hiddenMeters.contains (n); },
+                    [safe, n = meter.name]
+                    {
+                        if (safe == nullptr)
+                            return;
+
+                        auto& sl = safe->rack.getSlot (safe->index);
+                        if (sl.hiddenMeters.contains (n)) sl.hiddenMeters.removeString (n);
+                        else                              sl.hiddenMeters.add (n);
+
+                        if (sl.viewMode != 2) sl.viewMode = 2;
+                        safe->syncRows();
+                        safe->session.markDirty();
+                    }), nullptr);
+
+            if (! found.isEmpty())
+            {
+                meterMenu.addSeparator();
+                meterMenu.addItem ("Show all", ! rack.getSlot (index).hiddenMeters.isEmpty(), false, act ([] (SlotComponent& s)
+                {
+                    s.rack.getSlot (s.index).hiddenMeters.clear();
+                    s.syncRows();
+                    s.session.markDirty();
+                }));
+            }
+
+            m.addSubMenu ("Meters on rack", meterMenu, ! found.isEmpty());
             m.addSeparator();
 
             m.addItem (menuItem ("Remove" + onAll, "\xe2\x8c\xab", act ([mods] (SlotComponent& s)
@@ -1113,7 +1347,8 @@ private:
     int statsTick = 0, cpuNow = -1;
     int shownCpu = -2, shownView = -1, shownThumb = -1, hiddenRows = 0, shownMeters = 0, shownLatency = -1;
     static constexpr int numViews = 3;
-    juce::Array<PluginMeter> meters;       // the plugin's own meters (see PluginMeters)
+    juce::Array<PluginMeter> allMeters;    // the plugin's own meters (see PluginMeters)
+    juce::Array<PluginMeter> meters;       // the ones shown (not in Slot::hiddenMeters)
     juce::Array<float> meterValues;        // last painted values
     const juce::AudioPluginInstance* meterPlugin = nullptr;
     juce::OwnedArray<ParamRow> rows;
@@ -1309,6 +1544,10 @@ private:
 RackComponent::RackComponent (Session& s, EditController& e, Rack& r, int i)
     : session (s), edit (e), rack (r), index (i), sendsPanel (s, e, r)
 {
+    // scrolling the racks only moves cached pictures of them: no full redraw of every rack at
+    // every pixel (meters and values still redraw just their own small areas)
+    setBufferedToImage (true);
+
     // plugins and sends live in viewports: what does not fit scrolls (wheel / two fingers)
     for (auto* vp : { &slotView, &sendsView })
     {
@@ -1376,6 +1615,7 @@ RackComponent::RackComponent (Session& s, EditController& e, Rack& r, int i)
             engine.setRackInputSource (*r, -1);
             r->inputChannel = ch;
             r->stereoInput = stereo;
+            Session::followInput (*r, engine.isRoutingActive());   // OUT = same channel and type
         }
 
         session.markDirty();
@@ -1628,7 +1868,7 @@ void RackComponent::fillRoutingBoxes()
     }
 
     // buses: an output can go into one (the bus sums it); a bus takes its input from its feeds
-    const bool routing = engine.isRoutingEnabled();
+    const bool routing = engine.isRoutingActive();
     bool anyBus = false;
 
     for (int k = 1; routing && k <= Rack::maxBuses; ++k)
@@ -1710,7 +1950,7 @@ void RackComponent::fillRoutingBoxes()
 
     outputBox.setTooltip ((extras > 0 ? "Outputs: " + dests.joinIntoString (", ") + "\n" : juce::String())
                           + "Click: main output (Alt: same on all selected, Alt+Shift: consecutive from here)\n"
-                            "Ctrl-click or \"Additional outputs\": add / remove more outputs");
+                            "Cmd-click (or Ctrl-click): add / remove more outputs");
 }
 
 juce::String RackComponent::outputName (int code) const
@@ -1754,18 +1994,88 @@ void RackComponent::toggleExtraOutput (int code, const juce::ModifierKeys& mods)
     fillRoutingBoxes();
 }
 
+/** A line of the OUT menu: a click picks the main output and closes the menu; Cmd-click (or
+    Ctrl-click) switches an extra output on / off and keeps the menu open for more. */
+class OutputMenuRow final : public juce::PopupMenu::CustomComponent
+{
+public:
+    OutputMenuRow (juce::String t, std::function<int()> stateFn, std::function<void (const juce::ModifierKeys&)> toggleFn)
+        : juce::PopupMenu::CustomComponent (false), text (std::move (t)), state (std::move (stateFn)), toggleExtra (std::move (toggleFn)) {}
+
+    void getIdealSize (int& w, int& h) override
+    {
+        w = 36 + (int) juce::GlyphArrangement::getStringWidth (theme::font (13.0f), text) + 60;
+        h = 22;
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds();
+        if (isItemHighlighted())
+        {
+            g.setColour (theme::accent.withAlpha (0.3f));
+            g.fillRect (r);
+        }
+
+        const int st = state();
+        auto box = r.removeFromLeft (26).withSizeKeepingCentre (12, 12).toFloat();
+        if (st > 0)
+        {
+            juce::Path tick;
+            tick.startNewSubPath (box.getX() + 1.5f, box.getCentreY());
+            tick.lineTo (box.getCentreX() - 0.5f, box.getBottom() - 2.0f);
+            tick.lineTo (box.getRight() - 1.0f, box.getY() + 1.5f);
+            g.setColour (st == 1 ? theme::text : theme::accent);
+            g.strokePath (tick, juce::PathStrokeType (1.8f));
+        }
+
+        if (st == 2)
+        {
+            g.setColour (theme::accent);
+            g.setFont (theme::font (10.5f, true));
+            g.drawText ("+ EXTRA", r.removeFromRight (58), juce::Justification::centredLeft);
+        }
+
+        g.setColour (st > 0 ? theme::text : theme::text.withAlpha (0.85f));
+        g.setFont (theme::font (13.0f, st == 1));
+        g.drawFittedText (text, r.withTrimmedRight (4), juce::Justification::centredLeft, 1, 0.8f);
+    }
+
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (! e.mouseWasClicked())
+            return;
+
+        if ((e.mods.isCommandDown() || e.mods.isCtrlDown()) && ! e.mods.isAltDown())
+        {
+            toggleExtra (e.mods.withoutMouseButtons());
+            if (auto* menuWindow = getParentComponent())
+                menuWindow->repaint();   // all ticks (the main one may have changed too)
+        }
+        else
+        {
+            triggerMenuItem();
+        }
+    }
+
+private:
+    juce::String text;
+    std::function<int()> state;
+    std::function<void (const juce::ModifierKeys&)> toggleExtra;
+};
+
 void RackComponent::showOutputMenu()
 {
     auto* root = outputBox.getRootMenu();
     if (root == nullptr)
         return;
 
-    const bool routing = session.getEngine().isRoutingEnabled();
+    const bool routing = session.getEngine().isRoutingActive();
     const auto main = rack.mainOutputCode (routing);
     const auto extras = rack.getExtraOutputs();
     auto isExtra = [&extras] (int id) { return std::find (extras.begin(), extras.end(), id) != extras.end(); };
 
-    juce::PopupMenu menu, more;
+    juce::PopupMenu menu;
     juce::PopupMenu::MenuItemIterator it (*root);
 
     while (it.next())
@@ -1775,33 +2085,45 @@ void RackComponent::showOutputMenu()
         if (item.isSectionHeader)
         {
             menu.addSectionHeader (item.text);
-            more.addSectionHeader (item.text);
             continue;
         }
 
         if (item.itemID <= 0)
             continue;
 
-        const bool extra = isExtra (item.itemID);
-        juce::PopupMenu::Item m (item.text + (extra ? "   (+)" : ""));
-        m.itemID = item.itemID;
-        m.isEnabled = item.isEnabled;
-        m.isTicked = item.itemID == main || extra;
-        menu.addItem (m);
-
-        if (item.itemID != Rack::outNone)
+        if (! item.isEnabled)   // would make a loop
         {
-            juce::PopupMenu::Item a (item.text);
-            a.itemID = 100000 + item.itemID;
-            a.isEnabled = item.isEnabled && item.itemID != main;
-            a.isTicked = extra;
-            more.addItem (a);
+            menu.addItem (juce::PopupMenu::Item (item.text).setID (item.itemID).setEnabled (false));
+            continue;
         }
-    }
 
+        // click = main output (closes), Cmd/Ctrl-click = extra output on / off (stays open)
+        juce::Component::SafePointer<RackComponent> self (this);
+        const auto code = item.itemID;
+        menu.addCustomItem (code, std::make_unique<OutputMenuRow> (item.text,
+            [self, code]
+            {
+                if (self == nullptr) return 0;
+                if (code == self->rack.mainOutputCode (self->session.getEngine().isRoutingActive())) return 1;
+                const auto ex = self->rack.getExtraOutputs();
+                return std::find (ex.begin(), ex.end(), code) != ex.end() ? 2 : 0;
+            },
+            [self, code] (const juce::ModifierKeys& mods)
+            {
+                if (self == nullptr || code == Rack::outNone
+                    || code == self->rack.mainOutputCode (self->session.getEngine().isRoutingActive()))
+                    return;
+                self->toggleExtraOutput (code, mods);
+            }), nullptr);
+    }
+    juce::ignoreUnused (main, isExtra);
+
+    // several outputs at once: Cmd-click (or Ctrl-click) adds / removes one besides the main
     menu.addSeparator();
-    menu.addSubMenu ("Additional outputs" + (extras.empty() ? juce::String() : "  (" + juce::String ((int) extras.size()) + ")"), more);
-    menu.addItem (99999, "Clear additional outputs", ! extras.empty());
+    if (! extras.empty())
+        menu.addItem (99999, "Clear extra outputs  (" + juce::String ((int) extras.size()) + ")");
+    menu.addItem (juce::PopupMenu::Item (juce::String::fromUTF8 ("\xe2\x8c\x98-click: add / remove extra outputs (the menu stays open)"))
+                      .setEnabled (false));
 
     juce::Component::SafePointer<RackComponent> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&outputBox).withMinimumWidth (outputBox.getWidth()),
@@ -1831,16 +2153,12 @@ void RackComponent::showOutputMenu()
                 return;
             }
 
-            if (result > 100000)
+            // Cmd-click (or Ctrl-click, Pro Tools): add / remove this destination instead of
+            // replacing the main one (Alt+Cmd stays "consecutive outputs")
+            if ((mods.isCommandDown() || mods.isCtrlDown()) && ! mods.isAltDown() && result != Rack::outNone)
             {
-                self.toggleExtraOutput (result - 100000, mods);
-                return;
-            }
-
-            // Ctrl-click (Pro Tools): add / remove this destination instead of replacing the main one
-            if (mods.isCtrlDown() && result != Rack::outNone && result != self.rack.mainOutputCode (self.session.getEngine().isRoutingEnabled()))
-            {
-                self.toggleExtraOutput (result, mods);
+                if (result != self.rack.mainOutputCode (self.session.getEngine().isRoutingActive()))
+                    self.toggleExtraOutput (result, mods);
                 return;
             }
 
@@ -1981,7 +2299,7 @@ void RackComponent::paint (juce::Graphics& g)
 
     // active edit group: the whole rack is framed in the group colour, so it is clear at a glance
     // that touching this rack also changes the others (suspended group = no frame)
-    const bool groupLinked = rack.editGroup > 0 && session.isEditGroupActive (rack.editGroup);
+    const bool groupLinked = rack.editGroup > 0 && session.isEditGroupActive (rack.editGroup);   // false with the feature off
 
     if (groupLinked)
     {
@@ -2026,7 +2344,7 @@ void RackComponent::paint (juce::Graphics& g)
     g.drawText (juce::String (index + 1).paddedLeft ('0', 2), indexArea, juce::Justification::centredLeft);
 
     // edit group: letter in the group colour, filled while the group links edits, outlined when suspended
-    if (const auto group = rack.editGroup; group > 0 && ! groupArea.isEmpty())
+    if (const auto group = rack.editGroup; group > 0 && features::has (features::editGroups) && ! groupArea.isEmpty())
     {
         const bool on = session.isEditGroupActive (group);
         const auto c = theme::groupColour (group);
@@ -2105,7 +2423,7 @@ void RackComponent::paint (juce::Graphics& g)
     drawScale (outScaleArea, outMeterArea);
 
     // automix gain meter (0 dB = full, -40 dB = empty), in the colour of the group
-    if (const auto group = rack.automixGroup.load(); group > 0 && ! automixMeterArea.isEmpty())
+    if (const auto group = rack.automixGroup.load(); features::has (features::automix) && group > 0 && ! automixMeterArea.isEmpty())
     {
         const bool on = session.getEngine().automixEnabled.load();
         auto a = automixMeterArea.toFloat();
@@ -2158,7 +2476,7 @@ void RackComponent::updateBadges()
                        theme::accent });
     }
 
-    if (const auto t = rack.tempoIndex.load(); t > 0 && t < session.getEngine().tempo.getNumTempos())
+    if (const auto t = rack.tempoIndex.load(); features::has (features::tempo) && t > 0 && t < session.getEngine().tempo.getNumTempos())
     {
         auto& tempo = session.getEngine().tempo;
         const auto bpm = juce::String (tempo.getBpm (t), 1);
@@ -2290,8 +2608,8 @@ void RackComponent::resized()
     folderArea = {};
     automixArea = {};
     automixMeterArea = {};
-    const bool inGroup = rack.editGroup > 0;
-    const bool automixed = rack.automixGroup.load() > 0;
+    const bool inGroup = rack.editGroup > 0 && features::has (features::editGroups);
+    const bool automixed = rack.automixGroup.load() > 0 && features::has (features::automix);
 
     if (isNarrow() != compactRouting || isTiny() != tinyRouting)
     {
@@ -2318,11 +2636,19 @@ void RackComponent::resized()
         auto r = getLocalBounds().reduced (tiny ? 3 : narrow ? 5 : 8, 6).withTrimmedTop (8).withTrimmedRight (2);
 
         // name row: the name gets all the room; on narrow racks the number moves to the row below
-        auto nameRow = r.removeFromTop (20);
-        menuButton.setBounds (nameRow.removeFromRight (tiny ? 16 : 28));
+        // thinnest racks: the name may take two lines (a 61 px rack showed "HI-H...")
+        // narrow racks: no ••• button (user request 2026-11-22: right-click anywhere opens the menu),
+        // the name is what matters and gets the whole row, bigger
+        auto nameRow = r.removeFromTop (tiny ? 32 : narrow ? 22 : 20);
+        menuButton.setVisible (! narrow);
+        if (! narrow) menuButton.setBounds (nameRow.removeFromRight (28));
+        menuButton.setButtonText (juce::String::fromUTF8 ("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2"));
         if (! narrow) indexArea = nameRow.removeFromLeft (22);
-        if (rack.isFolder) folderArea = nameRow.removeFromLeft (tiny ? 12 : 16);
-        nameLabel.setFont (theme::font (tiny ? 11.5f : narrow ? 13.0f : 14.0f, true));
+        if (rack.isFolder) folderArea = nameRow.removeFromLeft (tiny ? 12 : 16).withHeight (20);
+        nameLabel.setFont (theme::font (tiny ? 13.0f : narrow ? 15.0f : 14.0f, true));
+        nameLabel.setBorderSize (tiny ? juce::BorderSize<int> (1, 2, 1, 1) : juce::BorderSize<int> (1, 5, 1, 5));
+        nameLabel.setMinimumHorizontalScale (0.7f);
+        nameLabel.setJustificationType (tiny ? juce::Justification::topLeft : juce::Justification::centredLeft);
         nameLabel.setBounds (nameRow);
 
         {
@@ -2469,6 +2795,7 @@ void RackComponent::resized()
         }
 
         controls.removeFromLeft (narrow ? 1 : 4);
+        gain.setTextValueSuffix (controls.getWidth() < 52 ? "" : " dB");   // "-12.3" rather than "-12.3..."
         gain.setTextBoxStyle (juce::Slider::TextBoxBelow, false, juce::jmax (tiny ? 30 : 40, controls.getWidth()), 14);
         gain.setBounds (controls);
 
@@ -2497,6 +2824,7 @@ void RackComponent::resized()
         nameRow.removeFromLeft (4);
     }
 
+    menuButton.setVisible (true);
     menuButton.setBounds (nameRow.removeFromRight (28));
     nameRow.removeFromRight (4);
     badgeArea = {};
@@ -2509,7 +2837,11 @@ void RackComponent::resized()
         nameRow.removeFromRight (4);
     }
 
+    menuButton.setButtonText (juce::String::fromUTF8 ("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2"));
     nameLabel.setFont (theme::font (14.0f, true));
+    nameLabel.setBorderSize (juce::BorderSize<int> (1, 5, 1, 5));
+    nameLabel.setJustificationType (juce::Justification::centredLeft);
+    gain.setTextValueSuffix (" dB");
     nameLabel.setBounds (nameRow);
     header.removeFromTop (3);
 
@@ -2634,7 +2966,8 @@ void RackComponent::layoutSends (juce::Rectangle<int>& r)
         const int total = juce::jmax (0, r.getHeight() - handle);
         sendsPanel.setFitHeight (0);
         const auto row = SendsPanel::getRowHeight (w);
-        const auto autoLen = juce::jmin (sendsPanel.getContentHeight (w), SendsPanel::usesKnobs (w) ? 2 * row : 4 * row);
+        const auto autoLen = juce::jmin (sendsPanel.getContentHeight (w), SendsPanel::miniKnobs (w) ? 3 * row
+                                                                          : SendsPanel::usesKnobs (w) ? 2 * row : 4 * row);
         const auto len = lengthFor (rack.uiSendsV, autoLen, total);
 
         auto area = r.removeFromBottom (len);
@@ -2945,7 +3278,7 @@ void RackComponent::showColourPicker()
 
     auto* top = getTopLevelComponent();
     juce::CallOutBox::launchAsynchronously (std::make_unique<Picker> (session, ids, rack.colour),
-                                            top->getLocalArea (this, menuButton.getBounds()), top);
+                                            top->getLocalArea (this, menuButton.isVisible() ? menuButton.getBounds() : nameLabel.getBounds()), top);
 }
 
 juce::PopupMenu RackComponent::automixMenu()
@@ -3204,14 +3537,20 @@ void RackComponent::showRackMenu()
                         rc.session.markDirty();
                     }));
 
-    m.addSubMenu ("Bus", busMenu());
+    // functions switched off in SETTINGS > Features are not offered
+    if (features::has (features::routing))
+        m.addSubMenu ("Bus", busMenu());
     m.addSubMenu ("Rack View" + juce::String (rack.uiHideSections >= 0 || rack.uiSendsShown >= 0 ? "  (own)" : ""),
                   rackOwnViewMenu (session, edit, rack));
-    m.addSubMenu ("Folder", folderMenu());
-    m.addSubMenu ("Edit group", editGroupMenu());
+    if (features::has (features::routing))
+        m.addSubMenu ("Folder", folderMenu());
+    if (features::has (features::editGroups))
+        m.addSubMenu ("Edit group", editGroupMenu());
     m.addSubMenu ("Latency group", groups);
-    m.addSubMenu ("Automix", automixMenu());
-    m.addSubMenu ("Tempo", tempos);
+    if (features::has (features::automix))
+        m.addSubMenu ("Automix", automixMenu());
+    if (features::has (features::tempo))
+        m.addSubMenu ("Tempo", tempos);
 
     juce::PopupMenu colours;
     const std::pair<const char*, juce::uint32> palette[] = {
@@ -3241,7 +3580,8 @@ void RackComponent::showRackMenu()
     m.addSeparator();
     m.addItem (menuItem ("Delete", "\xe2\x8c\xab", [&e] { e.deleteSelection(); }));
 
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&menuButton));
+    m.showMenuAsync (menuButton.isVisible() ? juce::PopupMenu::Options().withTargetComponent (&menuButton)
+                                            : juce::PopupMenu::Options());   // thin racks: at the mouse
 }
 
 } // namespace stagerack

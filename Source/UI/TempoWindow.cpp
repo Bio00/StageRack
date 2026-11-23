@@ -596,8 +596,8 @@ public:
         tapValueBox.onChange = [this] { apply ([this] (auto& c) { c.tapValue = tapValueBox.getSelectedId() - 1; }); };
         addAndMakeVisible (tapValueBox);
 
-        sceneToggle.setButtonText ("Scenes");
-        sceneToggle.setTooltip ("Scenes store this tempo and recall it (song tempo per scene). Not while MIDI clock or the drums drive it.");
+        sceneToggle.setButtonText ("Snapshots");
+        sceneToggle.setTooltip ("Snapshots store this tempo and recall it (song tempo per snapshot). Not while MIDI clock or the drums drive it.");
         sceneToggle.onClick = [this] { apply ([this] (auto& c) { c.sceneRecall = sceneToggle.getToggleState(); }); };
         addAndMakeVisible (sceneToggle);
 
@@ -665,7 +665,7 @@ public:
                                   { 8, "After a tap: back to the audio after 8 s" }, { 16, "After a tap: back to the audio after 16 s" },
                                   { 30, "After a tap: back to the audio after 30 s" } })
             afterTapBox.addItem (text, sec + 1);
-        afterTapBox.setTooltip ("Your tap (or a tempo you set, a scene, OSC) always wins over the audio: the audio may then only fine-tune it "
+        afterTapBox.setTooltip ("Your tap (or a tempo you set, a snapshot, OSC) always wins over the audio: the audio may then only fine-tune it "
                                 "(within 4%: tempo decimals, beat on the drums).\n"
                                 "Keep my tap: it stays until you tap again, even if the audio says otherwise.\n"
                                 "Back to the audio: if the audio keeps saying another tempo for that long, it takes over (your tap was a mistake).");

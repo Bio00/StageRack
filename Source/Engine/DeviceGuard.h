@@ -32,6 +32,11 @@ public:
     /** The device the user chose (for the settings file), or null if none yet. */
     const juce::XmlElement* getPreferredState() const noexcept   { return preferred.get(); }
 
+    /** A session asks for this device (its saved app settings): becomes the preferred one and is
+        opened, if it is connected and differs from the current choice. Returns false (nothing
+        changes) when it is not available here. */
+    bool requestDevice (const juce::XmlElement& state);
+
     /** Message for the top bar while no allowed device is open ("Waiting for X..."), else empty. */
     juce::String getStatus() const                                 { return status; }
 

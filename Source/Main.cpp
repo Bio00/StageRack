@@ -8,6 +8,7 @@
 #include "SandboxTest.h"
 #include "Plugins/Sandbox/SandboxHost.h"
 #include "SessionCheck.h"
+#include "SessionRender.h"
 #include "EditTest.h"
 #include "EditorTest.h"
 #include "UndoTest.h"
@@ -190,7 +191,7 @@ public:
             engine.getDeviceManager().initialise (2, 2, nullptr, true);
             auto* w = new SettingsWindow (engine, *pm, session, [] (bool) {}, [] {});   // leaked: _Exit below
             auto* content = w->getContentComponent();
-            for (int page = 0; page < 5; ++page)   // settings-0.png ... settings-4.png
+            for (int page = 0; page < 6; ++page)   // settings-0.png ... settings-5.png
             {
                 w->showPage (page);
                 juce::Image img (juce::Image::ARGB, content->getWidth(), content->getHeight(), true);
@@ -465,6 +466,32 @@ public:
                     png.writeImageToStream (img, os);
                 }
 
+                // customised (user layout): device first, snapshots last, session hidden; then with
+                // the automixer, MIDI and edit groups switched off in Features; then in edit mode
+                for (int demo = 0; demo < 3; ++demo)
+                {
+                    if (demo >= 1)
+                        for (auto f : { features::automix, features::midi, features::editGroups })
+                            features::enabled[f] = false;
+
+                    TopBar bar (session);
+                    bar.setLayoutString ("device,dsp,mute,automix,groups,tempoWindow,midi,tempos,pluginsSettings,view,layoutTheme,snapshots,-session");
+                    bar.setBounds (0, 0, 1300, TopBar::preferredHeight);
+                    if (demo == 2) bar.setCustomizing (true);
+                    bar.updateMeters();
+                    juce::Image img (juce::Image::ARGB, 1300, TopBar::preferredHeight, true);
+                    juce::Graphics g (img);
+                    bar.paintEntireComponent (g, true);
+                    juce::PNGImageFormat png;
+                    juce::FileOutputStream os (dir.getChildFile ("topbar-custom" + juce::String (demo) + (light ? "-light.png" : "-dark.png")));
+                    os.setPosition (0); os.truncate();
+                    png.writeImageToStream (img, os);
+                    bar.setCustomizing (false);
+                }
+
+                for (int f = 0; f < features::numFeatures; ++f)
+                    features::enabled[f] = true;
+
                 if (midiDemo)
                 {
                     MidiPanel panel (session, *midiCtl);
@@ -652,6 +679,15 @@ public:
             juce::Process::setDockIconVisible (false);
             setApplicationReturnValue (runSpreadTest (args));
             quit();
+            return;
+        }
+
+        if (args.contains ("--render-session"))
+        {
+            juce::Process::setDockIconVisible (false);
+            static std::unique_ptr<SessionRender> render;   // waits for the plugins on the message loop, exits with _Exit
+            render = std::make_unique<SessionRender> (args);
+            if (render->start() != 0) std::_Exit (1);
             return;
         }
 

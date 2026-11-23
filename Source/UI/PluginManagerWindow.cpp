@@ -2,6 +2,8 @@
 #include "../Update/Updater.h"
 #include "Theme.h"
 #include "MainComponent.h"
+#include "AudioDevicePanel.h"
+#include "../Engine/Features.h"
 
 namespace stagerack
 {
@@ -177,102 +179,20 @@ PluginManagerWindow::PluginManagerWindow (PluginManager& pm)
 }
 
 //==============================================================================
-/** JUCE's device selector, with the input rows (device, active channels) above the output ones:
-    signal flow order, input first. JUCE lays them out output-first inside a private panel, so the
-    rows are swapped after every layout pass (idempotent). */
-class InputFirstDeviceSelector final : public juce::AudioDeviceSelectorComponent
-{
-public:
-    InputFirstDeviceSelector (juce::AudioDeviceManager& dm, int minIn, int maxIn, int minOut, int maxOut)
-        : juce::AudioDeviceSelectorComponent (dm, minIn, maxIn, minOut, maxOut, true, false, true, false), manager (dm)
-    {
-        manager.addChangeListener (&deviceListener);
-    }
-
-    ~InputFirstDeviceSelector() override { manager.removeChangeListener (&deviceListener); }
-
-    void resized() override
-    {
-        juce::AudioDeviceSelectorComponent::resized();
-        swapRows();
-    }
-
-    void childBoundsChanged (juce::Component* c) override
-    {
-        juce::AudioDeviceSelectorComponent::childBoundsChanged (c);
-        swapRows();
-    }
-
-private:
-    // the panel re-lays itself out on device changes: fix it afterwards
-    struct DeviceListener final : juce::ChangeListener
-    {
-        InputFirstDeviceSelector& owner;
-        explicit DeviceListener (InputFirstDeviceSelector& o) : owner (o) {}
-        void changeListenerCallback (juce::ChangeBroadcaster*) override
-        {
-            juce::Component::SafePointer<InputFirstDeviceSelector> safe (&owner);
-            juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->swapRows(); });
-        }
-    } deviceListener { *this };
-
-    static juce::Component* attachedTo (juce::Component& panel, const juce::String& labelText)
-    {
-        for (auto* c : panel.getChildren())
-            if (auto* l = dynamic_cast<juce::Label*> (c); l != nullptr && l->getText() == labelText)
-                return l->getAttachedComponent();
-        return nullptr;
-    }
-
-    /** Puts the row of `in` where the row of `out` is (and vice versa), if `out` is above. */
-    static void swapPair (juce::Component& panel, juce::Component* out, juce::Component* in)
-    {
-        if (out == nullptr || in == nullptr || out->getY() >= in->getY())
-            return;
-
-        const int top = out->getY(), gap = in->getY() - out->getBottom();
-        const int outY = out->getY(), inY = in->getY();
-        const int newOutY = top + in->getHeight() + gap;
-        juce::Array<juce::Component*> outRow, inRow;
-
-        for (auto* c : panel.getChildren())
-        {
-            if (dynamic_cast<juce::Label*> (c) != nullptr)
-                continue;   // attached labels follow their component
-            if (c->getY() == outY) outRow.add (c);
-            else if (c->getY() == inY) inRow.add (c);
-        }
-
-        for (auto* c : inRow)  c->setTopLeftPosition (c->getX(), top);
-        for (auto* c : outRow) c->setTopLeftPosition (c->getX(), newOutY);
-    }
-
-    void swapRows()
-    {
-        for (auto* panel : getChildren())
-        {
-            swapPair (*panel, attachedTo (*panel, "Output:"), attachedTo (*panel, "Input:"));
-            swapPair (*panel, attachedTo (*panel, "Active output channels:"), attachedTo (*panel, "Active input channels:"));
-        }
-    }
-
-    juce::AudioDeviceManager& manager;
-};
-
-//==============================================================================
 class SettingsContent final : public juce::Component,
                               private juce::Timer
 {
 public:
-    enum PageId { pageAudio, pagePerformance, pageMidi, pageAppearance, pageUpdates, numPages };
+    enum PageId { pageAudio, pagePerformance, pageMidi, pageAppearance, pageFeatures, pageUpdates, numPages };
+    std::function<void()> onFeaturesChanged, onCustomizeTopBar;
 
     SettingsContent (AudioEngine& e, PluginManager& pm, Session& se, std::function<void (bool)> themeChanged,
                      std::function<void()> checkUpdatesFn)
         : engine (e), plugins (pm), session (se), onThemeChanged (std::move (themeChanged)),
           onCheckUpdates (std::move (checkUpdatesFn)),
-          devices (e.getDeviceManager(), 0, 64, 0, 64)
+          devices (e.getDeviceManager())
     {
-        const char* names[numPages] = { "Audio device", "Performance", "MIDI", "Appearance", "Updates" };
+        const char* names[numPages] = { "Audio device", "Performance", "MIDI", "Appearance", "Features", "Updates" };
         for (int i = 0; i < numPages; ++i)
         {
             pages[i].owner = this;
@@ -287,10 +207,11 @@ public:
 
         // ---- Audio device ----------------------------------------------------------------------
         pages[pageAudio].add (devices);
+        devices.onHeightChanged = [this] { if (current == pageAudio) relayoutPage(); };
         pages[pageAudio].layout = [this] (int w)
         {
-            devices.setBounds (0, 6, w, 2000);   // the selector shrinks itself to its content
-            return devices.getBottom() + 12;
+            devices.setTopLeftPosition (0, 6);
+            return 6 + devices.layoutFor (w) + 12;
         };
 
         // ---- Performance -------------------------------------------------------------------------
@@ -409,9 +330,9 @@ public:
             label (midi, l, name);
             midi.add (s);
         };
-        setupCC (nextCC, nextLabel, "Next scene CC", engine.nextSceneCC, "nextSceneCC");
-        setupCC (prevCC, prevLabel, "Previous scene CC", engine.prevSceneCC, "prevSceneCC");
-        note (midi, midiInfo, "MIDI Program Change N recalls scene N+1. Controllers, faders and buttons are mapped in "
+        setupCC (nextCC, nextLabel, "Next snapshot CC", engine.nextSceneCC, "nextSceneCC");
+        setupCC (prevCC, prevLabel, "Previous snapshot CC", engine.prevSceneCC, "prevSceneCC");
+        note (midi, midiInfo, "MIDI Program Change N recalls snapshot N+1. Controllers, faders and buttons are mapped in "
                               "the MIDI window (MIDI in the top bar, \xe2\x8c\x98\xe2\x8c\xa5M) or with MIDI MAP (\xe2\x8c\x98M).");
         midi.layout = [this] (int w)
         {
@@ -424,9 +345,9 @@ public:
             return r.y + 12;
         };
 
-        // ---- Appearance ----------------------------------------------------------------------------
+        // ---- Appearance: every customisation of the whole app in one place ---------------------
         auto& look = pages[pageAppearance];
-        heading (look, lookTitle, "APPEARANCE");
+        heading (look, lookTitle, "THEME");
         lightTheme.setButtonText ("Light theme");
         lightTheme.setToggleState (theme::light, juce::dontSendNotification);
         lightTheme.onClick = [this]
@@ -436,6 +357,7 @@ public:
         };
         look.add (lightTheme);
         note (look, lightNote, "Light colours for daylight and outdoor stages. Dark is easier on the eyes in a dark venue.");
+        commandToggle (look, cmd::tintRacks, "Tinted racks (each rack in its own colour)");
 
         tapFlash.addItemList ({ "Off", "Subtle", "Medium", "Strong", "Full" }, 1);
         tapFlash.setSelectedItemIndex (theme::tapFlash, juce::dontSendNotification);
@@ -447,15 +369,126 @@ public:
         label (look, tapFlashLabel, "TAP beat flash");
         look.add (tapFlash);
         note (look, tapFlashNote, "How much the TAP buttons in the top bar light up on each beat.");
+
+        heading (look, layoutTitle, "LAYOUT");
+        commandToggle (look, cmd::toggleLayout, "Vertical racks (side by side, like a console)");
+        commandToggle (look, cmd::toggleScenes, "Snapshot list");
+        customizeTopBar.setButtonText ("Customize Top Bar...");
+        customizeTopBar.onClick = [this] { if (onCustomizeTopBar) onCustomizeTopBar(); };
+        look.add (customizeTopBar);
+        note (look, topBarNote, "Show, hide and move every block of the top bar (also: right click on the top bar).");
+
+        heading (look, racksTitle, "RACKS");
+        commandToggle (look, cmd::sendKnobs, "Sends as knobs (off: lines)");
+        pluginView.addItemList ({ "Parameters", "Mini view (name when small)", "Meters" }, 1);
+        pluginView.setSelectedItemIndex (Rack::defaultViewMode, juce::dontSendNotification);
+        pluginView.onChange = [this]
+        {
+            Rack::defaultViewMode = pluginView.getSelectedItemIndex();
+            plugins.getSettings().setValue ("pluginView", Rack::defaultViewMode);
+        };
+        label (look, pluginViewLabel, "New plugins show");
+        look.add (pluginView);
+        note (look, pluginViewNote, "What a slot shows when a plugin is inserted. Mini view shows a picture of the editor when "
+                                    "the slot is big enough, otherwise the plugin's name in large letters. Each slot can be "
+                                    "changed from its view button or right click > View.");
+        outFollows.setButtonText ("Output follows the input");
+        outFollows.setToggleState (Session::outputsFollowInputs, juce::dontSendNotification);
+        outFollows.onClick = [this]
+        {
+            Session::outputsFollowInputs = outFollows.getToggleState();
+            plugins.getSettings().setValue ("outFollowsIn", Session::outputsFollowInputs);
+        };
+        look.add (outFollows);
+        note (look, outFollowsNote, "Picking IN 5 (mono) also sets OUT 5 (mono); IN 5-6 sets OUT 5-6. New racks are mono, "
+                                    "on the next free input. Racks going to a bus or to no output keep theirs.");
+
         look.layout = [this] (int w)
         {
             Rows r (w);
             lookTitle.setBounds (r.row (24));
             lightTheme.setBounds (r.row (26));
             lightNote.setBounds (r.text (lightNote, 26));
-            r.gap (10);
+            commandToggles[0]->setBounds (r.row (26));
+            r.gap (4);
             auto t = r.row (28); tapFlashLabel.setBounds (t.removeFromLeft (150)); tapFlash.setBounds (t.removeFromLeft (160));
             tapFlashNote.setBounds (r.text (tapFlashNote, 150));
+
+            r.gap (12);
+            layoutTitle.setBounds (r.row (24));
+            commandToggles[1]->setBounds (r.row (26));
+            commandToggles[2]->setBounds (r.row (26));
+            r.gap (4);
+            auto b = r.row (28); customizeTopBar.setBounds (b.removeFromLeft (180));
+            topBarNote.setBounds (r.text (topBarNote, 0));
+
+            r.gap (12);
+            racksTitle.setBounds (r.row (24));
+            commandToggles[3]->setBounds (r.row (26));
+            r.gap (4);
+            auto v = r.row (28); pluginViewLabel.setBounds (v.removeFromLeft (150)); pluginView.setBounds (v.removeFromLeft (220));
+            pluginViewNote.setBounds (r.text (pluginViewNote, 150));
+            r.gap (4);
+            outFollows.setBounds (r.row (26));
+            outFollowsNote.setBounds (r.text (outFollowsNote, 26));
+            return r.y + 12;
+        };
+
+        // ---- Features ------------------------------------------------------------------------------
+        auto& feat = pages[pageFeatures];
+        heading (feat, featuresTitle, "FEATURES");
+        note (feat, featuresNote, "Switch off what you don't use for a simpler StageRack: it disappears from the top bar, "
+                                  "the menus and the racks, and stops acting. Sessions keep their settings: switch it "
+                                  "back on and everything is there.");
+
+        for (int i = 0; i < features::numFeatures; ++i)
+        {
+            const auto f = (features::Feature) i;
+            auto* t = featureToggles.add (new juce::ToggleButton (features::name (f)));
+            t->setToggleState (features::has (f), juce::dontSendNotification);
+            t->onClick = [this, f, t]
+            {
+                features::enabled[f] = t->getToggleState();
+                if (onFeaturesChanged) onFeaturesChanged();
+            };
+            feat.add (*t);
+
+            auto* l = featureNotes.add (new juce::Label());
+            l->setText (features::description (f), juce::dontSendNotification);
+            l->setFont (theme::font (12.0f));
+            l->setJustificationType (juce::Justification::topLeft);
+            l->setMinimumHorizontalScale (1.0f);
+            feat.add (*l);
+        }
+
+        heading (feat, sessionAppTitle, "SESSIONS");
+        sessionApp.setButtonText ("Sessions remember these settings");
+        sessionApp.setToggleState (plugins.getSettings().getBoolValue ("sessionAppSettings", true), juce::dontSendNotification);
+        sessionApp.onClick = [this] { plugins.getSettings().setValue ("sessionAppSettings", sessionApp.getToggleState()); };
+        feat.add (sessionApp);
+        note (feat, sessionAppNote, "Saving a session also saves the features, the audio device (interface, rate, buffer, channels), "
+                                    "the top bar, the send style, light/dark, tinted racks and vertical/horizontal. Opening the "
+                                    "session brings them back. An audio device that is not connected is left alone (the current "
+                                    "one stays). Off: sessions open with the settings you have now.");
+
+        feat.layout = [this] (int w)
+        {
+            Rows r (w);
+            featuresTitle.setBounds (r.row (24));
+            featuresNote.setBounds (r.text (featuresNote, 0));
+            r.gap (6);
+
+            for (int i = 0; i < featureToggles.size(); ++i)
+            {
+                featureToggles[i]->setBounds (r.row (26));
+                featureNotes[i]->setBounds (r.text (*featureNotes[i], 26));
+                r.gap (4);
+            }
+
+            r.gap (14);
+            sessionAppTitle.setBounds (r.row (24));
+            sessionApp.setBounds (r.row (26));
+            sessionAppNote.setBounds (r.text (sessionAppNote, 0));
             return r.y + 12;
         };
 
@@ -498,9 +531,12 @@ public:
 
     void lookAndFeelChanged() override
     {
-        for (auto* l : { &dspTitle, &isolateTitle, &sceneTitle, &lookTitle, &updatesTitle })
+        for (auto* l : { &dspTitle, &isolateTitle, &sceneTitle, &lookTitle, &updatesTitle, &featuresTitle, &layoutTitle, &racksTitle, &sessionAppTitle })
             l->setColour (juce::Label::textColourId, theme::accent);
-        for (auto* l : { &spreadNote, &isolateNote, &midiInfo, &lightNote, &tapFlashNote, &updateNote, &respreadStatus, &versionLabel })
+        for (auto* l : { &spreadNote, &isolateNote, &midiInfo, &lightNote, &tapFlashNote, &pluginViewNote, &outFollowsNote, &topBarNote, &updateNote, &respreadStatus, &versionLabel,
+                         &featuresNote, &topBarNote })
+            l->setColour (juce::Label::textColourId, theme::textDim);
+        for (auto* l : featureNotes)
             l->setColour (juce::Label::textColourId, theme::textDim);
         isolateWarning.setColour (juce::Label::textColourId, theme::amber);
         repaint();
@@ -559,7 +595,7 @@ private:
             juce::AttributedString s;
             s.append (l.getText(), l.getFont());
             juce::TextLayout tl;
-            tl.createLayout (s, (float) tw - 6.0f);
+            tl.createLayout (s, (float) tw - 14.0f);   // the label border eats a few px
             const int h = (int) std::ceil (tl.getHeight()) + 6;
             auto r = juce::Rectangle<int> (indent, y, tw, h);
             y += h + 4;
@@ -630,6 +666,47 @@ private:
         p.add (l);
     }
 
+    /** A toggle bound to a menu command (same action and tick as the View menu). */
+    void commandToggle (Page& p, juce::CommandID id, const juce::String& text)
+    {
+        auto* t = commandToggles.add (new juce::ToggleButton (text));
+        t->getProperties().set ("cmd", (int) id);
+        t->onClick = [this, id]
+        {
+            if (commands != nullptr)
+                commands->invokeDirectly (id, false);
+            syncCommandToggles();
+        };
+        p.add (*t);
+    }
+
+public:
+    void syncCommandToggles()
+    {
+        lightTheme.setToggleState (theme::light, juce::dontSendNotification);
+
+        for (auto* t : commandToggles)
+        {
+            const auto id = (juce::CommandID) (int) t->getProperties()["cmd"];
+            juce::ApplicationCommandInfo info (id);
+            bool on = false, enabled = commands != nullptr;
+
+            if (commands != nullptr)
+                if (auto* target = commands->getTargetForCommand (id, info))
+                {
+                    juce::ignoreUnused (target);
+                    on = (info.flags & juce::ApplicationCommandInfo::isTicked) != 0;
+                    enabled = (info.flags & juce::ApplicationCommandInfo::isDisabled) == 0;
+                }
+
+            t->setToggleState (on, juce::dontSendNotification);
+            t->setEnabled (enabled && (cmd::featureOf (id) < 0 || features::has ((features::Feature) cmd::featureOf (id))));
+        }
+    }
+
+    juce::ApplicationCommandManager* commands = nullptr;
+
+private:
     void label (Page& p, juce::Label& l, const juce::String& text)
     {
         l.setText (text, juce::dontSendNotification);
@@ -683,6 +760,8 @@ private:
     void timerCallback() override
     {
         respreadStatus.setText (session.getRespreadStatus(), juce::dontSendNotification);
+        if (current == pageAppearance)
+            syncCommandToggles();   // also changed from the menus
         respread.setEnabled (engine.hopAlignEnabled && ! session.isRespreading());
     }
 
@@ -697,11 +776,19 @@ private:
     Page pages[numPages];
     int current = 0;
 
-    InputFirstDeviceSelector devices;
+    AudioDevicePanel devices;
     juce::Label dspTitle, threadsLabel, spreadNote, respreadStatus, spinLabel, isolateTitle, isolateNote, isolateWarning;
     juce::Label sceneTitle, nextLabel, prevLabel, midiInfo;
-    juce::Label lookTitle, lightNote, tapFlashLabel, tapFlashNote;
+    juce::Label lookTitle, lightNote, tapFlashLabel, tapFlashNote, layoutTitle, racksTitle, pluginViewLabel, pluginViewNote, outFollowsNote;
+    juce::OwnedArray<juce::ToggleButton> commandToggles;
+    juce::ToggleButton outFollows;
+    juce::ComboBox pluginView;
     juce::Label updatesTitle, updateNote, versionLabel;
+    juce::Label featuresTitle, featuresNote, topBarNote, sessionAppTitle, sessionAppNote;
+    juce::ToggleButton sessionApp;
+    juce::OwnedArray<juce::ToggleButton> featureToggles;
+    juce::OwnedArray<juce::Label> featureNotes;
+    juce::TextButton customizeTopBar;
     juce::ToggleButton spread, lightTheme, autoUpdate, isolate;
     juce::TextButton respread, checkUpdates, changelog;
     juce::ComboBox threads, spin, tapFlash;
@@ -713,7 +800,10 @@ SettingsWindow::SettingsWindow (AudioEngine& e, PluginManager& pm, Session& se, 
     : juce::DocumentWindow ("Settings", theme::bg, juce::DocumentWindow::closeButton)
 {
     setUsingNativeTitleBar (true);
-    setContentOwned (new SettingsContent (e, pm, se, std::move (onThemeChanged), std::move (onCheckUpdates)), true);
+    auto* content = new SettingsContent (e, pm, se, std::move (onThemeChanged), std::move (onCheckUpdates));
+    content->onFeaturesChanged = [this] { if (onFeaturesChanged) onFeaturesChanged(); };
+    content->onCustomizeTopBar = [this] { if (onCustomizeTopBar) onCustomizeTopBar(); };
+    setContentOwned (content, true);
     setResizable (true, false);
     setResizeLimits (600, 360, 1600, 2400);
 
@@ -722,6 +812,15 @@ SettingsWindow::SettingsWindow (AudioEngine& e, PluginManager& pm, Session& se, 
                     ? juce::Desktop::getInstance().getDisplays().getPrimaryDisplay()->userBounds.toNearestInt()
                     : juce::Rectangle<int> (0, 0, 1280, 800);
     centreWithSize (juce::jmin (getWidth(), area.getWidth() - 40), juce::jmin (getHeight(), area.getHeight() - 60));
+}
+
+void SettingsWindow::setCommands (juce::ApplicationCommandManager* c)
+{
+    if (auto* content = dynamic_cast<SettingsContent*> (getContentComponent()))
+    {
+        content->commands = c;
+        content->syncCommandToggles();
+    }
 }
 
 void SettingsWindow::showPage (int page)

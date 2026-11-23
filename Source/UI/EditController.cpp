@@ -142,6 +142,8 @@ std::vector<std::pair<Rack*, int>> EditController::linkedSlots (const Rack& orig
 //==============================================================================
 void EditController::syncGroupParameters()
 {
+    if (! features::has (features::editGroups))
+        return;   // switched off in Features: no parameter comparison at 30 Hz
     auto& engine = session.getEngine();
 
     // a new session frees plugins (their addresses can come back): start over

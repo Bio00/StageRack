@@ -12,7 +12,7 @@ namespace stagerack
 class SlotComponent;
 
 /** ComboBox whose popup is built by its owner (the OUT selector: ticks on every destination,
-    Ctrl-click / "Additional outputs" adds more). */
+    Cmd/Ctrl-click in the menu adds more). */
 struct OwnPopupComboBox final : public juce::ComboBox
 {
     std::function<void()> onPopup;

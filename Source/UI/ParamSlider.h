@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "ValueEntry.h"
 
 namespace stagerack
 {
@@ -10,6 +11,8 @@ namespace stagerack
     - Alt-click (press and release without moving) = back to the default value
       (setDoubleClickReturnValue). Alt-drag still drags, so Alt keeps meaning "all the selected
       racks" while dragging; a reset with Alt on a selected rack resets them all.
+    - A plain click (no drag) = type the value (ValueEntry).
+    - Wheel = scrolls what is behind (the racks); Ctrl + wheel edits.
     - Cmd (or Shift) held = fine: the drag moves 5x slower. It can be pressed or released in the
       middle of a drag without the value jumping.
     Works with relative drags (rotary, faders that don't snap to the mouse).
@@ -30,6 +33,7 @@ public:
     {
         altClick = e.mods.isAltDown() && ! e.mods.isPopupMenu() && isDoubleClickReturnEnabled() && isEnabled();
         lastRaw = virtualPos = e.position;
+        entry.mouseDown();
         juce::Slider::mouseDown (e);
     }
 
@@ -53,10 +57,33 @@ public:
 
         altClick = false;
         juce::Slider::mouseUp (e.withNewPosition (virtualPos));
+
+        if (clickToType)
+            entry.mouseUp (*this, e,
+                           [this] { return juce::String (getValue(), getNumDecimalPlacesToDisplay()); },
+                           [this] (const juce::String& t) { typeValue (parseTypedNumber (t)); });
     }
+
+    /** As if dragged to v: same callbacks (Alt links, undo step / dirty). */
+    void typeValue (double v)
+    {
+        if (onDragStart != nullptr) onDragStart();
+        setValue (juce::jlimit (getMinimum(), getMaximum(), v), juce::sendNotificationSync);
+        if (onDragEnd != nullptr) onDragEnd();
+    }
+
+    bool clickToType = true;
+    bool wheelScrollsParent = true;   // false: plain wheel edits (windows without scrolling)
 
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
+        // the wheel scrolls the racks; it edits only with Ctrl held (scrolling over a knob must never change it)
+        if (! e.mods.isCtrlDown() && wheelScrollsParent)
+        {
+            juce::Component::mouseWheelMove (e, w);
+            return;
+        }
+
         if (isFine (e.mods))
         {
             auto fine = w;
@@ -72,6 +99,7 @@ public:
 private:
     bool altClick = false;
     juce::Point<float> lastRaw, virtualPos;
+    ValueEntry entry;
 };
 
 } // namespace stagerack

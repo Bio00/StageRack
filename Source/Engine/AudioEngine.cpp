@@ -607,7 +607,7 @@ AudioEngine::GraphPlan AudioEngine::planGraph (const std::vector<Rack*>& list) c
         return nullptr;
     };
 
-    const bool routing = routingEnabled.load();
+    const bool routing = isRoutingActive();
     std::array<Rack*, Rack::maxBuses> buses {};
 
     for (auto* r : list)
@@ -1041,7 +1041,7 @@ void AudioEngine::computeAutomixGains (bool anySolo) noexcept
     // no threshold, no attack delay. Runs once per callback on the IO thread, after all
     // racks finished: zero latency, ~N multiplies.
     constexpr int maxGroupRacks = 128;
-    const bool enabled = automixEnabled.load (std::memory_order_relaxed);
+    const bool enabled = automixEnabled.load (std::memory_order_relaxed) && features::has (features::automix);
 
     for (int g = 1; g <= Rack::maxAutomixGroups; ++g)
     {
@@ -1168,7 +1168,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
     // CoreAudio's host time and nowSec() both count mach_absolute_time.
     {
         const auto hostNs = context.hostTimeNs != nullptr ? *context.hostTimeNs : (juce::uint64) 0;
-        tempo.processBlock (deviceIns.data(), numDeviceInputs, numSamples,
+        // tap tempo switched off in Features: play heads only, no audio onset detectors
+        tempo.processBlock (deviceIns.data(), features::has (features::tempo) ? numDeviceInputs : 0, numSamples,
                             hostNs != 0 ? (double) hostNs * 1.0e-9 : TempoEngine::nowSec(), hostNs);
     }
 
@@ -1176,7 +1177,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
     for (auto& r : racks)
     {
         int mask = 0;
-        for (int i = 0; i < tempo.getNumTempos(); ++i)
+        for (int i = 0; features::has (features::tempo) && i < tempo.getNumTempos(); ++i)
             if (tempo.getAudioRackId (i) == r->getId())
                 mask |= 1 << tempo.getAudioPoint (i);
         r->tempoTapMask.store (mask, std::memory_order_relaxed);
@@ -1250,7 +1251,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
     }
 
     // the racks ran: tempo detectors on their audio (same block, so the beat time is exact)
-    for (int i = 0; i < tempo.getNumTempos(); ++i)
+    for (int i = 0; features::has (features::tempo) && i < tempo.getNumTempos(); ++i)
     {
         if (const auto id = tempo.getAudioRackId (i); id >= 0)
         {
@@ -1386,10 +1387,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
 //==============================================================================
 void AudioEngine::handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& m)
 {
-    if (midiRemote != nullptr && source != nullptr && midiRemote (source->getIdentifier(), source->getName(), m))
+    if (features::has (features::midi) && midiRemote != nullptr && source != nullptr
+        && midiRemote (source->getIdentifier(), source->getName(), m))
         return;   // a MIDI mapping uses it
 
-    tempo.handleMidi (m);   // taps (note / CC), clock, learn
+    if (features::has (features::tempo))
+        tempo.handleMidi (m);   // taps (note / CC), clock, learn
+
+    if (! features::has (features::snapshots))
+        return;
 
     if (m.isProgramChange())
     {

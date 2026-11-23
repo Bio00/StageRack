@@ -56,6 +56,7 @@ inline int runEditSelfTest()
         auto p = pm->getFormatManager().createPluginInstance (delay, sr, bs, err);
         Rack::configurePlugin (*p, sr, bs);
         r->setPlugin (0, std::move (p));
+        r->getSlot (0).viewMode = 0;   // parameter rows (new plugins default to the mini view)
     }
 
     engine.prepare (sr, bs, {});
@@ -227,7 +228,7 @@ inline int runEditSelfTest()
         // --- parameter row: Alt-drag sets the same parameter in C's AUDelay
         juce::Component* row = nullptr;
         for (auto* ch : slotB->getChildren())
-            if (ch->isVisible() && ch->getWidth() > 30 && ch->getHeight() < 20)
+            if (ch->isVisible() && ch->getWidth() > 30 && ch->getHeight() < 30 && ch->getY() > 15)   // narrow slots: two-line rows
                 row = ch;
 
         check (row != nullptr, "parameter row visible on B's slot");
@@ -324,7 +325,7 @@ inline int runEditSelfTest()
         {
             juce::Component* row = nullptr;
             for (auto* ch : slot->getChildren())
-                if (ch->isVisible() && ch->getWidth() > 30 && ch->getHeight() < 20)
+                if (ch->isVisible() && ch->getWidth() > 30 && ch->getHeight() < 30 && ch->getY() > 15)   // narrow slots: two-line rows
                     row = ch;
 
             if (row != nullptr)

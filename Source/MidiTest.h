@@ -74,6 +74,11 @@ inline void runMidiSelfTest (const std::function<void (bool, const juce::String&
 
     using namespace midiprofiles::midimix;
     const auto n = midi.quickSetup (dev);
+    for (auto m : midi.getMappings())   // the default is now "jump": test the pick-up explicitly
+    {
+        m.takeover = MidiMapping::pickup;
+        midi.updateMapping (m);
+    }
     check (n == 8 * 7 + 3, "MIDImix quick setup: 8 strips x 7 controls + bank < > + SOLO (" + juce::String (n) + ")");
     check (midi.describeSource (midi.getMappings().front()) == "Fader 1", "MIDImix controls have their names (Fader 1)");
 

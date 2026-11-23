@@ -129,6 +129,33 @@ void DeviceGuard::openPreferred()
         DBG ("Reopening " << preferredName() << ": " << error);
 }
 
+bool DeviceGuard::requestDevice (const juce::XmlElement& state)
+{
+    if (inName (state).isEmpty() && outName (state).isEmpty())
+        return false;
+
+    if (preferred != nullptr && preferred->isEquivalentTo (&state, true))
+        return true;
+
+    auto previous = std::move (preferred);
+    preferred = std::make_unique<juce::XmlElement> (state);
+
+    if (! preferredIsAvailable())
+    {
+        preferred = std::move (previous);   // not connected here: keep the device in use
+        return false;
+    }
+
+    lastOpenAttempt = 0;
+    openPreferred();
+
+    if (onPreferredChanged != nullptr)
+        onPreferredChanged (*preferred);
+
+    evaluate (false);
+    return true;
+}
+
 void DeviceGuard::closeDevice()
 {
     ++ownChanges;

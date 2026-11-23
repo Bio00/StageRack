@@ -120,7 +120,12 @@ private:
     } addRackButton;
     void showAddRacksMenu();
     void commonConstructorTail();
-    void openSettings();
+    void openSettings (int page = -1);   // page: 0 audio device ... (-1 = the last one shown)
+    void featuresChanged();
+    void sendStyleChanged();
+    void repaintEverything();   // every component, also the cached rack images
+    juce::ValueTree captureAppSettings();
+    void applyAppSettings (const juce::ValueTree&);
     void openPluginManager();
     void openAutomixer();
     void openTempo();

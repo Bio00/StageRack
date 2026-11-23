@@ -366,6 +366,61 @@ inline void runRoutingSelfTest (const std::function<void (bool, const juce::Stri
                "ungroup: members go one level up, into the outer folder");
         check (s.undo() && e.getNumRacks() == before && e.findRack (r3)->folderId != fid, "ungroup is undoable");
     }
+
+    // --- app settings saved in the session (features, audio device...): written by the app at
+    // new racks: mono, next free input, output = the same channel; picking an input moves the output
+    {
+        AudioEngine e;
+        e.prepare (48000.0, 64, {});
+        auto* pm = new PluginManager();   // leaked on purpose
+        Session s (e, *pm);
+        s.newSession();
+        auto& first = e.getRack (0);
+        auto& r = s.addRack();
+        check (! first.stereoInput.load() && ! first.stereoOutput.load() && first.inputChannel.load() == 0 && first.outputChannel.load() == 0
+                 && ! r.stereoInput.load() && ! r.stereoOutput.load() && r.inputChannel.load() == 1 && r.outputChannel.load() == 1,
+               "new racks are mono, IN n -> OUT n");
+
+        r.inputChannel = 6; r.stereoInput = true;
+        Session::followInput (r, e.isRoutingActive());
+        const bool followed = r.outputChannel.load() == 6 && r.stereoOutput.load();
+        r.outputChannel = -1; r.inputChannel = 2;
+        Session::followInput (r, e.isRoutingActive());
+        check (followed && r.outputChannel.load() == -1, "output follows the input (not when OUT is none)");
+    }
+
+    // save time, handed back after a load, kept as they were without the app
+    {
+        AudioEngine e;
+        e.prepare (48000.0, 64, {});
+        auto* pm = new PluginManager();   // leaked on purpose (its destructor saves files)
+        Session s (e, *pm);
+        s.captureAppSettings = []
+        {
+            juce::ValueTree t ("APPSETTINGS");
+            t.setProperty ("feature_automix", false, nullptr);
+            juce::ValueTree dev ("DEVICESETUP");
+            dev.setProperty ("audioOutputDeviceName", "Dante Virtual Soundcard", nullptr);
+            t.appendChild (dev, nullptr);
+            return t;
+        };
+        const auto tree = s.toTree();
+
+        AudioEngine e2;
+        e2.prepare (48000.0, 64, {});
+        Session s2 (e2, *pm);
+        juce::ValueTree applied;
+        s2.applyAppSettings = [&applied] (const juce::ValueTree& t) { applied = t.createCopy(); };
+        s2.loadFromTree (tree, {}, false);
+        check (applied.isValid() && ! (bool) applied["feature_automix"]
+                 && applied.getChildWithName ("DEVICESETUP")["audioOutputDeviceName"].toString() == "Dante Virtual Soundcard",
+               "session brings back its app settings (features, audio device)");
+        s2.applyAppSettings = nullptr;
+        check (s2.toTree().getChildWithName ("APPSETTINGS").isEquivalentTo (tree.getChildWithName ("APPSETTINGS")),
+               "without the app the session's app settings are written back unchanged");
+        s2.newSession();
+        check (! s2.toTree().getChildWithName ("APPSETTINGS").isValid(), "a new session has no app settings of its own");
+    }
 }
 
 } // namespace stagerack

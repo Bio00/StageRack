@@ -1,6 +1,7 @@
 #include "RtLock.h"
 #include "RtGuard.h"
 #include "Rack.h"
+#include "Features.h"
 #include "TempoEngine.h"
 #include "WorkerPool.h"
 #include <pthread.h>
@@ -152,7 +153,8 @@ std::unique_ptr<juce::AudioPluginInstance> Rack::setPlugin (int slot, std::uniqu
         s.hopWaitMs = -1.0f;
         s.shownParams.clearQuick();
         s.paramsChosen = false;
-        s.viewMode = 0;
+        s.viewMode = defaultViewMode;
+        s.hiddenMeters.clear();
     }
 
     if (temp.plugin != nullptr)
@@ -179,6 +181,7 @@ void Rack::moveSlot (int from, int to)
     std::swap (a.paramsChosen, b.paramsChosen);
     std::swap (a.uiSize, b.uiSize);
     std::swap (a.viewMode, b.viewMode);
+    std::swap (a.hiddenMeters, b.hiddenMeters);
     const int ah = a.hopCalls, ap = a.hopPhase;
     a.hopCalls = b.hopCalls.load();
     a.hopPhase = b.hopPhase.load();
@@ -693,7 +696,9 @@ void Rack::applyCompensation (int numSamples) noexcept
 
 void Rack::updateAutomixLevel (int numSamples) noexcept
 {
-    if (automixGroup.load (std::memory_order_relaxed) <= 0 || muted.load (std::memory_order_relaxed))
+    // automixer switched off in SETTINGS > Features: no detector at all (no cost)
+    if (automixGroup.load (std::memory_order_relaxed) <= 0 || muted.load (std::memory_order_relaxed)
+        || ! features::has (features::automix))
     {
         // out of the group at once (a muted rack too)
         automixLevel = 0.0f;

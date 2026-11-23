@@ -80,6 +80,7 @@ private:
     juce::uint32 seenChange = 0xffffffffu;
     int seenCount = -1, seenOscPort = -1;
     bool seenOscListening = false, wantsThread = false;
+    bool seenFeature = true;
 
     JUCE_DECLARE_NON_COPYABLE (TempoOutput)
 };

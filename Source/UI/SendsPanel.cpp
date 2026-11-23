@@ -43,7 +43,7 @@ bool SendsPanel::update()
 
     const auto shownMask = session.sendsShown (rack);   // the view (session or this rack) may hide some
 
-    if (engine.isRoutingEnabled())
+    if (engine.isRoutingActive())
         for (int k = 1; k <= Rack::maxBuses; ++k)
             if (auto* bus = engine.findBus (k); bus != nullptr && bus != &rack && ! bus->isFolder && engine.canSendTo (rack, k)
                                                 && (shownMask & (1 << (k - 1))) != 0)
@@ -73,11 +73,11 @@ SendsPanel::Grid SendsPanel::grid (int width) const noexcept
     const auto n = juce::jmax (1, (int) letters.size());
 
     if (! usesKnobs (width))
-        return { 1, fitHeight > 0 ? juce::jlimit (barH, 22, fitHeight / n) : barH };
+        return { 1, fitHeight > 0 ? juce::jlimit (stripH, stripMaxH, fitHeight / n) : stripH };
 
     // the most columns that fit; with room to spare, the column count that gives the biggest knobs
     const bool mini = miniKnobs (width);
-    const auto baseH = cellHFor (width), label = mini ? 11 : 15, side = mini ? 2 : 8;
+    const auto baseH = cellHFor (width), label = mini ? 13 : 15, side = mini ? 4 : 8;
     const auto maxCols = juce::jmax (1, width / cellWFor (width));
     auto knobSize = [=] (int cols, int cellH) { return juce::jmin (110, juce::jmin (width / cols - side, cellH - label)); };
     Grid best { maxCols, baseH };
@@ -156,6 +156,56 @@ void SendsPanel::paintBar (juce::Graphics& g, int i)
     auto b = cellBounds (i).toFloat().reduced (0.0f, 1.0f);
     const auto colour = bus != nullptr ? bus->colour : theme::accent;
     const bool active = hoverCell == i || dragCell == i;
+
+    if (b.getHeight() >= 24.0f)
+    {
+        // strip: letter + bus name on top, the bar below with its value always written
+        auto top = b.removeFromTop (juce::jmin (13.0f, b.getHeight() * 0.42f));
+        b.removeFromTop (1.0f);
+
+        g.setFont (theme::font (10.0f, true));
+        g.setColour (colour);
+        g.drawText (letterOf (letter), top.removeFromLeft (10.0f), juce::Justification::centredLeft);
+
+        if (snd.pre.load())
+        {
+            auto tag = top.removeFromRight (top.getWidth() > 60.0f ? 22.0f : 6.0f);
+            g.setColour (theme::amber.withAlpha (0.9f));
+            if (tag.getWidth() > 10.0f)
+            {
+                g.fillRoundedRectangle (tag.reduced (0.0f, 1.5f), 2.0f);
+                g.setColour (juce::Colours::black);
+                g.setFont (theme::font (7.5f, true));
+                g.drawText ("PRE", tag, juce::Justification::centred);
+            }
+            else
+            {
+                g.fillEllipse (tag.withSizeKeepingCentre (5.0f, 5.0f));
+            }
+        }
+
+        g.setColour (theme::text.withAlpha (0.75f));
+        g.setFont (theme::font (9.5f));
+        g.drawFittedText (bus != nullptr ? bus->name : juce::String(), top.toNearestInt(), juce::Justification::centredLeft, 1, 0.7f);
+
+        const bool on = db > Rack::sendOffDb;
+        g.setColour (theme::well);
+        g.fillRoundedRectangle (b, 3.0f);
+
+        if (on)
+        {
+            g.setColour (colour.withAlpha (active ? 0.7f : 0.5f));
+            g.fillRoundedRectangle (b.withWidth (juce::jmax (3.0f, b.getWidth() * dbToPos (db))), 3.0f);
+        }
+
+        g.setColour (active ? colour : colour.withAlpha (0.45f));
+        g.drawRoundedRectangle (b.reduced (0.5f), 3.0f, 1.0f);
+
+        g.setColour (on ? theme::text : theme::textDim);
+        g.setFont (theme::font (juce::jlimit (10.0f, 13.0f, b.getHeight() * 0.62f), on));
+        g.drawFittedText (on ? valueText (db) : juce::String ("off"), b.toNearestInt().reduced (2, 0), juce::Justification::centred, 1, 0.7f);
+        return;
+    }
 
     g.setColour (theme::well);
     g.fillRoundedRectangle (b, 3.0f);
@@ -237,9 +287,18 @@ void SendsPanel::paintKnob (juce::Graphics& g, int i)
         g.strokePath (arc, juce::PathStrokeType (juce::jmax (3.0f, size * 0.06f), juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
 
-    g.setColour (db > Rack::sendOffDb ? colour : theme::textDim);
-    g.setFont (theme::font (juce::jlimit (8.5f, 17.0f, size * 0.3f), true));
-    g.drawText (letterOf (letter), knob.reduced (radius * 0.45f), juce::Justification::centred);
+    // the bus letter, or the level when the send is on and the knob is big enough to read it
+    const bool valueInside = db > Rack::sendOffDb && size >= 26.0f;
+    g.setColour (db > Rack::sendOffDb ? (valueInside ? theme::text : colour) : theme::textDim);
+    g.setFont (theme::font (juce::jlimit (8.5f, 17.0f, size * (valueInside ? 0.24f : 0.3f)), true));
+    g.drawFittedText (valueInside ? valueText (db) : letterOf (letter), knob.reduced (radius * (valueInside ? 0.2f : 0.3f)).toNearestInt(),
+                      juce::Justification::centred, 1, 0.7f);
+    if (valueInside)
+    {
+        g.setColour (colour);
+        g.setFont (theme::font (juce::jlimit (7.5f, 11.0f, size * 0.16f), true));
+        g.drawText (letterOf (letter), knob.withTop (knob.getBottom() - radius * 0.55f), juce::Justification::centredTop);
+    }
 
     if (snd.pre.load())
     {
@@ -261,6 +320,8 @@ void SendsPanel::paintKnob (juce::Graphics& g, int i)
 
     g.setFont (theme::font (size > 60.0f ? 10.5f : (small ? 8.0f : 9.0f), active));
     g.setColour (active ? theme::text : theme::text.withAlpha (0.8f));
+
+    // the level is written on the knob (in place of the letter) while it is on and there is room
     g.drawFittedText (active ? valueText (db) + (small ? juce::String() : juce::String (" dB")) : (bus != nullptr ? bus->name : juce::String()),
                       label.expanded (small ? 2 : 0, 0), juce::Justification::centred, 1, 0.6f);
 }
@@ -308,6 +369,7 @@ void SendsPanel::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    entry.mouseDown();
     dragCell = cell;
     dragMods = e.mods;
     dragLastDb = rack.sends[(size_t) letters[(size_t) cell] - 1].db.load();
@@ -333,8 +395,9 @@ void SendsPanel::mouseDrag (const juce::MouseEvent& e)
     const auto fine = ParamSlider::isFine (e.mods) ? 1.0f / ParamSlider::fineFactor : 1.0f;
     const auto d = e.position - dragLast;
     dragLast = e.position;
+    // strips: right or up = more (a thin rack has little width to drag across)
     dragPos = juce::jlimit (0.0f, 1.0f, dragPos + (knobs() ? -d.y / (160.0f * fine)
-                                                           : d.x / (fine * (float) juce::jmax (40, getWidth()))));
+                                                           : (d.x - d.y) / (160.0f * fine)));
     const auto db = posToDb (dragPos);
     const auto delta = (db > Rack::sendOffDb && dragLastDb > Rack::sendOffDb) ? db - dragLastDb : 0.0f;
     setLevel (letters[(size_t) dragCell], db, dragMods, delta);
@@ -347,7 +410,25 @@ void SendsPanel::mouseUp (const juce::MouseEvent& e)
         setLevel (letters[(size_t) dragCell], Rack::sendOffDb, dragMods);
 
     if (dragCell >= 0)
+    {
         session.markDirty();
+
+        // a plain click: type the level ("-6", "0", "off")
+        const auto letter = letters[(size_t) dragCell];
+        entry.mouseUp (*this, e,
+                       [this, letter]
+                       {
+                           const auto db = rack.sends[(size_t) letter - 1].db.load();
+                           return db <= Rack::sendOffDb ? juce::String ("off") : juce::String (db, 1);
+                       },
+                       [this, letter] (const juce::String& t)
+                       {
+                           const auto off = t.containsIgnoreCase ("off") || t.containsIgnoreCase ("inf")
+                                            || t.retainCharacters ("0123456789").isEmpty();
+                           setLevel (letter, off ? Rack::sendOffDb : juce::jlimit (minDb, maxDb, (float) parseTypedNumber (t)), {});
+                           session.markDirty();
+                       });
+    }
 
     altClick = false;
 
@@ -470,6 +551,9 @@ void SendsPanel::showMenu (int cell)
     m.addItem ("Off", [setDb] { setDb (Rack::sendOffDb); });
     m.addSeparator();
     m.addSubMenu ("Sends shown", sendsShownMenu (session, edit, rack));
+    m.addSeparator();
+    m.addItem ("Sends as Knobs", true, knobStyle, [] { knobStyle = true;  if (onStyleChanged) onStyleChanged(); });
+    m.addItem ("Sends as Lines", true, ! knobStyle, [] { knobStyle = false; if (onStyleChanged) onStyleChanged(); });
     m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (localAreaToGlobal (cellBounds (cell))));
 }
 

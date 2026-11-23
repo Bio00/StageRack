@@ -238,7 +238,7 @@ private:
 AutomixerPanel::AutomixerPanel (Session& s) : session (s)
 {
     enableButton.setClickingTogglesState (true);
-    enableButton.setTooltip ("Automixer on/off for all groups (stored in scenes). Off = every rack at unity gain.");
+    enableButton.setTooltip ("Automixer on/off for all groups (stored in snapshots). Off = every rack at unity gain.");
     enableButton.onClick = [this]
     {
         session.getEngine().automixEnabled = enableButton.getToggleState();

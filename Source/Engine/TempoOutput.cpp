@@ -1,4 +1,5 @@
 #include "TempoOutput.h"
+#include "Features.h"
 #include "OscInput.h"
 
 namespace stagerack
@@ -40,6 +41,7 @@ void TempoOutput::update()
     const auto change = tempo.getChangeCount();
     const int n = tempo.getNumTempos();
     const bool listening = oscIn.isListening();
+    const bool feature = features::has (features::tempo);   // off in Features: nothing goes out
 
     // nothing changed; a missing MIDI device is looked for again every ~3 s
     static int retry = 0;
@@ -50,8 +52,10 @@ void TempoOutput::update()
     }
 
     if (change == seenChange && n == seenCount && oscIn.getPort() == seenOscPort && listening == seenOscListening
-        && ! (anyProblem && ++retry % 90 == 0))
+        && feature == seenFeature && ! (anyProblem && ++retry % 90 == 0))
         return;
+
+    seenFeature = feature;
 
     seenChange = change;
     seenCount = n;
@@ -73,7 +77,7 @@ void TempoOutput::update()
         auto& problem = problems[(size_t) i];
         problem.clear();
         const auto& c = cfgs[(size_t) i];
-        const bool wants = i < n && c.sendsOut();
+        const bool wants = feature && i < n && c.sendsOut();
 
         juce::MidiOutput* midi = nullptr;
         juce::OSCSender* osc = nullptr;

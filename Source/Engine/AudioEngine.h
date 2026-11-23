@@ -3,6 +3,7 @@
 #include <array>
 
 #include "Rack.h"
+#include "Features.h"
 #include "WorkerPool.h"
 #include "CoreWakeAssist.h"
 #include "TempoEngine.h"
@@ -56,6 +57,8 @@ public:
     // read their own input, sends and "to bus" outputs are ignored); the settings are kept.
     void setRoutingEnabled (bool);
     bool isRoutingEnabled() const noexcept                   { return routingEnabled.load (std::memory_order_relaxed); }
+    /** Buses and sends switched on in this session AND the feature on (SETTINGS > Features). */
+    bool isRoutingActive() const noexcept                    { return isRoutingEnabled() && features::has (features::routing); }
     /** Makes `rack` Bus A..H (1..maxBuses) or a normal rack (0). False if the letter is taken. */
     bool setRackBus (Rack&, int letter);
     /** Routes the rack's output into a bus (1..maxBuses) or back to the device outputs (0).

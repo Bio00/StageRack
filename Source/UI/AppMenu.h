@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../Engine/Features.h"
 
 namespace stagerack
 {
@@ -19,8 +20,8 @@ namespace cmd
         toggleLayout, toggleScenes, automixerWindow, lightTheme, tintRacks, editGroupsOn,
         tempoWindow, tapMaster, editGroupsWindow, addTempo,
         routingOnOff, addBus, groupFolder,
-        midiMap, midiWindow,
-        lastCommand = midiWindow
+        midiMap, midiWindow, sendKnobs,
+        lastCommand = sendKnobs
     };
 
     /** Editing commands act on the racks only while the main window has the keyboard: the same
@@ -29,10 +30,32 @@ namespace cmd
     {
         return (id >= undo && id <= consecutiveOutStereo) || id == biggerRacks || id == smallerRacks;
     }
+
+    /** The macro function a command belongs to (SETTINGS > Features), -1 = always there. */
+    inline int featureOf (juce::CommandID id)
+    {
+        switch (id)
+        {
+            case nextScene: case prevScene: case storeScene: case addScene: case toggleScenes: return features::snapshots;
+            case automixOnOff: case automixerWindow:                                           return features::automix;
+            case tempoWindow: case tapMaster: case addTempo:                                    return features::tempo;
+            case editGroupsOn: case editGroupsWindow:                                           return features::editGroups;
+            case routingOnOff: case addBus: case groupFolder: case sendKnobs:                   return features::routing;
+            case midiMap: case midiWindow:                                                      return features::midi;
+            default:                                                                            return -1;
+        }
+    }
 }
 
 /** True if the event being handled right now is a key press (a menu shortcut, not a click). */
 bool currentEventIsKeyDown();
+
+/** Key presses that reach a window of ours before it handles them (an NSEvent local monitor).
+    The handler gets the window's content view (a JUCE peer's native handle), the key as a JUCE
+    key code (lower-case letter, ' ' for space), whether it is an auto-repeat, whether Cmd/Ctrl/Alt
+    are down and whether a native text field has the keyboard. Returning true swallows the key.
+    Used for the tap tempo keys while a plugin editor has the keyboard (user request 2026-11-23). */
+void installKeyMonitor (std::function<bool (void* view, int keyCode, bool repeat, bool modifiers, bool typing)>);
 
 /** Call at the top of main(), before JUCE/AppKit start, in child processes: no Dock icon. */
 void markAsBackgroundProcess();

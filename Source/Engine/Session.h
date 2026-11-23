@@ -34,7 +34,12 @@ public:
     void removePlugin (Rack&, int slot);
     void removePlugins (const std::vector<std::pair<Rack*, int>>&);   // one undo step
     void removeRack (Rack&);
+    /** A new rack on the next free input, mono (user request 2026-11-23). */
     Rack& addRack();
+    /** Picking a device input also sets the output to the same channel and type (setting
+        outFollowsIn, default on). Racks sending to a bus or to no output keep theirs. */
+    static inline bool outputsFollowInputs = true;
+    static void followInput (Rack&, bool routingActive);
     /** Adds `count` racks in one edit (one undo step). Inputs: consecutive, after the highest
         input used by any rack; outputs: like the last rack. */
     void addRacks (int count, bool stereoInputs);
@@ -160,6 +165,13 @@ public:
     /** Loads a document tree; `file` becomes the session's file (may be none). */
     void loadFromTree (const juce::ValueTree& root, const juce::File& file, bool markAsChanged);
     static bool isSessionTree (const juce::ValueTree&);
+
+    /** App settings saved inside the session (features, audio device, top bar, look: user request
+        2026-11-22), child APPSETTINGS. The app fills it at save time and applies it after a load;
+        without the app (CLI tools) the loaded one is written back unchanged. */
+    std::function<juce::ValueTree()> captureAppSettings;
+    std::function<void (const juce::ValueTree&)> applyAppSettings;
+    juce::ValueTree getLoadedAppSettings() const    { return loadedAppSettings; }
     /** Plugins of a loaded session still being created (their state isn't in toTree() yet). */
     int getPendingLoads() const noexcept            { return *pendingLoads; }
     /** Changes whenever the document is replaced or saved (new, open, save). */
@@ -171,7 +183,7 @@ public:
 
     /** Edit groups (Rack::editGroup 1..8): active ones link edits across their racks.
         Saved with the session; switching one on/off is an undo step. */
-    bool isEditGroupActive (int group) const noexcept { return group > 0 && (editGroupsOff & (1 << group)) == 0; }
+    bool isEditGroupActive (int group) const noexcept { return group > 0 && (editGroupsOff & (1 << group)) == 0 && features::has (features::editGroups); }
     void setEditGroupActive (int group, bool active)  { editGroupsOff = active ? (editGroupsOff & ~(1 << group)) : (editGroupsOff | (1 << group)); markDirty(); }
     int numRacksInEditGroup (int group) const;
 
@@ -237,6 +249,7 @@ private:
     int editGroupsOff = 0;   // bit g set = group g suspended
     RackView rackView;
     juce::ValueTree midiMap;
+    juce::ValueTree loadedAppSettings;
     std::shared_ptr<int> loadGeneration = std::make_shared<int> (0);
     std::shared_ptr<int> pendingLoads = std::make_shared<int> (0);
     int documentGeneration = 0, recallCount = 0;

@@ -41,6 +41,8 @@ class Rack
 public:
     static constexpr int maxSlots = 8;
     static constexpr int maxPluginChannels = 32;
+    /** View of a freshly inserted plugin (setting pluginView; message thread): 1 = mini view. */
+    static inline int defaultViewMode = 1;
 
     struct Slot
     {
@@ -52,7 +54,8 @@ public:
         juce::Array<int> shownParams;      // parameter indices shown on the rack (message thread only)
         bool paramsChosen = false;         // false = use the default selection
         float uiSize = 1.0f;               // slot width (horizontal) / height (vertical) weight in the rack
-        int viewMode = 0;                  // 0 = parameters, 1 = mini picture of the editor, 2 = plugin meters
+        int viewMode = 1;                  // 0 = parameters, 1 = mini picture of the editor, 2 = plugin meters
+        juce::StringArray hiddenMeters;    // names of the plugin meters not shown (message thread only)
         std::atomic<int> hopCalls { 0 };   // detected internal hop, in device callbacks (0 = none)
         std::atomic<int> hopPhase { -1 };  // callback phase its hop was moved to (see HopAligner)
 

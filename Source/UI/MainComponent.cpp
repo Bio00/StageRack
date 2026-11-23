@@ -23,14 +23,20 @@ MainComponent::MainComponent()
     auto& settings = pluginManager.getSettings();
     theme::setLight (settings.getBoolValue ("lightTheme", false));
     theme::tintRacks = settings.getBoolValue ("tintRacks", true);
+    SendsPanel::knobStyle = settings.getIntValue ("sendStyle", 0) == 0;
+    SendsPanel::onStyleChanged = [this] { sendStyleChanged(); };
     theme::tapFlash = juce::jlimit (0, 4, settings.getIntValue ("tapFlash", 2));
+    Rack::defaultViewMode = juce::jlimit (0, 2, settings.getIntValue ("pluginView", 1));   // new plugins: mini view
+    Session::outputsFollowInputs = settings.getBoolValue ("outFollowsIn", true);
     PluginManager::isolatePlugins = settings.getBoolValue ("isolatePlugins", false);   // experimental
+    features::load (settings);   // SETTINGS > Features: macro functions the user switched off
     lnf.applyColours();
     juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
 
     engine.nextSceneCC = settings.getIntValue ("nextSceneCC", 80);
     engine.prevSceneCC = settings.getIntValue ("prevSceneCC", 81);
-    engine.osc.setEnabled (settings.getBoolValue ("oscIn", false), settings.getIntValue ("oscPort", OscInput::defaultPort));
+    engine.osc.setEnabled (settings.getBoolValue ("oscIn", false) && features::has (features::tempo),   // OSC drives the tempos
+                           settings.getIntValue ("oscPort", OscInput::defaultPort));
     Rack::asyncSafetyMs = (float) settings.getDoubleValue ("asyncSafetyMs", 3.0);
     engine.hopAlignEnabled = settings.getBoolValue ("hopAlign", true);
     engine.logWatch = std::getenv ("STAGERACK_WATCHLOG") != nullptr;   // diagnostics: print the hop watch decisions
@@ -59,6 +65,12 @@ MainComponent::MainComponent()
     session->onPluginAboutToBeDeleted = [] (juce::AudioPluginInstance* p) { PluginWindow::closeFor (p); };
     session->onPluginReplaced = [] (juce::AudioPluginInstance* o, juce::AudioPluginInstance* n) { PluginWindow::replace (o, n); };
     session->addChangeListener (this);
+    session->captureAppSettings = [this] { return captureAppSettings(); };
+    session->applyAppSettings = [safe = juce::Component::SafePointer<MainComponent> (this)] (const juce::ValueTree& t)
+    {
+        // after the load has finished (racks get rebuilt when features change)
+        juce::MessageManager::callAsync ([safe, t = t.createCopy()] { if (safe != nullptr) safe->applyAppSettings (t); });
+    };
 
     edit = std::make_unique<EditController> (*session);
     edit->onRackSizeChanged = [this] (int) { layoutRacks(); };
@@ -104,8 +116,29 @@ MainComponent::MainComponent()
     topBar->onMidiMap = [this] { setMidiMapMode (! midi->isMapMode()); };
     topBar->onMidiWindow = [this] { openMidiWindow(); };
     tapKeys = std::make_unique<TapKeys>();
+    // the tap keys also work while a plugin editor has the keyboard (the editor would get them)
+    installKeyMonitor ([safe = juce::Component::SafePointer<MainComponent> (this)] (void* view, int key, bool repeat, bool mods, bool typing)
+    {
+        if (safe == nullptr || mods || typing || ! features::has (features::tempo) || ! safe->engine.tempo.isKeyUsed (key))
+            return false;
+
+        bool inPluginWindow = false;
+        for (int i = juce::ComponentPeer::getNumPeers(); --i >= 0;)
+            if (auto* peer = juce::ComponentPeer::getPeer (i); peer != nullptr && peer->getNativeHandle() == view)
+                inPluginWindow = dynamic_cast<PluginWindow*> (&peer->getComponent()) != nullptr;
+
+        if (! inPluginWindow)
+            return false;   // our own windows handle their keys
+
+        if (! repeat)
+            safe->engine.tempo.handleKey (key, TempoEngine::nowSec());
+        return true;
+    });
     topBar->onToggleTheme = [this] { toggleLightTheme(); };
     topBar->deviceStatus = [this] { return deviceGuard != nullptr ? deviceGuard->getStatus() : juce::String(); };
+    topBar->onDeviceClicked = [this] { openSettings (0); };   // the device info: audio device settings
+    topBar->setLayoutString (settings.getValue ("topBarLayout", TopBar::defaultLayoutString()));
+    topBar->onLayoutChanged = [this] (const juce::String& l) { pluginManager.getSettings().setValue ("topBarLayout", l); };
     addAndMakeVisible (*topBar);
 
     sceneList = std::make_unique<SceneListComponent> (*session);
@@ -228,6 +261,192 @@ void MainComponent::openAutomixer()
     automixerWindow->toFront (true);
 }
 
+/** SETTINGS > Features changed: what is off disappears everywhere and stops acting. */
+void MainComponent::featuresChanged()
+{
+    features::save (pluginManager.getSettings());
+
+    if (! features::has (features::midi) && midi->isMapMode())
+        setMidiMapMode (false);
+    if (! features::has (features::midi))      midiWindow = nullptr;
+    if (! features::has (features::automix))   automixerWindow = nullptr;
+    if (! features::has (features::tempo))     tempoWindow = nullptr;
+    if (! features::has (features::editGroups)) editGroupsWindow = nullptr;
+
+    engine.setRoutingEnabled (engine.isRoutingEnabled());   // buses on / off: graph again
+    {
+        auto& settings = pluginManager.getSettings();
+        engine.osc.setEnabled (settings.getBoolValue ("oscIn", false) && features::has (features::tempo),
+                               settings.getIntValue ("oscPort", OscInput::defaultPort));
+    }
+
+    topBar->featuresChanged();
+    rackComponents.clear();   // rebuilt with what they may show now
+    syncRacks();
+    resized();
+    appMenu.menuItemsChanged();
+    commands.commandStatusChanged();
+}
+
+//==============================================================================
+// App settings saved in the session (user request 2026-11-22): what a session needs to come back
+// as it was: features, audio device, top bar, sends, look. SETTINGS → Features → "Sessions
+// remember app settings" (setting `sessionAppSettings`, default on) turns the recall off.
+juce::ValueTree MainComponent::captureAppSettings()
+{
+    auto& settings = pluginManager.getSettings();
+    juce::ValueTree t ("APPSETTINGS");
+
+    for (int f = 0; f < features::numFeatures; ++f)
+        t.setProperty (juce::String ("feature_") + features::key ((features::Feature) f), features::has ((features::Feature) f), nullptr);
+
+    t.setProperty ("topBarLayout", topBar != nullptr ? topBar->getLayoutString() : settings.getValue ("topBarLayout"), nullptr)
+     .setProperty ("sendStyle", SendsPanel::knobStyle ? 0 : 1, nullptr)
+     .setProperty ("lightTheme", theme::light, nullptr)
+     .setProperty ("tintRacks", theme::tintRacks, nullptr)
+     .setProperty ("verticalLayout", verticalLayout, nullptr)
+     .setProperty ("tapFlash", theme::tapFlash, nullptr)
+     .setProperty ("pluginView", Rack::defaultViewMode, nullptr)
+     .setProperty ("outFollowsIn", Session::outputsFollowInputs, nullptr)
+     .setProperty ("oscIn", settings.getBoolValue ("oscIn", false), nullptr)
+     .setProperty ("oscPort", settings.getIntValue ("oscPort", OscInput::defaultPort), nullptr);
+
+    std::unique_ptr<juce::XmlElement> device;
+    if (deviceGuard != nullptr && deviceGuard->getPreferredState() != nullptr)
+        device = std::make_unique<juce::XmlElement> (*deviceGuard->getPreferredState());
+    else
+        device = settings.getXmlValue ("audioDevice");
+
+    if (device != nullptr)
+        t.appendChild (juce::ValueTree::fromXml (*device), nullptr);
+
+    return t;
+}
+
+void MainComponent::applyAppSettings (const juce::ValueTree& t)
+{
+    auto& settings = pluginManager.getSettings();
+
+    if (! settings.getBoolValue ("sessionAppSettings", true))
+        return;
+
+    juce::StringArray notes;
+
+    // features
+    bool featuresDiffer = false;
+    for (int f = 0; f < features::numFeatures; ++f)
+    {
+        const auto key = juce::String ("feature_") + features::key ((features::Feature) f);
+        if (t.hasProperty (key) && (bool) t[key] != features::has ((features::Feature) f))
+        {
+            features::enabled[f] = (bool) t[key];
+            featuresDiffer = true;
+        }
+    }
+
+    // top bar, sends, look
+    if (t.hasProperty ("topBarLayout") && t["topBarLayout"].toString() != topBar->getLayoutString())
+    {
+        topBar->setLayoutString (t["topBarLayout"].toString());
+        settings.setValue ("topBarLayout", topBar->getLayoutString());
+        topBar->itemsChanged();
+    }
+
+    if (t.hasProperty ("tapFlash"))
+    {
+        theme::tapFlash = juce::jlimit (0, 4, (int) t["tapFlash"]);
+        settings.setValue ("tapFlash", theme::tapFlash);
+    }
+
+    if (t.hasProperty ("tintRacks") && (bool) t["tintRacks"] != theme::tintRacks)
+    {
+        theme::tintRacks = (bool) t["tintRacks"];
+        settings.setValue ("tintRacks", theme::tintRacks);
+        repaint();
+        for (auto* c : getChildren()) c->repaint();
+    }
+
+    if (t.hasProperty ("lightTheme") && (bool) t["lightTheme"] != theme::light)
+        toggleLightTheme();
+
+    if (t.hasProperty ("verticalLayout") && (bool) t["verticalLayout"] != verticalLayout)
+        setVerticalLayout ((bool) t["verticalLayout"]);
+
+    if (t.hasProperty ("oscIn"))
+    {
+        settings.setValue ("oscIn", (bool) t["oscIn"]);
+        settings.setValue ("oscPort", (int) t.getProperty ("oscPort", OscInput::defaultPort));
+        if (! featuresDiffer)   // featuresChanged() sets OSC too
+            engine.osc.setEnabled ((bool) t["oscIn"] && features::has (features::tempo), settings.getIntValue ("oscPort", OscInput::defaultPort));
+    }
+
+    if (featuresDiffer)
+        featuresChanged();
+
+    if (t.hasProperty ("pluginView"))
+    {
+        Rack::defaultViewMode = juce::jlimit (0, 2, (int) t["pluginView"]);
+        settings.setValue ("pluginView", Rack::defaultViewMode);
+    }
+    if (t.hasProperty ("outFollowsIn"))
+    {
+        Session::outputsFollowInputs = (bool) t["outFollowsIn"];
+        settings.setValue ("outFollowsIn", Session::outputsFollowInputs);
+    }
+
+    if (t.hasProperty ("sendStyle") && ((int) t["sendStyle"] == 0) != SendsPanel::knobStyle)
+    {
+        SendsPanel::knobStyle = (int) t["sendStyle"] == 0;
+        sendStyleChanged();
+    }
+
+    // audio device: only if it is connected here (else the one in use stays, and we say so)
+    if (auto dev = t.getChildWithName ("DEVICESETUP"); dev.isValid())
+    {
+        if (auto xml = dev.createXml())
+        {
+            if (deviceGuard != nullptr)
+            {
+                if (! deviceGuard->requestDevice (*xml))
+                    notes.add ("The session's audio device (" + xml->getStringAttribute ("audioOutputDeviceName",
+                                   xml->getStringAttribute ("audioInputDeviceName")) + ") is not connected: keeping the current one.");
+            }
+            else
+            {
+                settings.setValue ("audioDevice", xml.get());   // CoreAudio not ready yet: the guard reads it when it starts
+            }
+        }
+    }
+
+    if (! notes.isEmpty())
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "StageRack", notes.joinIntoString ("\n"), {}, this);
+}
+
+void MainComponent::repaintEverything()
+{
+    std::function<void (juce::Component&)> all = [&all] (juce::Component& c)
+    {
+        c.repaint();
+        for (auto* child : c.getChildren())
+            all (*child);
+    };
+    all (*this);
+    appMenu.menuItemsChanged();
+    commands.commandStatusChanged();
+}
+
+void MainComponent::sendStyleChanged()
+{
+    pluginManager.getSettings().setValue ("sendStyle", SendsPanel::knobStyle ? 0 : 1);
+    for (auto* rc : rackComponents)
+    {
+        rc->resized();
+        rc->repaint();
+    }
+    appMenu.menuItemsChanged();
+    commands.commandStatusChanged();
+}
+
 void MainComponent::mouseDown (const juce::MouseEvent& e)
 {
     // a click on empty space (not on a rack, a slot or a control) drops the selection
@@ -270,8 +489,9 @@ void MainComponent::showAddRacksMenu()
     }
 
     m.addSeparator();
-    m.addItem ("Add Bus (FX return, sub-group, master bus)", engine.firstFreeBus() > 0, false,
-               [safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->session->addBus(); });
+    if (features::has (features::routing))   // SETTINGS > Features: buses and sends switched off = no buses offered
+        m.addItem ("Add Bus (FX return, sub-group, master bus)", engine.firstFreeBus() > 0, false,
+                   [safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) safe->session->addBus(); });
     m.addItem ("Other number...", [safe = juce::Component::SafePointer<MainComponent> (this)]
     {
         if (safe == nullptr)
@@ -295,7 +515,7 @@ void MainComponent::showAddRacksMenu()
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&addRackButton));
 }
 
-void MainComponent::openSettings()
+void MainComponent::openSettings (int page)
 {
     {
         if (! audioReady)
@@ -311,6 +531,11 @@ void MainComponent::openSettings()
         if (settingsWindow == nullptr)
             settingsWindow = std::make_unique<SettingsWindow> (engine, pluginManager, *session, [this] (bool light) { setLightTheme (light); },
                                                                [this] { updater->checkNow(); });
+        settingsWindow->onFeaturesChanged = [this] { featuresChanged(); };
+        settingsWindow->onCustomizeTopBar = [this] { topBar->showCustomizeWindow(); };
+        settingsWindow->setCommands (&commands);
+        if (page >= 0)
+            settingsWindow->showPage (page);
         settingsWindow->setVisible (true);
         settingsWindow->toFront (true);
     }
@@ -483,10 +708,17 @@ void MainComponent::resized()
     auto r = getLocalBounds();
     topBar->setBounds (r.removeFromTop (TopBar::preferredHeight));
 
-    if (! scenesCollapsed)
-        sceneList->setBounds (r.removeFromLeft (240));
+    const bool snapshots = features::has (features::snapshots);
+    sceneList->setVisible (snapshots && ! scenesCollapsed);
+    scenesToggle.setVisible (snapshots);
 
-    scenesToggle.setBounds (r.removeFromLeft (16).reduced (0, 6));
+    if (snapshots)
+    {
+        if (! scenesCollapsed)
+            sceneList->setBounds (r.removeFromLeft (240));
+
+        scenesToggle.setBounds (r.removeFromLeft (16).reduced (0, 6));
+    }
     rackViewport.setBounds (r.reduced (6, 6));
     coreAudioWaitLabel.setBounds (rackViewport.getBounds().removeFromTop (120));
     if (midiOverlay != nullptr) midiOverlay->setBounds (getLocalBounds());
@@ -791,29 +1023,33 @@ bool MainComponent::keyStateChanged (bool)
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
     // tap tempo keys first (plain keys only; repeats of a held key are not taps)
-    if (tapKeys->keyPressed (engine.tempo, key))
+    const bool tempoOn = features::has (features::tempo), midiOn = features::has (features::midi),
+               snapshotsOn = features::has (features::snapshots);
+
+    if (tempoOn && tapKeys->keyPressed (engine.tempo, key))
         return true;
 
-    if (key == juce::KeyPress ('t', juce::ModifierKeys::commandModifier, 0)) { openTempo(); return true; }
-    if (key == juce::KeyPress ('m', juce::ModifierKeys::commandModifier, 0)) { setMidiMapMode (! midi->isMapMode()); return true; }
-    if (key == juce::KeyPress ('m', juce::ModifierKeys::commandModifier | juce::ModifierKeys::altModifier, 0)) { openMidiWindow(); return true; }
+    if (key == juce::KeyPress ('t', juce::ModifierKeys::commandModifier, 0)) { if (tempoOn) openTempo(); return true; }
+    if (key == juce::KeyPress ('m', juce::ModifierKeys::commandModifier, 0)) { if (midiOn) setMidiMapMode (! midi->isMapMode()); return true; }
+    if (key == juce::KeyPress ('m', juce::ModifierKeys::commandModifier | juce::ModifierKeys::altModifier, 0)) { if (midiOn) openMidiWindow(); return true; }
 
     const auto cmd = juce::ModifierKeys::commandModifier;
 
     if (key == juce::KeyPress::rightKey || key == juce::KeyPress::spaceKey || key == juce::KeyPress::pageDownKey)
     {
-        session->stepScene (1);
+        if (snapshotsOn) session->stepScene (1);
         return true;
     }
 
     if (key == juce::KeyPress::leftKey || key == juce::KeyPress::pageUpKey)
     {
-        session->stepScene (-1);
+        if (snapshotsOn) session->stepScene (-1);
         return true;
     }
 
     if (key == juce::KeyPress ('s', cmd | juce::ModifierKeys::shiftModifier, 0))
     {
+        if (! snapshotsOn) return true;
         if (session->getCurrentScene() >= 0)
             session->storeScene (session->getCurrentScene());
         return true;
@@ -826,7 +1062,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress ('z', cmd, 0))         { session->undo(); return true; }
     if (key == juce::KeyPress ('z', cmd | shift, 0)) { session->redo(); return true; }
     if (key == juce::KeyPress ('m', cmd | shift, 0)) { engine.masterMuted = ! engine.masterMuted.load(); topBar->updateMeters(); return true; }
-    if (key == juce::KeyPress ('g', cmd | shift, 0)) { commands.invokeDirectly (cmd::editGroupsOn, false); return true; }
+    if (key == juce::KeyPress ('g', cmd | shift, 0)) { commands.invokeDirectly (cmd::editGroupsOn, false); return true; }   // perform() checks the feature
     if (key == juce::KeyPress ('b', cmd | shift, 0)) { commands.invokeDirectly (cmd::addBus, false); return true; }
     if (key == juce::KeyPress ('g', cmd, 0))         { commands.invokeDirectly (cmd::groupFolder, false); return true; }
     if (key == juce::KeyPress ('c', cmd, 0)) { edit->copy(); return true; }
@@ -1020,7 +1256,9 @@ void MainComponent::saveSession (bool saveAs)
 // Menu bar
 juce::StringArray MainComponent::AppMenu::getMenuBarNames()
 {
-    return { "File", "Edit", "Rack", "Scene", "Audio", "View" };
+    if (features::has (features::snapshots))
+        return { "File", "Edit", "Rack", "Snapshot", "Audio", "View" };
+    return { "File", "Edit", "Rack", "Audio", "View" };
 }
 
 juce::PopupMenu MainComponent::commandItems (std::initializer_list<juce::CommandID> ids)
@@ -1034,6 +1272,9 @@ juce::PopupMenu MainComponent::commandItems (std::initializer_list<juce::Command
             m.addSeparator();
             continue;
         }
+
+        if (const auto f = cmd::featureOf (id); f >= 0 && ! features::has ((features::Feature) f))
+            continue;   // switched off in SETTINGS > Features
 
         juce::ApplicationCommandInfo info (id);
         getCommandInfo (id, info);
@@ -1050,8 +1291,11 @@ juce::PopupMenu MainComponent::commandItems (std::initializer_list<juce::Command
     return m;
 }
 
-juce::PopupMenu MainComponent::AppMenu::getMenuForIndex (int index, const juce::String&)
+juce::PopupMenu MainComponent::AppMenu::getMenuForIndex (int, const juce::String& menuName)
 {
+    // by name: the Snapshot menu is not there when snapshots are switched off
+    const int index = juce::StringArray { "File", "Edit", "Rack", "Snapshot", "Audio", "View" }.indexOf (menuName);
+
     switch (index)
     {
         case 0:  return owner.commandItems ({ cmd::newSession, cmd::openSession, 0, cmd::saveSession, cmd::saveSessionAs });
@@ -1064,7 +1308,7 @@ juce::PopupMenu MainComponent::AppMenu::getMenuForIndex (int index, const juce::
         case 5:
         {
             auto m = owner.commandItems ({ cmd::toggleLayout, cmd::toggleScenes, cmd::automixerWindow, cmd::tempoWindow, 0,
-                                           cmd::midiMap, cmd::midiWindow, 0, cmd::lightTheme, cmd::tintRacks });
+                                           cmd::midiMap, cmd::midiWindow, 0, cmd::lightTheme, cmd::tintRacks, cmd::sendKnobs });
             m.addSeparator();
             m.addSubMenu ("Rack View", rackViewMenu (*owner.session));
             return m;
@@ -1112,16 +1356,16 @@ void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommand
         case cmd::addRacks:            set ("Add Several Racks...", "Rack"); break;
         case cmd::biggerRacks:         set ("Bigger Racks", "Rack", '=', c); break;
         case cmd::smallerRacks:        set ("Smaller Racks", "Rack", '-', c); break;
-        case cmd::nextScene:           set ("Next Scene", "Scene"); break;
-        case cmd::prevScene:           set ("Previous Scene", "Scene"); break;
-        case cmd::storeScene:          set ("Store Scene", "Scene", 's', c | s); info.setActive (session->getCurrentScene() >= 0); break;
-        case cmd::addScene:            set ("New Scene", "Scene"); break;
+        case cmd::nextScene:           set ("Next Snapshot", "Snapshot"); break;
+        case cmd::prevScene:           set ("Previous Snapshot", "Snapshot"); break;
+        case cmd::storeScene:          set ("Store Snapshot", "Snapshot", 's', c | s); info.setActive (session->getCurrentScene() >= 0); break;
+        case cmd::addScene:            set ("New Snapshot", "Snapshot"); break;
         case cmd::masterMute:          set ("Mute All Outputs", "Audio", 'm', c | s); info.setTicked (engine.masterMuted.load()); break;
         case cmd::automixOnOff:        set ("Automixer On", "Audio"); info.setTicked (engine.automixEnabled.load()); break;
         case cmd::audioSettings:       set ("Settings...", "Audio", ',', c); break;
         case cmd::pluginManager:       set ("Plugin Manager...", "Audio"); break;
         case cmd::toggleLayout:        set ("Vertical Racks", "View"); info.setTicked (verticalLayout); break;
-        case cmd::toggleScenes:        set ("Scene List", "View", 'l', c); info.setTicked (! scenesCollapsed); break;
+        case cmd::toggleScenes:        set ("Snapshot List", "View", 'l', c); info.setTicked (! scenesCollapsed); break;
         case cmd::automixerWindow:     set ("Automixer Window", "View"); break;
         case cmd::tempoWindow:         set ("Tempo Window", "View", 't', c); break;
         case cmd::tapMaster:           set ("Tap Master Tempo", "Audio"); break;
@@ -1134,6 +1378,7 @@ void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommand
         case cmd::midiMap:             set ("MIDI Map Mode", "View", 'm', c); info.setTicked (midi != nullptr && midi->isMapMode()); break;
         case cmd::midiWindow:          set ("MIDI Window...", "View", 'm', c | a); break;
         case cmd::tintRacks:           set ("Tinted Racks", "View"); info.setTicked (theme::tintRacks); break;
+        case cmd::sendKnobs:           set ("Sends as Knobs", "View"); info.setTicked (SendsPanel::knobStyle); break;
         case cmd::editGroupsOn:
         {
             bool anyUsed = false, anyOn = false;
@@ -1146,10 +1391,16 @@ void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommand
         }
         default: break;
     }
+
+    if (const auto f = cmd::featureOf (id); f >= 0 && ! features::has ((features::Feature) f))
+        info.setActive (false);   // no shortcut either
 }
 
 bool MainComponent::perform (const InvocationInfo& info)
 {
+    if (const auto f = cmd::featureOf (info.commandID); f >= 0 && ! features::has ((features::Feature) f))
+        return true;
+
     // a shortcut typed in a plugin or settings window reaches the menu bar if that window did not
     // use it: never let it edit the racks (it would undo or delete something out of sight)
     if (cmd::isRackEdit (info.commandID) && KeyOriginCallback::lastWasKey)
@@ -1186,7 +1437,7 @@ bool MainComponent::perform (const InvocationInfo& info)
         case cmd::nextScene:           session->stepScene (1); break;
         case cmd::prevScene:           session->stepScene (-1); break;
         case cmd::storeScene:          if (session->getCurrentScene() >= 0) session->storeScene (session->getCurrentScene()); break;
-        case cmd::addScene:            session->addScene ("Scene " + juce::String (session->getNumScenes() + 1)); break;
+        case cmd::addScene:            session->addScene ("Snapshot " + juce::String (session->getNumScenes() + 1)); break;
         case cmd::masterMute:          engine.masterMuted = ! engine.masterMuted.load(); topBar->updateMeters(); break;
         case cmd::automixOnOff:        engine.automixEnabled = ! engine.automixEnabled.load(); session->markDirty(); break;
         case cmd::audioSettings:       openSettings(); break;
@@ -1209,11 +1460,14 @@ bool MainComponent::perform (const InvocationInfo& info)
         case cmd::lightTheme:          toggleLightTheme(); break;
         case cmd::midiMap:             setMidiMapMode (! midi->isMapMode()); break;
         case cmd::midiWindow:          openMidiWindow(); break;
+        case cmd::sendKnobs:
+            SendsPanel::knobStyle = ! SendsPanel::knobStyle;
+            sendStyleChanged();
+            break;
         case cmd::tintRacks:
             theme::tintRacks = ! theme::tintRacks;
             pluginManager.getSettings().setValue ("tintRacks", theme::tintRacks);
-            repaint();
-            for (auto* c : getChildren()) c->repaint();
+            repaintEverything();   // the racks draw from a cached image: repaint them, not only us
             break;
         case cmd::editGroupsOn:
         {

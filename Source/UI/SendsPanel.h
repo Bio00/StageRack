@@ -3,6 +3,7 @@
 #include "../Engine/Session.h"
 #include "EditController.h"
 #include "MidiTargets.h"
+#include "ValueEntry.h"
 
 namespace stagerack
 {
@@ -37,11 +38,17 @@ public:
     void setFitHeight (int h) noexcept              { fitHeight = h; }
     /** Height of one row of sends at this width (the smallest useful view). */
     static int getRowHeight (int width) noexcept    { return cellHFor (width); }
-    /** Always knobs: small ones (no name under them, value on hover) in narrow racks. */
-    static bool usesKnobs (int) noexcept            { return true; }
-    static bool miniKnobs (int width) noexcept      { return width < minKnobsWidth; }
-    static int cellWFor (int width) noexcept        { return miniKnobs (width) ? miniCellW : knobCellW; }
-    static int cellHFor (int width) noexcept        { return miniKnobs (width) ? miniCellH : knobCellH; }
+    /** Send style, for the whole app (setting `sendStyle`, View → Sends as Knobs, right-click on a
+        send): knobs (default, user choice) or lines (bus name + a bar with the value written, tall
+        enough for a finger). Racks narrower than minKnobsWidth get one knob per row, with the level
+        written inside and the bus name below. */
+    inline static bool knobStyle = true;
+    /** Called after the style is switched from a send's menu (MainComponent lays the racks out again). */
+    inline static std::function<void()> onStyleChanged;
+    static bool usesKnobs (int) noexcept            { return knobStyle; }
+    static bool miniKnobs (int width) noexcept      { return knobStyle && width < minKnobsWidth; }
+    static int cellWFor (int width) noexcept        { return miniKnobs (width) ? juce::jmax (1, width) : knobCellW; }
+    static int cellHFor (int width) noexcept        { return usesKnobs (width) ? (miniKnobs (width) ? miniCellH : knobCellH) : stripH; }
 
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
@@ -56,7 +63,8 @@ public:
     static juce::PopupMenu sendsShownMenu (Session&, EditController&, Rack&);
 
     static constexpr float minDb = -60.0f, maxDb = 6.0f;
-    static constexpr int barH = 15, knobCellW = 50, knobCellH = 48, minKnobsWidth = 100, miniCellW = 29, miniCellH = 34;
+    static constexpr int stripH = 30, stripMaxH = 40;   // narrow racks: name line + bar
+    static constexpr int barH = 15, knobCellW = 50, knobCellH = 48, minKnobsWidth = 100, miniCellH = 50;
     static float dbToPos (float db) noexcept;
     static float posToDb (float pos) noexcept;     // pos <= ~0 = off
 
@@ -80,6 +88,7 @@ private:
     int dragCell = -1, hoverCell = -1, fitHeight = 0;
     float dragStartPos = 0.0f, dragLastDb = 0.0f, dragPos = 0.0f;
     juce::Point<float> dragLast;
+    ValueEntry entry;        // plain click = type the level
     bool altClick = false;   // Alt-click without moving = send back to its default (off)
     juce::ModifierKeys dragMods;
 

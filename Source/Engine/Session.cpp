@@ -364,9 +364,20 @@ void Session::markDirty()
 //==============================================================================
 Rack& Session::addRack()
 {
-    auto& r = engine.addRack();
-    markDirty();
-    return r;
+    addRacks (1, false);
+    return engine.getRack (engine.getNumRacks() - 1);
+}
+
+void Session::followInput (Rack& r, bool routingActive)
+{
+    if (! outputsFollowInputs || r.inputRackId.load() >= 0 || r.inputChannel.load() < 0)
+        return;
+
+    if (r.outputChannel.load() < 0 || (routingActive && r.outputBus.load() > 0))
+        return;   // no output or into a bus: a deliberate choice, kept
+
+    r.outputChannel = r.inputChannel.load();
+    r.stereoOutput = r.stereoInput.load();
 }
 
 void Session::setRoutingEnabled (bool on)
@@ -380,6 +391,9 @@ void Session::setRoutingEnabled (bool on)
 
 Rack* Session::addBus()
 {
+    if (! features::has (features::routing))
+        return nullptr;   // SETTINGS > Features: buses and sends are off
+
     const auto letter = engine.firstFreeBus();
 
     if (letter == 0)
@@ -479,6 +493,9 @@ int Session::numFolderMembers (const Rack& folder) const
 
 Rack* Session::groupIntoFolder (const juce::Array<int>& rackIds)
 {
+    if (! features::has (features::routing))
+        return nullptr;   // a folder is a bus
+
     // the racks in list order; a rack inside another chosen folder comes along with it
     std::vector<Rack*> members;
     for (int i = 0; i < engine.getNumRacks(); ++i)
@@ -664,8 +681,8 @@ void Session::addRacks (int count, bool stereoInputs)
         auto& r = engine.addRack();
         r.inputChannel = nextIn;
         r.stereoInput = stereoInputs;
-        r.outputChannel = out;
-        r.stereoOutput = stereoOut;
+        r.outputChannel = outputsFollowInputs ? nextIn : out;
+        r.stereoOutput = outputsFollowInputs ? stereoInputs : stereoOut;
         nextIn += stereoInputs ? 2 : 1;
     }
 
@@ -1011,8 +1028,13 @@ void Session::newSession()
     editGroupsOff = 0;
     rackView = {};
     midiMap = {};
+    loadedAppSettings = {};
     engine.setRoutingEnabled (false);
-    engine.addRack();
+    {
+        auto& first = engine.addRack();   // mono, IN 1 -> OUT 1
+        first.stereoInput = false;
+        first.stereoOutput = false;
+    }
     dirty = false;
     ++documentGeneration;
     replacedTokens.clear();
@@ -1042,6 +1064,9 @@ juce::ValueTree Session::pluginToTree (const Rack& r, int s) const
       .setProperty ("slotSize", slot.uiSize, nullptr)
       .setProperty ("view", slot.viewMode, nullptr)
       .setProperty ("params", params.joinIntoString (","), nullptr);
+
+    if (! slot.hiddenMeters.isEmpty())
+        pt.setProperty ("hiddenMeters", slot.hiddenMeters.joinIntoString ("\n"), nullptr);
 
     if (auto xml = p->getPluginDescription().createXml())
         pt.appendChild (juce::ValueTree::fromXml (*xml), nullptr);
@@ -1164,6 +1189,7 @@ void Session::loadPluginFromTree (Rack& r, int slot, const juce::ValueTree& pt, 
     const bool paramsChosen = pt["paramsChosen"];
     const float slotSize = pt.hasProperty ("slotSize") ? (float) pt["slotSize"] : 1.0f;
     const int viewMode = pt["view"];
+    const auto hiddenMeters = juce::StringArray::fromLines (pt["hiddenMeters"].toString());
     juce::Array<int> shownParams;
     for (auto& t : juce::StringArray::fromTokens (pt["params"].toString(), ",", ""))
         if (t.isNotEmpty())
@@ -1175,7 +1201,7 @@ void Session::loadPluginFromTree (Rack& r, int slot, const juce::ValueTree& pt, 
     ++*pendingLoads;
 
     plugins.createPlugin (*known, r.getSampleRate(), r.getBlockSize(),
-        [this, weakGen, weakPending, generation, rackId, slot, bypass, state, paramsChosen, shownParams, slotSize, viewMode, newUndoStep] (std::unique_ptr<juce::AudioPluginInstance> p, const juce::String&)
+        [this, weakGen, weakPending, generation, rackId, slot, bypass, state, paramsChosen, shownParams, slotSize, viewMode, hiddenMeters, newUndoStep] (std::unique_ptr<juce::AudioPluginInstance> p, const juce::String&)
         {
             if (auto pending = weakPending.lock())
                 --*pending;
@@ -1204,6 +1230,8 @@ void Session::loadPluginFromTree (Rack& r, int slot, const juce::ValueTree& pt, 
             rack->getSlot (slot).shownParams = shownParams;
             rack->getSlot (slot).uiSize = slotSize;
             rack->getSlot (slot).viewMode = viewMode;
+            rack->getSlot (slot).hiddenMeters = hiddenMeters;
+            rack->getSlot (slot).hiddenMeters.removeEmptyStrings();
 
             if (newUndoStep)
                 markDirty();
@@ -1292,6 +1320,7 @@ void Session::movePlugin (Rack& from, int fromSlot, Rack& to, int toSlot)
     const float fSize = fs.uiSize, tSize = ts.uiSize;
     const int fView = fs.viewMode, tView = ts.viewMode;   // read before setPlugin() resets them
     const bool fChosen = fs.paramsChosen, tChosen = ts.paramsChosen;
+    const auto fMeters = fs.hiddenMeters, tMeters = ts.hiddenMeters;
 
     auto moving = from.setPlugin (fromSlot, nullptr);
     auto displaced = to.setPlugin (toSlot, std::move (moving));
@@ -1299,6 +1328,7 @@ void Session::movePlugin (Rack& from, int fromSlot, Rack& to, int toSlot)
 
     ts.shownParams = fParams; ts.paramsChosen = fChosen; ts.uiSize = fSize; ts.viewMode = fView;
     fs.shownParams = tParams; fs.paramsChosen = tChosen; fs.uiSize = tSize; fs.viewMode = tView;
+    ts.hiddenMeters = fMeters; fs.hiddenMeters = tMeters;
 
     ts.bypassed = fb; ts.hopCalls = fh; ts.hopPhase = fp;
     fs.bypassed = tb; fs.hopCalls = th; fs.hopPhase = tp;
@@ -1354,6 +1384,7 @@ void Session::setConsecutiveInputs (const juce::Array<int>& rackIds, bool stereo
         r->inputChannel = ch;
         r->stereoInput = st;
         engine.setRackInputSource (*r, -1);
+        followInput (*r, engine.isRoutingActive());
         ch += st ? 2 : 1;
     }
 
@@ -1412,6 +1443,9 @@ juce::ValueTree Session::toTree() const
 
     if (midiMap.isValid() && midiMap.getNumChildren() > 0)
         root.appendChild (midiMap.createCopy(), nullptr);
+
+    if (auto app = captureAppSettings != nullptr ? captureAppSettings() : loadedAppSettings.createCopy(); app.isValid())
+        root.appendChild (app, nullptr);
     return root;
 }
 
@@ -1462,6 +1496,7 @@ void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bo
     engine.setRoutingEnabled ((bool) root["routing"]);
     engine.tempo.fromTree (root.getChildWithName ("TEMPO"));
     midiMap = root.getChildWithName ("MIDIMAP").createCopy();
+    loadedAppSettings = root.getChildWithName ("APPSETTINGS").createCopy();
     ++*loadGeneration;
 
     for (const auto& rt : root.getChildWithName (idRacks))
@@ -1490,6 +1525,9 @@ void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bo
     resetUndoHistory();   // its plugins complete this state as they arrive (amendUndoState)
     if (midiControl != nullptr) midiControl->loadFromSession();
     notify();
+
+    if (loadedAppSettings.isValid() && applyAppSettings != nullptr)
+        applyAppSettings (loadedAppSettings);
 }
 
 //==============================================================================
@@ -1538,7 +1576,8 @@ Session::UndoState Session::captureUndoState() const
                   .setProperty ("paramsChosen", sl.paramsChosen, nullptr)
                   .setProperty ("params", params.joinIntoString (","), nullptr)
                   .setProperty ("slotSize", sl.uiSize, nullptr)
-                  .setProperty ("view", sl.viewMode, nullptr);
+                  .setProperty ("view", sl.viewMode, nullptr)
+                  .setProperty ("hiddenMeters", sl.hiddenMeters.joinIntoString ("\n"), nullptr);
                 rt.appendChild (st, nullptr);
             }
         }
@@ -1785,6 +1824,8 @@ void Session::applyUndoState (const UndoState& u)
                     sl.shownParams.add (t.getIntValue());
             sl.uiSize = (float) st["slotSize"];
             sl.viewMode = (int) st["view"];
+            sl.hiddenMeters = juce::StringArray::fromLines (st["hiddenMeters"].toString());
+            sl.hiddenMeters.removeEmptyStrings();
             sl.hopCalls = juce::jmax (0, hopCalls);
             sl.hopPhase = hopPhase;
         }

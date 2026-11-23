@@ -2,6 +2,32 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.11.0-beta — 2026-11-22
+
+### StageRack su misura
+- **SETTINGS → Features**: spegni le funzioni che non usi (Snapshot, Automixer, Tap tempo, Controller MIDI, Edit group, Bus e send). Spariscono da barra, menu e rack e smettono di agire; le sessioni conservano tutto e riaccendendo torna com'era.
+- **Barra in alto personalizzabile**: tasto destro sulla barra → mostra/nascondi ogni blocco, *Customize Top Bar...* per spostarli (anche trascinandoli direttamente nella barra), *Reset Top Bar*.
+- Click sulla **scheda audio** nella barra = impostazioni della scheda.
+
+### Più comodo dal vivo
+- **Scheda audio con pulsante Apply**: ingresso, uscita, frequenza, buffer e canali si scelgono con calma e si applicano insieme (la scheda si riapre una volta sola, niente attese a ogni click con Dante o sui Mac Intel).
+- **Un click su un pomello o un parametro = scrivi il valore** (Invio applica, Esc annulla).
+- **Scorrimento dei rack più fluido**: la rotella / due dita scorre sempre i rack e non cambia più i valori dei pomelli sotto il puntatore (Ctrl + rotella = modifica); i rack si ridisegnano dalla cache.
+- **Controller MIDI**: il pomello comanda sempre il valore di StageRack (niente più "pick-up" di default, anche nelle sessioni già salvate; si può ancora scegliere nella finestra MIDI).
+- Le **scene ora si chiamano Snapshot**, per distinguerle dalle sessioni.
+- Tooltip leggibili nel tema scuro.
+- **Rack stretti leggibili**: niente pulsante ••• (tasto destro sul rack), nome del rack grande su tutta la riga, nomi dei plugin su due righe, parametri con il nome intero e il valore in grassetto sotto, gain senza "dB" quando non c'è spazio.
+- **Send a pomello o a linea** (View → Sends as Knobs, o tasto destro su un send); nei rack stretti un pomello per riga con il valore dentro.
+- **Le impostazioni dell'app viaggiano con la sessione**: funzioni attive, scheda audio, barra in alto, stile dei send, tema e layout tornano quando riapri la sessione (una scheda non collegata non viene toccata). Si può spegnere in SETTINGS → Features.
+- Le funzioni spente in Features non lavorano più nemmeno in sottofondo (rilevatori dell'automixer e del tempo, OSC, gruppi): app più leggera.
+- **Plugin appena inseriti in miniview**: l'immagine dell'editor se lo slot è abbastanza grande, altrimenti il nome del plugin in grande (si cambia come prima in parametri o meter). Scelta di default in SETTINGS → Appearance.
+- **Parametri e meter sul rack senza che il menu si chiuda**: tasto destro sul plugin → *Parameters on rack* / *Meters on rack* (nuovo), accendi e spegni quanti vuoi in un colpo.
+- **Tap tempo (T) anche con la finestra di un plugin in primo piano.**
+- **IN e OUT insieme**: scegliendo un ingresso l'uscita diventa lo stesso numero e tipo (IN 5 mono → OUT 5 mono). I rack nuovi sono mono, sul prossimo ingresso libero. Si spegne in SETTINGS → Appearance.
+- **Uscite multiple dal menu OUT**: ⌘-click su una voce aggiunge o toglie un'uscita e il menu resta aperto per sceglierne altre (promemoria in fondo al menu); niente più sottomenu.
+- **Scheda audio**: scegliendo una scheda nuova si attivano tutti i suoi canali; canali di ingresso e uscita affiancati, con lo scorrimento dentro il riquadro (niente più pagina lunghissima per arrivare alle uscite).
+- **SETTINGS → Appearance** raccoglie tutte le personalizzazioni: tema, rack colorati, TAP flash, verticale/orizzontale, lista snapshot, barra in alto, send a pomello/linea, vista dei plugin nuovi, OUT che segue IN.
+
 ## 0.10.0-beta — 2026-11-18
 
 ### Più leggera e reattiva

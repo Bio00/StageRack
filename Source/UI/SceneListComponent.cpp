@@ -10,13 +10,13 @@ SceneListComponent::SceneListComponent (Session& s) : session (s)
     list.setRowHeight (34);
     addAndMakeVisible (list);
 
-    addButton.setTooltip ("Create a new scene from the current settings");
+    addButton.setTooltip ("Create a new snapshot from the current settings");
     addButton.onClick = [this]
     {
-        session.addScene ("Scene " + juce::String (session.getNumScenes() + 1));
+        session.addScene ("Snapshot " + juce::String (session.getNumScenes() + 1));
     };
 
-    storeButton.setTooltip ("Overwrite the selected scene with the current settings");
+    storeButton.setTooltip ("Overwrite the selected snapshot with the current settings");
     storeButton.onClick = [this]
     {
         const auto row = list.getSelectedRow() >= 0 ? list.getSelectedRow() : session.getCurrentScene();
@@ -69,7 +69,7 @@ void SceneListComponent::paint (juce::Graphics& g)
 
     g.setColour (theme::textDim);
     g.setFont (theme::font (12.0f, true));
-    g.drawText ("SCENES", 12, 8, getWidth() - 24, 18, juce::Justification::centredLeft);
+    g.drawText ("SNAPSHOTS", 12, 8, getWidth() - 24, 18, juce::Justification::centredLeft);
 
     g.setFont (theme::font (11.0f));
     g.drawText (juce::String (session.getNumScenes()), 12, 8, getWidth() - 24, 18, juce::Justification::centredRight);
@@ -161,7 +161,7 @@ void SceneListComponent::renameScene (int row)
     if (! juce::isPositiveAndBelow (row, session.getNumScenes()))
         return;
 
-    auto* w = new juce::AlertWindow ("Rename scene", {}, juce::MessageBoxIconType::NoIcon);
+    auto* w = new juce::AlertWindow ("Rename snapshot", {}, juce::MessageBoxIconType::NoIcon);
     w->addTextEditor ("name", session.getScene (row).name);
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));

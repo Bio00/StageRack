@@ -107,7 +107,7 @@ struct MidiMapping
     MidiTarget target;
     float minValue = 0.0f, maxValue = 1.0f;   // target range (normalised); min > max = inverted
     int mode = autoMode;
-    int takeover = pickup;
+    int takeover = takeoverNone;      // the control always drives the value (user request 2026-11-22); pick-up is opt-in
     bool feedback = true;                     // LEDs / motor faders / rings follow the target
     int onValue = 127, offValue = 0;          // LED velocities / CC values for on and off (colours on some pads)
     int feedbackNumber = -1;                  // LED on another note / CC than the input (-1 = same)
@@ -127,7 +127,7 @@ struct MidiMapping
         t.setProperty ("device", device, nullptr).setProperty ("deviceName", deviceName, nullptr)
          .setProperty ("type", source.type, nullptr).setProperty ("ch", source.channel, nullptr).setProperty ("num", source.number, nullptr)
          .setProperty ("min", minValue, nullptr).setProperty ("max", maxValue, nullptr)
-         .setProperty ("mode", mode, nullptr).setProperty ("takeover", takeover, nullptr)
+         .setProperty ("mode", mode, nullptr).setProperty ("takeover2", takeover, nullptr)
          .setProperty ("feedback", feedback, nullptr).setProperty ("on", onValue, nullptr).setProperty ("off", offValue, nullptr)
          .setProperty ("ledNum", feedbackNumber, nullptr).setProperty ("layer", layer, nullptr);
         t.appendChild (target.toTree(), nullptr);
@@ -141,7 +141,8 @@ struct MidiMapping
         m.source.type = t["type"]; m.source.channel = t.getProperty ("ch", 1); m.source.number = t["num"];
         m.minValue = t.getProperty ("min", 0.0f); m.maxValue = t.getProperty ("max", 1.0f);
         m.mode = juce::jlimit (0, (int) numModes - 1, (int) t["mode"]);
-        m.takeover = t.getProperty ("takeover", (int) pickup);
+        // "takeover" (<= 0.10) was always the old pick-up default: ignored, every control drives its value
+        m.takeover = juce::jlimit (0, 2, (int) t.getProperty ("takeover2", (int) takeoverNone));
         m.feedback = t.getProperty ("feedback", true);
         m.onValue = t.getProperty ("on", 127); m.offValue = t.getProperty ("off", 0);
         m.feedbackNumber = t.getProperty ("ledNum", -1); m.layer = t["layer"];

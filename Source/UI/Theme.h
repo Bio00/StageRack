@@ -151,6 +151,10 @@ namespace stagerack::theme
             setColour (juce::TextEditor::highlightedTextColourId, text);
             setColour (juce::PopupMenu::highlightedTextColourId, text);
             setColour (juce::ScrollBar::trackColourId, juce::Colours::transparentBlack);
+            // the V4 scheme draws tooltips as highlightedText (black) on highlightedFill: unreadable in dark
+            setColour (juce::TooltipWindow::backgroundColourId, light ? juce::Colour (0xfffdfdfe) : juce::Colour (0xff30353b));
+            setColour (juce::TooltipWindow::textColourId, text);
+            setColour (juce::TooltipWindow::outlineColourId, outline);
         }
 
         void drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce::Colour& bgColour,
