@@ -2,6 +2,16 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.11.4-beta — 2026-11-25
+
+- **Bypass vero: un plugin in bypass non usa CPU.** Prima il bypass di VST3 e AU faceva girare comunque il plugin. Ora sfuma in 10 ms, lascia spegnere la coda e si ferma; alla riaccensione riparte sulla sua fase di hop (attesa massima di un hop) e sfuma di nuovo. Vale anche per i plugin con latenza: in bypass esce il segnale diretto ritardato uguale.
+- **Si può spegnere**: SETTINGS → Features → *True bypass* (acceso di serie). Spento, i plugin usano il loro bypass come prima. È un'impostazione di questo Mac: le sessioni non la cambiano.
+- **Multicore solo quando serve**: i core in più si accendono quando il lavoro supera il 30% del tempo del buffer. Sessione da 20 rack a 16 campioni: tutto in bypass 42% → 5-6% di CPU, plugin accesi ~50% → ~12%.
+- Le modifiche fatte a un plugin mentre è in bypass vengono salvate correttamente in sessioni e snapshot.
+- Manuale e misure spostati in `docs/`, README più corto; rimosso codice non più usato.
+
+**Limite noto:** accendendo De-Feedback VST3 quando gli altri sono fermi, il primo calcolo parte a freddo e può costare 1 callback (3 De-Feedback accesi e spenti di continuo a 32 campioni, 60 s: 5-6 in ritardo; col bypass del plugin circa 1000; senza toccare il bypass 0). A 16 campioni con De-Feedback restano ritardi isolati, come nella 0.11.3.
+
 ## 0.11.3-beta — 2026-11-23
 
 - **Le istanze di plugin tolte vengono liberate da sole**: quando togli o sostituisci un plugin, l'istanza resta "parcheggiata" per l'undo e ora viene distrutta dopo 10 secondi se nessun passo di undo la usa (al massimo 16 parcheggiate: oltre, si perdono i passi di undo più vecchi). Prima restavano tutte fino alla chiusura della sessione e pesavano su memoria, thread e interfaccia (visto: 87 De-Feedback parcheggiati).

@@ -94,6 +94,8 @@ public:
         // only, except `bypassState` (read by the engine and watchHops).
         enum { bpActive = 0, bpTransition = 1, bpIdle = 2 };
         std::atomic<int> bypassState { bpActive };  // 1 = fading / draining / catching up, 2 = not called
+        std::atomic<bool> flushWanted { false };         // idle: one silent call, please (message thread -> audio)
+        std::atomic<juce::uint64> flushedParams { 0 };   // hash of the parameters at the last flush while idle, 0 = none
         float wet = 1.0f;          // plugin output mix (0 = dry), ramps over bypassFadeMs
         int drainLeft = 0;         // samples it still gets silence to let its tail die out
         int drainQuiet = 0;        // consecutive silent output samples while draining

@@ -117,6 +117,8 @@ std::unique_ptr<juce::AudioPluginInstance> Rack::setPlugin (int slot, std::uniqu
         s.wakeNeed = 0;
         s.wakeProbeMs = 0.0f;
         s.bypassState = Slot::bpActive;
+        s.flushWanted = false;
+        s.flushedParams = 0;
         s.wet = 1.0f;
         s.drainLeft = s.drainQuiet = 0;
         s.owed = 0;
@@ -172,6 +174,8 @@ void Rack::moveSlot (int from, int to)
     const int abs = a.bypassState;
     a.bypassState = b.bypassState.load();
     b.bypassState = abs;
+    a.flushWanted = false;  b.flushWanted = false;
+    a.flushedParams = 0;    b.flushedParams = 0;
     std::swap (a.wet, b.wet);
     std::swap (a.drainLeft, b.drainLeft);
     std::swap (a.drainQuiet, b.drainQuiet);
@@ -403,9 +407,10 @@ void Rack::processBypassTransition (Slot& s, juce::AudioBuffer<float>& view, int
     // Bypass on:  crossfade to dry (10 ms) -> drain: silence in until its output stays quiet
     //             (reverb/delay tails die out inside, so nothing stale comes back) -> idle,
     //             not called at all.
-    // Bypass off: if it was idle, first catch up the calls it missed (modulo its hop, one extra
-    //             silent call per callback, dry still heard) so its hop stays on the phase the
-    //             spread gave it; then crossfade back in.
+    // Bypass off: if it was idle, stay dry until the missed calls are a whole number of hops (one
+    //             hop at most, 4 ms for De-Feedback), so its hop is on the phase the spread gave
+    //             it; then crossfade back in. No extra calls: they put two calls (and a hop out
+    //             of its phase) in one callback.
     auto& p = *s.plugin;
     const int numCh = view.getNumChannels();
     juce::AudioBuffer<float> scratch (dryBuffer.getArrayOfWritePointers(), numCh, numSamples);
@@ -429,7 +434,22 @@ void Rack::processBypassTransition (Slot& s, juce::AudioBuffer<float>& view, int
         }
         else
         {
-            ++s.owed;
+            // Session::flushIdlePlugins: one silent call delivers the parameter changes made while
+            // idle (VST3/CLAP take them only in process). In phase with the spread, so it
+            // counts as the call of this callback and the hop stays where it was.
+            const auto hop = s.hopCalls.load (std::memory_order_relaxed);
+
+            if (s.flushWanted.load (std::memory_order_acquire) && (hop <= 1 || s.owed % hop == 0))
+            {
+                scratch.clear();
+                callPlugin (s, p, scratch, false);
+                s.flushWanted.store (false, std::memory_order_release);
+            }
+            else
+            {
+                ++s.owed;
+            }
+
             s.bypassState.store (Slot::bpIdle, std::memory_order_relaxed);
         }
 
@@ -439,24 +459,17 @@ void Rack::processBypassTransition (Slot& s, juce::AudioBuffer<float>& view, int
     }
 
     s.bypassState.store (Slot::bpTransition, std::memory_order_relaxed);
+    s.flushedParams.store (0, std::memory_order_relaxed);
 
     if (! trueBypass && s.wet <= 0.0f && s.owed > 0)
     {
         const auto hop = s.hopCalls.load (std::memory_order_relaxed);
-        const auto debt = hop > 1 ? (int) (s.owed % hop) : 0;
 
-        if (debt > 0)
+        if (hop > 1 && s.owed % hop != 0)
         {
-            scratch.clear();
-            callPlugin (s, p, scratch, bypassedNow);            // the missed call, on silence
-
-            for (int ch = 0; ch < numCh; ++ch)
-                scratch.copyFrom (ch, 0, view, ch, 0, numSamples);
-            callPlugin (s, p, scratch, bypassedNow);            // this callback's call, not heard yet
-
+            ++s.owed;                                           // still dry: its turn comes within a hop
             if (latency > 0)
                 readDelayedDry (s, view, numSamples, latency);
-            s.owed = debt - 1;
             return;
         }
 
@@ -546,7 +559,7 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
         }
     }
 
-    const bool trueBypass = bypassedNow && latency >= 0 && s.twin == nullptr;
+    const bool trueBypass = bypassedNow && features::has (features::trueBypass) && latency >= 0 && s.twin == nullptr;
 
     if ((trueBypass || s.wet < 1.0f) && numSamples <= dryBuffer.getNumSamples() && latency >= 0)
     {

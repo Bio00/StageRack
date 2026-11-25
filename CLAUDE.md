@@ -24,7 +24,7 @@ scripts/release.sh                      # package + test + tag v<versione> + rel
 - `--bench-device` (CoreAudio reale, workgroup vero) è **l'unico benchmark affidabile**; `--bench` offline è pessimista.
 - Altri strumenti CLI (vedi `Source/Main.cpp`): `--plugin-probe`, `--watch-test`, `--spread-test`, `--handover-test`, `--automix-probe`, `--soak`, `--sandbox-test`, `--stress-lifecycle`, `--midi-loop-test`, `--param-probe`, `--tempo-probe`, `--check-update [--download] [--fake-version]`, `--whats-new`, render PNG senza device: `--render-racks <dir> [--routing|--midi|--view n]`, `--render-session`, `--render-settings`, `--render-browser`, `--render-changelog`. `STAGERACK_UI_BENCH=<n>` misura l'interfaccia con n rack.
 - Flusso: build dopo ogni modifica (`cmake --build build 2>&1 | grep -E "error" -A3`), selftest, bench-device per le prestazioni, verifica a vista. Aggiorna `docs/MANUALE.md` per le funzioni nuove, `CHANGELOG.md` (italiano, `## x.y.z-beta — data` in cima) per le release, e qui solo ciò che serve a lavorare.
-- Repo pubblico github.com/Bio00/StageRack, bundle id `com.bio.stagerack`. Ultima release v0.11.3-beta. Versione = `project VERSION` + `STAGERACK_VERSION_LABEL` in CMake, deve coincidere col tag. Autore commit = noreply GitHub, mai la Gmail.
+- Repo pubblico github.com/Bio00/StageRack, bundle id `com.bio.stagerack`. Ultima release v0.11.4-beta. Versione = `project VERSION` + `STAGERACK_VERSION_LABEL` in CMake, deve coincidere col tag. Autore commit = noreply GitHub, mai la Gmail.
 - Dati app: `~/Library/Application Support/StageRack/` (`StageRack.settings` XML, `plugins.xml`, `latency.xml`, `dropouts.log`, `Autosave.stagerack`). Sessione di test `~/Documents/StageRack-Test.stagerack`; sessione grande dell'utente `~/Documents/ZSP BIO.stagerack` (20 rack).
 
 ## Architettura (Source/)
@@ -42,7 +42,7 @@ scripts/release.sh                      # package + test + tag v<versione> + rel
 - Core in idle profondo: svegliare un core costa ~0.25 ms → **CoreWakeAssist** solo per tipi di plugin che aspettano davvero (`wakeNeed`, misurato al primo hop dopo una pausa).
 - Il workgroup CoreAudio è decisivo (CLPC alza il clock). Scartati (nessun effetto o peggio): spin dei worker, promozione QoS dei thread del plugin, ballast, AMX warm-up, `VECLIB_MAXIMUM_THREADS=1`, offload dei rack, ASYNC, SDK VST3 diretto (involucro JUCE ~3 µs).
 - Risultati: 1-16 DF @32 = 0 persi; 12 DF @16 = 0 persi. Senza spread 8 DF → ~1700 persi.
-- **Bypass vero** (`Rack::processBypassTransition`): il bypass JUCE di VST3/AU fa girare il plugin; il nostro lo ferma (fade 10 ms, drain della coda, recupero hop alla ripresa, dry ritardato per i plugin con latenza). Parallelo solo se il lavoro seriale supera il 30% del budget: a vuoto i worker costavano ~35% CPU @16.
+- **Bypass vero** (`Rack::processBypassTransition`): il bypass JUCE di VST3/AU fa girare il plugin; il nostro lo ferma (fade 10 ms, drain della coda, attesa di fase alla ripresa (mai chiamate extra nello stesso callback), `flushIdlePlugins` prima di leggere lo stato, interruttore `features::trueBypass`, dry ritardato per i plugin con latenza). Parallelo solo se il lavoro seriale supera il 30% del budget: a vuoto i worker costavano ~35% CPU @16.
 - Crash/blocchi di De-Feedback (heap corruption in creazione/distruzione, deadlock in dispose) sono **del plugin**: mitigati con parcheggio istanze, autosave, timeout di uscita 5 s. Non disassemblare plugin commerciali.
 
 ## Trappole

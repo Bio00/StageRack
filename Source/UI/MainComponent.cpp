@@ -299,7 +299,8 @@ juce::ValueTree MainComponent::captureAppSettings()
     juce::ValueTree t ("APPSETTINGS");
 
     for (int f = 0; f < features::numFeatures; ++f)
-        t.setProperty (juce::String ("feature_") + features::key ((features::Feature) f), features::has ((features::Feature) f), nullptr);
+        if (features::perSession ((features::Feature) f))
+            t.setProperty (juce::String ("feature_") + features::key ((features::Feature) f), features::has ((features::Feature) f), nullptr);
 
     t.setProperty ("topBarLayout", topBar != nullptr ? topBar->getLayoutString() : settings.getValue ("topBarLayout"), nullptr)
      .setProperty ("sendStyle", SendsPanel::knobStyle ? 0 : 1, nullptr)
@@ -338,7 +339,7 @@ void MainComponent::applyAppSettings (const juce::ValueTree& t)
     for (int f = 0; f < features::numFeatures; ++f)
     {
         const auto key = juce::String ("feature_") + features::key ((features::Feature) f);
-        if (t.hasProperty (key) && (bool) t[key] != features::has ((features::Feature) f))
+        if (features::perSession ((features::Feature) f) && t.hasProperty (key) && (bool) t[key] != features::has ((features::Feature) f))
         {
             features::enabled[f] = (bool) t[key];
             featuresDiffer = true;

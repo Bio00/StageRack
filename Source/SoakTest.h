@@ -173,6 +173,9 @@ private:
         return &engine.getRack (rnd.nextInt (engine.getNumRacks()));
     }
 
+    juce::String lastBypass;
+    bool bypassActions = ! juce::JUCEApplication::getCommandLineParameterArray().contains ("--no-bypass");
+
     void showAction()
     {
         // what a sound engineer does during a show, one thing every 100 ms
@@ -221,6 +224,29 @@ private:
                     if (auto* r = randomRack()) { r->muted = ! r->muted.load(); done.addIfNotAlreadyThere ("mute"); }
                 break;
             case 7:
+                if (step % 16 == 8 && bypassActions)   // plugin on / off (true bypass): every 1.6 s
+                {
+                    std::vector<Rack::Slot*> used;
+                    for (int r = 0; r < engine.getNumRacks(); ++r)
+                        for (int sl = 0; sl < Rack::maxSlots; ++sl)
+                            if (engine.getRack (r).getPlugin (sl) != nullptr)
+                                used.push_back (&engine.getRack (r).getSlot (sl));
+                    if (! used.empty())
+                    {
+                        auto& chosen = *used[(size_t) rnd.nextInt ((int) used.size())];
+                        auto& b = chosen.bypassed;
+                        b = ! b.load();
+                        lastBypass = juce::String (b.load() ? "off" : "on") + " at " + juce::String (juce::Time::getMillisecondCounterHiRes() - startMs, 0) + " ms";
+                        if (juce::JUCEApplication::getCommandLineParameterArray().contains ("--log-bypass"))
+                            std::cout << "BYP " << chosen.plugin->getName() << " (" << chosen.plugin->getPluginDescription().pluginFormatName << ", hop " << chosen.hopCalls.load() << " phase " << chosen.hopPhase.load() << ", owed " << chosen.owed << ", latency " << chosen.plugin->getLatencySamples() << ") " << lastBypass << " late " << engine.dropouts.getLate() << " worst " << proxy.worst.load() << std::endl;
+                        done.addIfNotAlreadyThere ("plugin bypass");
+                    }
+                }
+                else if (step % 48 == 0)
+                {
+                    session.toTree();     // what a save does: flushes the stopped plugins
+                    done.addIfNotAlreadyThere ("session state");
+                }
                 engine.updateLatencyCompensation();
                 session.watchHops();
                 break;

@@ -442,6 +442,7 @@ inline void runRoutingSelfTest (const std::function<void (bool, const juce::Stri
                         b.setSample (ch, i, 0.5f * x + tail);
                 }
             }
+            void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override   { ++calls; }
             double getTailLengthSeconds() const override                         { return 0.0; }
             bool acceptsMidi() const override                                    { return false; }
             bool producesMidi() const override                                   { return false; }
@@ -490,6 +491,23 @@ inline void runRoutingSelfTest (const std::function<void (bool, const juce::Stri
         check (cp->calls == idleCalls && slot.bypassState == Rack::Slot::bpIdle && near (out.getSample (0, bs - 1), 0.5f),
                "true bypass: not called at all once idle (was " + juce::String (idleCalls - before) + " calls of fade + drain)");
         check (cp->tail < 1.0e-4f, "true bypass: its tail was drained with silence, nothing stale on resume");
+
+        // a flush (Session::flushIdlePlugins): one call, only in phase, then idle again
+        slot.flushWanted = true;
+        runBlocks (e, 8, 0.5f);
+        check (cp->calls == idleCalls + 1 && ! slot.flushWanted && slot.bypassState == Rack::Slot::bpIdle
+                 && near (out.getSample (0, bs - 1), 0.5f), "true bypass: flush = one silent call while idle, output untouched");
+
+        // switched off in SETTINGS > Features: the plugin runs again with its own bypass
+        features::enabled[features::trueBypass] = false;
+        runBlocks (e, 40, 0.5f);
+        const auto offCalls = cp->calls;
+        runBlocks (e, 100, 0.5f);
+        check (cp->calls == offCalls + 100 && slot.bypassState == Rack::Slot::bpActive && near (out.getSample (0, bs - 1), 0.5f),
+               "true bypass off: the plugin's own bypass, every callback");
+        features::enabled[features::trueBypass] = true;
+        runBlocks (e, 2100, 0.5f);
+        check (slot.bypassState == Rack::Slot::bpIdle && near (out.getSample (0, bs - 1), 0.5f), "true bypass on again: idle");
 
         slot.bypassed = false;
         maxJump = 0.0f; last = out.getSample (0, bs - 1);

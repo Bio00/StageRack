@@ -18,8 +18,12 @@ if [ -n "$(git status --porcelain)" ]; then echo "Commit your changes first."; e
 
 scripts/package.sh
 EXE=dist/StageRack.app/Contents/MacOS/StageRack
-$EXE --selftest | tail -1
-$EXE --edit-selftest | tail -1
+# the tests exit with 0 even when they fail: read the last line
+for t in --selftest --edit-selftest --undo-selftest --device-guard-test; do
+    RESULT=$($EXE $t 2>/dev/null | tail -1)
+    echo "$t: $RESULT"
+    if [ "$RESULT" != "ALL PASSED" ]; then echo "Tests failed: not released."; exit 1; fi
+done
 
 VERSION=$(sed -n 's/^project(StageRack VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
 LABEL=$(sed -n 's/^set(STAGERACK_VERSION_LABEL "\(.*\)")/\1/p' CMakeLists.txt)

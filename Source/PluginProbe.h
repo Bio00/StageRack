@@ -211,6 +211,26 @@ inline int runParamProbe (const juce::StringArray& args)
                               << " '" << prm->getCurrentValueAsText() << "'" << std::endl;
                 }
     }
+    // Does the plugin save a change made while it is not called (true bypass idle)? And after one call?
+    if (args.contains ("--idle-state"))
+    {
+        auto state = [&] { juce::MemoryBlock m; p->getStateInformation (m); return m; };
+        const auto base = state();
+        std::cout << "state stable without changes: " << (state() == base ? "yes" : "NO") << std::endl;
+
+        for (auto* prm : p->getParameters())
+        {
+            if (! prm->isAutomatable() || prm->isBoolean() || prm->isMetaParameter()) continue;
+            prm->setValueNotifyingHost (prm->getValue() > 0.5f ? 0.2f : 0.8f);
+            juce::Thread::sleep (50);
+            const auto idle = state();
+            run (1);
+            const auto called = state();
+            std::cout << "changed " << prm->getName (64) << ": saved while idle " << (idle != base ? "yes" : "NO")
+                      << ", one call changes the saved state " << (called != idle ? "YES (idle state was stale)" : "no") << std::endl;
+            break;
+        }
+    }
     std::fflush (nullptr);
     std::_Exit (0);
 }

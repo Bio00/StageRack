@@ -15,6 +15,71 @@ static juce::String stateOf (juce::AudioPluginInstance& p)
     return mb.toBase64Encoding();
 }
 
+/** A plugin stopped by the true bypass gets its parameter changes (made in its window, by MIDI, by
+    a scene...) only when it is called: before reading its state, ask for one silent call, or the
+    session would store the old values. Only if something changed since the last one. */
+static void flushIdlePlugins (const AudioEngine& engine, const std::vector<const Rack*>& racks)
+{
+    std::vector<std::pair<Rack::Slot*, juce::uint64>> waiting;
+
+    for (auto* cr : racks)
+    {
+        auto& r = const_cast<Rack&> (*cr);
+
+        for (int i = 0; i < Rack::maxSlots; ++i)
+        {
+            auto& s = r.getSlot (i);
+
+            if (s.plugin == nullptr || s.bypassState.load() != Rack::Slot::bpIdle)
+                continue;
+
+            juce::uint64 h = 1469598103934665603ull;
+            for (auto* p : s.plugin->getParameters())
+            {
+                const float v = p->getValue();
+                juce::uint32 bits;
+                std::memcpy (&bits, &v, sizeof (bits));
+                h = (h ^ bits) * 1099511628211ull;
+            }
+            h |= 1;   // 0 = never flushed
+
+            if (h != s.flushedParams.load())
+            {
+                s.flushWanted.store (true, std::memory_order_release);
+                waiting.push_back ({ &s, h });
+            }
+        }
+    }
+
+    if (waiting.empty())
+        return;
+
+    // a hop of callbacks at most (4 ms); device stopped = no callbacks, give up soon
+    const auto start = juce::Time::getMillisecondCounter();
+    const auto firstCallback = engine.getCallbackCount();
+
+    for (auto& [s, h] : waiting)
+    {
+        while (s->flushWanted.load (std::memory_order_acquire) && s->bypassState.load() == Rack::Slot::bpIdle)
+        {
+            const auto ms = juce::Time::getMillisecondCounter() - start;
+            if (ms > 100 || (ms > 45 && engine.getCallbackCount() == firstCallback))
+                return;   // asked anyway: done at the next callbacks
+            juce::Thread::sleep (1);
+        }
+
+        s->flushedParams.store (h);
+    }
+}
+
+static void flushIdlePlugins (AudioEngine& engine)   // the whole session at once
+{
+    std::vector<const Rack*> racks;
+    for (int i = 0; i < engine.getNumRacks(); ++i)
+        racks.push_back (&engine.getRack (i));
+    flushIdlePlugins (engine, racks);
+}
+
 static void restoreState (juce::AudioPluginInstance& p, const juce::String& base64)
 {
     if (base64.isEmpty())
@@ -182,6 +247,7 @@ private:
         if (twin == nullptr || rack == nullptr || rack->getPlugin (current.slot) != current.original)
             return skip();
 
+        flushIdlePlugins (session.engine, { rack });
         auto& slot = rack->getSlot (current.slot);
         Rack::configurePlugin (*twin, rack->getSampleRate(), rack->getBlockSize());
         restoreState (*twin, stateOf (*current.original));
@@ -834,6 +900,7 @@ static void sendsFromTree (Rack& r, const juce::ValueTree& t)
 
 juce::ValueTree Session::captureSceneData() const
 {
+    flushIdlePlugins (engine);
     juce::ValueTree data (idScene);
 
     for (int i = 0; i < engine.getNumRacks(); ++i)
@@ -948,6 +1015,7 @@ void Session::recallScene (int index)
     if (! juce::isPositiveAndBelow (index, getNumScenes()))
         return;
 
+    flushIdlePlugins (engine);   // changes still queued in a stopped plugin must not land after the recall
     ++recallCount;
     applySceneData (scenes[(size_t) index].data);
     currentScene = index;
@@ -1057,6 +1125,7 @@ juce::ValueTree Session::pluginToTree (const Rack& r, int s) const
     if (p == nullptr)
         return {};
 
+    flushIdlePlugins (engine, { &r });   // all the rack's slots together
     auto& slot = const_cast<Rack&> (r).getSlot (s);
     juce::StringArray params;
     for (auto i : slot.shownParams)
@@ -1431,6 +1500,7 @@ juce::ValueTree Session::toTree() const
 
     juce::ValueTree racksTree (idRacks);
 
+    flushIdlePlugins (engine);   // one wait for all the racks
     for (int i = 0; i < engine.getNumRacks(); ++i)
         racksTree.appendChild (rackToTree (engine.getRack (i)), nullptr);
 

@@ -711,6 +711,8 @@ public:
 
         if (args.contains ("--soak"))
         {
+            if (args.contains ("--no-true-bypass"))
+                features::enabled[features::trueBypass] = false;
             juce::Process::setDockIconVisible (false);
             static std::unique_ptr<SoakTest> test;   // drives itself on the message loop, exits with _Exit
             test = std::make_unique<SoakTest> (args);
