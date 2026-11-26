@@ -116,6 +116,7 @@ std::unique_ptr<juce::AudioPluginInstance> Rack::setPlugin (int slot, std::uniqu
         s.hopWaitMs = -1.0f;
         s.wakeNeed = 0;
         s.wakeProbeMs = 0.0f;
+        s.wakeProbeStreak = 0;
         s.bypassState = Slot::bpActive;
         s.flushWanted = false;
         s.flushedParams = 0;
@@ -166,6 +167,7 @@ void Rack::moveSlot (int from, int to)
     a.wakeNeed = b.wakeNeed.load();
     b.wakeNeed = an;
     std::swap (a.wakeProbeMs, b.wakeProbeMs);
+    std::swap (a.wakeProbeStreak, b.wakeProbeStreak);
 
     const bool ab = a.bypassed.load();
     a.bypassed = b.bypassed.load();
@@ -610,6 +612,7 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
     const auto tp = juce::Time::getHighResolutionTicks();
 
     run (p, view);
+    float probeWait = 0.0f;   // a hop that is not heavy did not wait
 
     // hop watch: heavy = well above an ordinary call (same rule as HopAligner)
     const auto ms = (float) (juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - tp) * 1000.0);
@@ -622,14 +625,7 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
             const auto old = s.hopWaitMs.load (std::memory_order_relaxed);
             s.hopWaitMs.store (old < 0.0f ? wait : old + 0.05f * (wait - old), std::memory_order_relaxed);
 
-            // unassisted hop after an idle gap: a long wait means the assist helps (for good)
-            if (wakeProbeNow.load (std::memory_order_relaxed))
-            {
-                s.wakeProbeMs = juce::jmax (s.wakeProbeMs, wait);
-
-                if (wait > wakeNeedMs)
-                    s.wakeNeed.store (1, std::memory_order_relaxed);
-            }
+            probeWait = wait;
         }
 
         const auto n = s.heavyCount.load (std::memory_order_relaxed);
@@ -640,6 +636,17 @@ void Rack::processSlot (Slot& s, juce::AudioBuffer<float>& buf, int numSamples) 
     else
     {
         s.lightMs = ms < s.lightMs ? ms : s.lightMs + 0.002f * (ms - s.lightMs);
+    }
+
+    // unassisted hop after an idle gap: long waits in several probes in a row mean the
+    // assist helps (for good); a fast probe restarts the count
+    if (hopCall && wakeProbeNow.load (std::memory_order_relaxed))
+    {
+        s.wakeProbeMs = juce::jmax (s.wakeProbeMs, probeWait);
+        s.wakeProbeStreak = probeWait > wakeNeedMs ? s.wakeProbeStreak + 1 : 0;
+
+        if (s.wakeProbeStreak >= wakeNeedProbes)
+            s.wakeNeed.store (1, std::memory_order_relaxed);
     }
 
     if (handover)

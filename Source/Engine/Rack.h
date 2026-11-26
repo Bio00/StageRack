@@ -66,12 +66,15 @@ public:
         // EverClean computes the whole hop on the calling thread (~0). The core wake assist
         // is only useful for the first kind.
         std::atomic<float> hopWaitMs { -1.0f };
-        // Does this instance need CoreWakeAssist? It starts without; an unassisted hop after an
-        // idle gap that waits long for the plugin's helper turns it on for good (De-Feedback
-        // VST3 waits ~0.34 ms; its AU version and EverClean ~0.02, where the assist burnt a
-        // core for nothing). Remembered per plugin type (AudioEngine::watchHops).
+        // Does this instance need CoreWakeAssist? It starts without; wakeNeedProbes unassisted
+        // hops in a row after an idle gap that wait long for the plugin's helper turn it on for
+        // good (De-Feedback VST3 waits ~0.34 ms; its AU version and EverClean ~0.02, where the
+        // assist burnt a core for nothing). One probe was not enough: a single preempted hop
+        // (wall - thread CPU looks like waiting) marked the AU and the assist spun ~60% of a
+        // core. Remembered per plugin type (AudioEngine::watchHops).
         std::atomic<int> wakeNeed { 0 };
         float wakeProbeMs = 0.0f;   // audio thread: worst unassisted wait seen
+        int wakeProbeStreak = 0;    // audio thread: consecutive slow unassisted probes
         // message thread only (watchHops)
         const void* watchPlugin = nullptr;
         juce::uint64 watchSince = 0;
@@ -114,8 +117,9 @@ public:
 
     /** Index of the device callback being processed (set by the engine before each callback). */
     juce::uint64 callbackIndex = 0;
-    static inline std::atomic<bool> wakeProbeNow { false };
-    static constexpr float wakeNeedMs = 0.08f;   // unassisted wait above this = the assist helps   // set by the engine: this callback's hops are unassisted after an idle gap
+    static inline std::atomic<bool> wakeProbeNow { false };   // set by the engine: this callback's hops are unassisted after an idle gap
+    static constexpr float wakeNeedMs = 0.08f;   // unassisted wait above this = the assist helps
+    static constexpr int wakeNeedProbes = 3;     // ... in this many probes in a row
 
     //==============================================================================
     // Message thread
