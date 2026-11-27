@@ -2,6 +2,16 @@
 
 Ogni versione ha la sua sezione `## versione — data`. L'app mostra queste note da sola dopo un aggiornamento (e dal menu StageRack → What's New...); `scripts/release.sh` usa la sezione della versione come note della release su GitHub.
 
+## 0.12.0-beta — 2026-11-27
+
+- **"BUFFER: USE N" quando la catena non ci sta**: se i plugin di un rack sforano il tempo del buffer più volte in pochi secondi, la barra in alto lo dice in rosso e indica il buffer più piccolo che basta (con margine per scheda e driver); dal menu lo imposti con un click. Gli stalli della scheda o del sistema non contano: lì un buffer più grande non serve. Un minuto pulito toglie l'avviso.
+- **Indicatore 1 CORE / N CORES** sopra le barre DSP: dice se il motore sta lavorando su un core o su più. Il lavoro si divide per rack (gli slot di un rack sono in serie): con un solo rack, o con rack leggeri, resta 1 CORE ed è giusto così.
+- **De-Feedback + soothe3 nello stesso rack a 16 campioni senza buchi**: plugin con calcoli a periodi diversi (De-Feedback ogni 192 campioni, soothe3 ogni 1024) ora vengono distribuiti in modo che i picchi non coincidano.
+- **Microfono**: StageRack chiede il permesso all'avvio; se è negato la barra mostra "NO MIC ACCESS" (prima gli ingressi restavano muti senza avvisi).
+- Aprendo una sessione, se questa cambia buffer o frequenza della scheda viene detto.
+- Il "core tenuto sveglio" si attiva per un tipo di plugin solo dopo 3 attese lunghe di fila (prima ne bastava una: falsi allarmi e CPU in più).
+- **Corretto un crash** all'apertura di una sessione mentre un'altra era caricata.
+
 ## 0.11.4-beta — 2026-11-25
 
 - **Bypass vero: un plugin in bypass non usa CPU.** Prima il bypass di VST3 e AU faceva girare comunque il plugin. Ora sfuma in 10 ms, lascia spegnere la coda e si ferma; alla riaccensione riparte sulla sua fase di hop (attesa massima di un hop) e sfuma di nuovo. Vale anche per i plugin con latenza: in bypass esce il segnale diretto ritardato uguale.
