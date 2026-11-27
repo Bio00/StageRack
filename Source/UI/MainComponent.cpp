@@ -64,6 +64,12 @@ MainComponent::MainComponent()
 
     session = std::make_unique<Session> (engine, pluginManager);
     session->onPluginAboutToBeDeleted = [] (juce::AudioPluginInstance* p) { PluginWindow::closeFor (p); };
+    session->onRackAboutToBeRemoved = [this] (Rack& r)
+    {
+        for (auto* rc : rackComponents)
+            if (&rc->getRack() == &r)
+                rc->markRackGone();
+    };
     session->onPluginReplaced = [] (juce::AudioPluginInstance* o, juce::AudioPluginInstance* n) { PluginWindow::replace (o, n); };
     session->addChangeListener (this);
     session->captureAppSettings = [this] { return captureAppSettings(); };
@@ -170,6 +176,7 @@ MainComponent::MainComponent()
     dropoutLog = std::make_unique<DropoutLog> (engine, PluginManager::getDataDirectory().getChildFile ("dropouts.log"));
     systemhealth::beginLiveActivity();   // no App Nap, no idle sleep, precise timers while we run
     systemhealth::memoryPressure();      // starts listening
+    systemhealth::requestMicAccess();    // never asked: the system prompt now, not silent inputs later
     commonConstructorTail();
 
     if (audioReady)
@@ -409,9 +416,28 @@ void MainComponent::applyAppSettings (const juce::ValueTree& t)
         {
             if (deviceGuard != nullptr)
             {
+                // a session brings its own buffer and rate: say so when they change what runs now
+                // (seen 2026-11-26: an older session put a live rig from 32 back to 16 samples)
+                juce::StringArray changes;
+
+                if (auto* cur = engine.getDeviceManager().getCurrentAudioDevice())
+                {
+                    const int newBs = xml->getIntAttribute ("audioDeviceBufferSize", cur->getCurrentBufferSizeSamples());
+                    const double newSr = xml->getDoubleAttribute ("audioDeviceRate", cur->getCurrentSampleRate());
+
+                    if (newBs != cur->getCurrentBufferSizeSamples())
+                        changes.add ("This session sets the buffer to " + juce::String (newBs) + " samples (it was "
+                                   + juce::String (cur->getCurrentBufferSizeSamples()) + "). Change it in the audio device settings and save the session to keep it.");
+                    if (std::abs (newSr - cur->getCurrentSampleRate()) > 1.0)
+                        changes.add ("This session sets the sample rate to " + juce::String (newSr / 1000.0, 1) + " kHz (it was "
+                                   + juce::String (cur->getCurrentSampleRate() / 1000.0, 1) + " kHz).");
+                }
+
                 if (! deviceGuard->requestDevice (*xml))
                     notes.add ("The session's audio device (" + xml->getStringAttribute ("audioOutputDeviceName",
                                    xml->getStringAttribute ("audioInputDeviceName")) + ") is not connected: keeping the current one.");
+                else
+                    notes.addArray (changes);
             }
             else
             {
@@ -910,7 +936,7 @@ void MainComponent::syncRacks()
     bool same = rackComponents.size() == engine.getNumRacks();
 
     for (int i = 0; same && i < engine.getNumRacks(); ++i)
-        same = &rackComponents[i]->getRack() == &engine.getRack (i);
+        same = ! rackComponents[i]->isRackGone() && &rackComponents[i]->getRack() == &engine.getRack (i);
 
     if (! same)
     {
@@ -925,7 +951,7 @@ void MainComponent::syncRacks()
             RackComponent* rc = nullptr;
 
             for (int j = 0; j < old.size(); ++j)
-                if (&old[j]->getRack() == &rack)
+                if (! old[j]->isRackGone() && &old[j]->getRack() == &rack)   // a new rack may reuse a dead one's address
                 {
                     rc = old.removeAndReturn (j);
                     break;
@@ -1084,6 +1110,13 @@ void MainComponent::timerCallback()
         }
         sessionSettling = settling;
 
+        // chains that do not fit the buffer: the top bar suggests a bigger one
+        if (auto* dev = engine.getDeviceManager().getCurrentAudioDevice(); dev != nullptr && ! settling)
+            engine.budget.update (TempoEngine::nowSec(), dev->getCurrentBufferSizeSamples(), dev->getCurrentSampleRate(),
+                                  dev->getAvailableBufferSizes(), engine.getAverageLoad());
+        else
+            engine.budget.reset();
+
         if (! settling && ! uiBenchStarted && juce::SystemStats::getEnvironmentVariable ("STAGERACK_UI_BENCH", {}).isNotEmpty())
         {
             uiBenchStarted = true;
@@ -1097,7 +1130,7 @@ void MainComponent::timerCallback()
     edit->syncGroupParameters();   // a knob turned in a plugin window: same knob in its edit group
 
     for (auto* rc : rackComponents)
-        if (rc->isShowing())
+        if (rc->isShowing() && ! rc->isRackGone())
             rc->updateMeters();
 
     // MIDI bank ring on the racks: redraw when the bank moves or bank mappings come / go

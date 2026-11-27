@@ -97,6 +97,10 @@ public:
 
     /** Called before a plugin is destroyed, so editor windows can be closed. */
     std::function<void (juce::AudioPluginInstance*)> onPluginAboutToBeDeleted;
+    /** Called right before a rack is destroyed (removed, a session opened, undo): its UI must stop
+        reading it now. Creating plugins can run the message loop (AU), so the meter timer may fire
+        in the middle of opening a session (crash 2026-11-26 in RackComponent::updateMeters). */
+    std::function<void (Rack&)> onRackAboutToBeRemoved;
 
     /** Instances taken out of the session while it is open (removed, replaced, re-spread,
         rack deleted) are PARKED here instead of being destroyed: alive, but never processed,

@@ -2202,6 +2202,9 @@ void RackComponent::refresh()
 
 void RackComponent::updateMeters()
 {
+    if (rackGone)
+        return;
+
     for (int c = 0; c < 2; ++c)
     {
         // never an infinite level: it would never fall back (inf x 0.82 = inf)

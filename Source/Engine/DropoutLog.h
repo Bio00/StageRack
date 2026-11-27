@@ -30,6 +30,8 @@ public:
             const auto ago = e.hostSec > 0.0 ? juce::jmax (0.0, nowSec - e.hostSec) : 0.0;
             const auto when = now - juce::RelativeTime::seconds (ago);
 
+            engine.budget.event (e.hostSec > 0.0 ? e.hostSec : nowSec, e.ms, e.heaviestMs, e.budgetMs, e.silent, e.heaviestRack);
+
             juce::String line = when.formatted ("%Y-%m-%d %H:%M:%S") + "." + juce::String (when.getMilliseconds()).paddedLeft ('0', 3) + "  ";
 
             if (e.silent)

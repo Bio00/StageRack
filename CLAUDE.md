@@ -61,6 +61,7 @@ scripts/release.sh                      # package + test + tag v<versione> + rel
 - La sandbox di Bash non legge `~/Library/Caches/...`: serve `dangerouslyDisableSandbox`.
 - zsh non fa word-splitting di `$var`. `osascript quit` non raggiunge un'istanza lanciata da shell.
 - Computer-use in background: niente ⌘/⌥, i popup JUCE e i click raw sugli slot non arrivano; i menu e gli AXButton sì. Per aprire una sessione: impostare `lastSession` nelle settings con l'app chiusa. Provare la GUI scrive `lastSeenVersion` nelle settings vere: ripristinarle.
+- Microfono: senza permesso CoreAudio dà ingressi muti senza errori (TopBar "NO MIC ACCESS", `--mic-status`). La build è firmata come bundle da un POST_BUILD in CMake: firmata solo dal linker, macOS negava senza chiedere. Per richiedere di nuovo: `tccutil reset Microphone com.bio.stagerack`.
 - Icona: `scripts/make-icon.sh` (NSImage via `render-svg.swift`); NON `ICON_BIG` di JUCE né `qlmanage`. Build locali = `AppIcon-Dev.icns`, `package.sh` rimette quella normale.
 
 ## Non verificato / aperto

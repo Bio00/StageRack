@@ -11,6 +11,7 @@
 #include "OscInput.h"
 #include "TempoOutput.h"
 #include "DropoutMonitor.h"
+#include "BudgetAdvisor.h"
 
 namespace stagerack
 {
@@ -133,6 +134,7 @@ public:
 
     /** Live dropout counters and events (late callbacks, skipped callbacks). */
     DropoutMonitor dropouts;
+    BudgetAdvisor budget;   // message thread: chains that do not fit the buffer (fed by DropoutLog)
 
     /** Core wake assist (see CoreWakeAssist): 0 = auto (around plugin hops), 1 = always, 2 = off. */
     void setWakeAssistMode (int mode);
@@ -179,7 +181,12 @@ public:
     void setChannelMaps (const juce::BigInteger& activeIns, int numIns, const juce::BigInteger& activeOuts, int numOuts);
 
     double getCallbackLoad() const noexcept                  { return callbackLoad.load (std::memory_order_relaxed); }
+    /** Average share of the period our callback takes (slow average, for BudgetAdvisor). */
+    double getAverageLoad() const noexcept                   { return averageLoad.load (std::memory_order_relaxed); }
     bool hasWorkgroup() const noexcept                       { return workgroupActive; }
+    /** True while the racks are spread over the worker cores; false = all on the audio thread
+        (light load: waking the workers would cost more than it saves). Adaptive, see the callback. */
+    bool isParallel() const noexcept                         { return forceParallel || parallelMode.load (std::memory_order_relaxed); }
     /** Racks whose plugins do their hop in this callback are handed to the cores first
         (a heavy rack picked up last makes the callback = light work + hop). */
     static inline std::atomic<bool> hopFirstOrder { true };
@@ -268,6 +275,9 @@ private:
     bool workgroupActive = false;
     int choosePhase (int hopCalls, const Rack::Slot* exclude, const Rack* forRack) const;
     std::vector<int> phaseCosts (int hopCalls, const Rack::Slot* exclude, const Rack* forRack) const;
+public:
+    static inline bool mixedHopCosts = true;   // false = only same-hop instances collide (bench --same-hop-only)
+private:
     bool runsInSeries (const Rack&, const Rack&) const;
     void alignAllRacks();
 
@@ -291,6 +301,7 @@ private:
     double peakParallelGainMs = 0.0, peakSerialWorkMs = 0.0;
     juce::LinearSmoothedValue<float> masterGain { 1.0f };
     std::atomic<double> callbackLoad { 0.0 };
+    std::atomic<double> averageLoad { 0.0 };
 
     JUCE_DECLARE_NON_COPYABLE (AudioEngine)
 };

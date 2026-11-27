@@ -1,3 +1,4 @@
+#include <numeric>
 #include "AudioEngine.h"
 #include <unordered_map>
 #include "HopAligner.h"
@@ -182,9 +183,14 @@ int AudioEngine::choosePhase (int hopCalls, const Rack::Slot* exclude, const Rac
 
 std::vector<int> AudioEngine::phaseCosts (int hopCalls, const Rack::Slot* exclude, const Rack* forRack) const
 {
-    // Least loaded phase among the instances with the same hop. Instances that run in
-    // series with this one (same rack, or racks chained to it) weigh far more: their hops
-    // would add up on one core, while hops of independent racks run on different cores.
+    // Least loaded phase among the instances with a hop. Instances that run in series with
+    // this one (same rack, or racks chained to it) weigh far more: their hops would add up on
+    // one core, while hops of independent racks run on different cores.
+    // Different hops collide too: phase p of hop H and phase q of hop H2 meet in some callback
+    // iff p == q modulo gcd (H, H2) (every lcm callbacks), never otherwise. E.g. De-Feedback
+    // (192 samples = 12 callbacks @16) and soothe3 in Low latency (1024 = 64 callbacks) in one
+    // rack: gcd 4, so 3 phases in 4 keep their hops apart for good. Same hop: gcd = H, the
+    // plain "same phase" rule.
     std::vector<int> cost ((size_t) hopCalls, 0);
 
     for (auto& r : racks)
@@ -192,9 +198,21 @@ std::vector<int> AudioEngine::phaseCosts (int hopCalls, const Rack::Slot* exclud
         const bool serial = forRack != nullptr && runsInSeries (*r, *forRack);
 
         for (int i = 0; i < Rack::maxSlots; ++i)
-            if (auto& s = r->getSlot (i); &s != exclude && s.plugin != nullptr && s.hopCalls == hopCalls
-                                           && juce::isPositiveAndBelow (s.hopPhase.load(), hopCalls))
-                cost[(size_t) s.hopPhase.load()] += serial ? 1000 : 1;
+        {
+            auto& s = r->getSlot (i);
+            const int otherHop = s.hopCalls.load(), otherPhase = s.hopPhase.load();
+
+            if (&s == exclude || s.plugin == nullptr || otherHop <= 1 || ! juce::isPositiveAndBelow (otherPhase, otherHop))
+                continue;
+
+            if (! mixedHopCosts && otherHop != hopCalls)
+                continue;
+
+            const int g = std::gcd (hopCalls, otherHop);
+
+            for (int p = otherPhase % g; p < hopCalls; p += g)
+                cost[(size_t) p] += serial ? 1000 : 1;
+        }
     }
 
     return cost;
@@ -851,6 +869,9 @@ void AudioEngine::alignAllRacks()
             slot.hopCalls = res.hopCalls;
             slot.hopPhase = res.phase;
             slot.owed = 0;   // its phase now counts from here (true bypass catch-up)
+
+            if (std::getenv ("STAGERACK_LOG_ALIGN") != nullptr)
+                std::printf ("    [align] rack %d slot %d: hop %d phase %d (block %d)\n", r->getId(), i, res.hopCalls, res.phase, blockSize);
         }
     }
 }
@@ -1477,6 +1498,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs, 
     }
     const auto prev = callbackLoad.load (std::memory_order_relaxed);
     callbackLoad.store (load > prev ? load : prev * 0.9 + load * 0.1, std::memory_order_relaxed);
+    averageLoad.store (averageLoad.load (std::memory_order_relaxed) * 0.998 + load * 0.002, std::memory_order_relaxed);
 }
 
 //==============================================================================

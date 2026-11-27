@@ -127,6 +127,19 @@ void TopBar::rebuildTempoCells()
     resized();
 }
 
+int TopBar::activeCores() const
+{
+    // multicore: the cores that did some work lately (the audio thread counts), at least 2
+    if (! session.getEngine().isParallel())
+        return 1;
+
+    int n = 0;
+    for (auto l : threadLoads)
+        if (l > 0.005f)
+            ++n;
+    return juce::jmax (2, n);
+}
+
 double TopBar::secondsSinceLastDrop() const
 {
     auto& engine = session.getEngine();
@@ -140,6 +153,28 @@ juce::String TopBar::dropoutTooltip() const
 {
     const auto& d = session.getEngine().dropouts;
     juce::String t;
+
+    if (const auto& b = session.getEngine().budget; b.isActive())
+    {
+        auto& engine = session.getEngine();
+        const auto sr = juce::jmax (1.0, engine.getSampleRate());
+        const auto* rack = engine.findRack (b.getWorstRack());
+        t << "BUFFER TOO SMALL: the plugins " << (rack != nullptr ? "of '" + rack->name + "' " : juce::String())
+          << "needed up to " << juce::String (b.getWorstMs(), 2) << " ms, the buffer of " << b.getBuffer() << " samples gives "
+          << juce::String (1000.0 * b.getBuffer() / sr, 2) << " ms (CoreAudio and the driver need part of it too).\n";
+        if (b.getRecommended() > 0)
+            t << "Raise it to " << b.getRecommended() << " samples (" << juce::String (1000.0 * b.getRecommended() / sr, 2)
+              << " ms): click here. Save the session to keep it: a session brings back its own buffer.\n\n";
+        else
+            t << "The device offers no bigger buffer: lighten the chain (fewer plugins in series).\n\n";
+    }
+
+    if (const int cores = activeCores(); cores > 1)
+        t << "MULTICORE: the racks run in parallel on " << cores << " cores (the work is more than about 30% of the buffer).\n\n";
+    else
+        t << "SINGLE CORE: all racks run on the audio thread. The load is light: waking the other cores would cost more\n"
+             "than it saves. It goes multicore by itself when the work passes about 30% of the buffer.\n\n";
+
     t << "Dropouts since start (click to reset or see the log):\n"
       << "  late (processing longer than the buffer): " << (int) d.getLate() << "\n"
       << "  skipped (CoreAudio called us late / system stall): " << (int) d.getSkipped() << "\n"
@@ -196,6 +231,21 @@ void TopBar::showContextMenu (juce::Point<int> pos)
 
     if (cpuArea.contains (pos))
     {
+        if (const auto rec = session.getEngine().budget.getRecommended(); session.getEngine().budget.isActive() && rec > 0)
+        {
+            m.addItem ("Set the buffer to " + juce::String (rec) + " samples", [safe, rec]
+            {
+                if (safe == nullptr)
+                    return;
+
+                auto& dm = safe->session.getEngine().getDeviceManager();
+                auto setup = dm.getAudioDeviceSetup();
+                setup.bufferSize = rec;
+                dm.setAudioDeviceSetup (setup, true);
+            });
+            m.addSeparator();
+        }
+
         m.addItem ("Reset dropout counter", [safe]
         {
             if (safe != nullptr) { safe->session.getEngine().dropouts.clearCounters(); safe->repaint (safe->cpuArea); }
@@ -312,7 +362,9 @@ void TopBar::updateMeters()
             key << juce::roundToInt (l * (float) barH) << ',';
         key << juce::roundToInt (totalLoad * 100.0f) << '|' << (int) session.getEngine().dropouts.getTotal()
             << '|' << juce::roundToInt (juce::jmin (61.0, secondsSinceLastDrop())) << '|' << systemProblems
-            << '|' << (session.getEngine().hasWorkgroup() ? 1 : 0);
+            << '|' << (session.getEngine().hasWorkgroup() ? 1 : 0)
+            << '|' << (session.getEngine().budget.isActive() ? session.getEngine().budget.getRecommended() : -1)
+            << '|' << activeCores();
 
         if (key != shownCpuKey)
         {
@@ -420,12 +472,37 @@ void TopBar::paint (juce::Graphics& g)
             g.fillRoundedRectangle (b.withTrimmedTop (b.getHeight() * (1.0f - l)), 2.0f);
         }
 
+        // single core / multicore: a small label over the top right of the bars (in single core
+        // the worker bars there are empty anyway); multicore in the accent colour
+        {
+            const int cores = activeCores();
+            const juce::String label = cores > 1 ? juce::String (cores) + " CORES" : juce::String ("1 CORE");
+            const auto f = theme::font (9.0f, true);
+            const auto w = juce::GlyphArrangement::getStringWidthInt (f, label) + 8;
+            auto pill = juce::Rectangle<int> (bars.getRight() - w, bars.getY(), w, 12).toFloat();
+            g.setColour (theme::bg.withAlpha (0.88f));
+            g.fillRoundedRectangle (pill, 3.0f);
+            g.setColour (cores > 1 ? theme::accent : theme::textDim);
+            g.setFont (f);
+            g.drawText (label, pill, juce::Justification::centred, false);
+        }
+
         // dropouts since start / reset, then anything the Mac is doing wrong (low power, heat, memory)
         const auto drops = session.getEngine().dropouts.getTotal();
         g.setFont (theme::font (10.0f, drops > 0));
         juce::String text;
 
-        if (drops > 0)
+        if (const auto& b = session.getEngine().budget; b.isActive())
+        {
+            // the chains do not fit: say what to do, the count is in the tooltip
+            g.setFont (theme::font (10.0f, true));
+            g.setColour (theme::red);
+            if (b.getRecommended() > 0)
+                text << "BUFFER: USE " << b.getRecommended();   // short: the block is narrow
+            else
+                text << "OVER BUDGET";
+        }
+        else if (drops > 0)
         {
             g.setColour (theme::red);
             text << (int) drops << (drops == 1 ? " DROPOUT" : " DROPOUTS");

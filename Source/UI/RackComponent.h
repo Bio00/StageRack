@@ -33,6 +33,12 @@ public:
 
     Rack& getRack() noexcept        { return rack; }
 
+    /** Its rack is about to be destroyed: from now on nothing reads it (hidden, no meters); the
+        component itself goes at the next syncRacks (not now: the click that removed the rack
+        may still be running inside it). */
+    void markRackGone()             { rackGone = true; setVisible (false); }
+    bool isRackGone() const noexcept { return rackGone; }
+
     void refresh();                 // structure/selection changed
     void updateMeters();            // ~30 Hz from the main timer
     void setVertical (bool shouldBeVertical);
@@ -75,6 +81,7 @@ private:
     Session& session;
     EditController& edit;
     Rack& rack;
+    bool rackGone = false;
     int index;
 
     juce::Label nameLabel, infoLabel;

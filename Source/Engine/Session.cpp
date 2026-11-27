@@ -773,6 +773,7 @@ void Session::removeRack (Rack& rack)
             retirePlugin (std::move (p));
     }
 
+    if (onRackAboutToBeRemoved) onRackAboutToBeRemoved (rack);
     engine.removeRack (rack);
     markDirty();
 }
@@ -1560,6 +1561,7 @@ bool Session::isSessionTree (const juce::ValueTree& root)
 void Session::loadFromTree (const juce::ValueTree& root, const juce::File& f, bool markAsChanged)
 {
     newSession();
+    if (onRackAboutToBeRemoved) onRackAboutToBeRemoved (engine.getRack (0));
     engine.removeRack (engine.getRack (0));
 
     engine.masterGainDb = 0.0f;   // no master fader any more: old sessions play at unity
@@ -1827,6 +1829,7 @@ void Session::applyUndoState (const UndoState& u)
         {
             for (auto& p : r.takeDiscarded())
                 retirePlugin (std::move (p));
+            if (onRackAboutToBeRemoved) onRackAboutToBeRemoved (r);
             engine.removeRack (r);
         }
     }

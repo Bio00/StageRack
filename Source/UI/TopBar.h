@@ -103,6 +103,7 @@ private:
     int healthTick = 29;
     juce::String shownCpuKey;   // what the DSP / dropout area shows: repainted only when it changes
     double secondsSinceLastDrop() const;
+    int activeCores() const;   // 1 = single core (all racks on the audio thread), else cores in use
     juce::String dropoutTooltip() const;
 };
 

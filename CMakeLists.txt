@@ -141,7 +141,17 @@ target_link_libraries(StageRack PRIVATE
         juce::juce_audio_devices
         juce::juce_gui_extra
         juce::juce_osc
+        "-framework AVFoundation"
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+# Sign the whole bundle after every build (ad hoc), like scripts/package.sh does for releases.
+# The linker alone signs only the executable: Info.plist stays unbound, and macOS then denies
+# the microphone without ever asking (NSMicrophoneUsageDescription is not trusted) -> silent
+# inputs in local builds (seen 2026-11-26 with Dante).
+add_custom_command(TARGET StageRack POST_BUILD
+    COMMAND codesign --force --deep --sign - "$<TARGET_BUNDLE_DIR:StageRack>"
+    COMMENT "Signing the StageRack bundle (ad hoc)"
+    VERBATIM)

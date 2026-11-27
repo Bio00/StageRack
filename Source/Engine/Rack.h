@@ -119,7 +119,7 @@ public:
     juce::uint64 callbackIndex = 0;
     static inline std::atomic<bool> wakeProbeNow { false };   // set by the engine: this callback's hops are unassisted after an idle gap
     static constexpr float wakeNeedMs = 0.08f;   // unassisted wait above this = the assist helps
-    static constexpr int wakeNeedProbes = 3;     // ... in this many probes in a row
+    static inline int wakeNeedProbes = 3;        // ... in this many probes in a row (bench: --wake-probes)
 
     //==============================================================================
     // Message thread

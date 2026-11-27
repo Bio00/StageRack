@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <AVFoundation/AVFoundation.h>
 #include <dispatch/dispatch.h>
 #include <atomic>
 #include "SystemHealth.h"
@@ -60,9 +61,37 @@ int memoryPressure()
     return pressure.load();
 }
 
+static std::atomic<int> micStatus { -1 };
+static std::atomic<double> micCheckedAt { -1.0e9 };
+
+int micAccess()
+{
+    // the answer changes only when the user flips it in System Settings: ask at most every 3 s
+    const auto now = juce::Time::getMillisecondCounterHiRes();
+
+    if (micStatus.load() < 0 || now - micCheckedAt.load() > 3000.0)
+    {
+        micStatus = (int) [AVCaptureDevice authorizationStatusForMediaType: AVMediaTypeAudio];
+        micCheckedAt = now;
+    }
+
+    return micStatus.load();
+}
+
+void requestMicAccess()
+{
+    if (micAccess() != (int) AVAuthorizationStatusNotDetermined)
+        return;
+
+    [AVCaptureDevice requestAccessForMediaType: AVMediaTypeAudio completionHandler: ^(BOOL) { micStatus = -1; }];
+}
+
 juce::String problems()
 {
     juce::StringArray p;
+
+    if (const auto mic = micAccess(); mic == (int) AVAuthorizationStatusDenied || mic == (int) AVAuthorizationStatusRestricted)
+        p.add ("NO MIC ACCESS");
 
     if (isLowPowerMode())       p.add ("LOW POWER MODE");
     if (thermalState() >= 2)    p.add (thermalState() >= 3 ? "OVERHEATING" : "HOT");

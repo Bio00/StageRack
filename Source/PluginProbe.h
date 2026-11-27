@@ -33,7 +33,8 @@ inline void applySetArgs (juce::AudioPluginInstance& p, const juce::StringArray&
             for (auto* prm : p.getParameters())
                 if (prm->getName (64).equalsIgnoreCase (name))
                 {
-                    prm->setValueNotifyingHost (prm->getValueForText (text));
+                    // "#0.5" = a normalized value (some plugins do not parse their own texts, e.g. soothe3's "on")
+                    prm->setValueNotifyingHost (text.startsWithChar ('#') ? text.substring (1).getFloatValue() : prm->getValueForText (text));
                     std::cout << "  set " << name << " = " << prm->getCurrentValueAsText() << std::endl;
                 }
         }
@@ -68,6 +69,8 @@ inline int runPluginProbe (const juce::StringArray& args)
     if (args.contains ("--insert"))
         std::cout << "  insert defaults: " << PluginManager::applyInsertDefaults (*p) << std::endl;
     applySetArgs (*p, args);
+    if (args.contains ("--set"))
+        p->prepareToPlay (sr, bs);   // a latency / quality mode takes effect on prepare
 
     std::cout << found[0]->name << "  latency " << p->getLatencySamples() << "  threads +" << (threads1 - threads0)
               << " at create, +" << (threads2 - threads1) << " at prepare" << std::endl;
@@ -155,7 +158,8 @@ inline int runPluginProbe (const juce::StringArray& args)
 
 namespace stagerack
 {
-/** "StageRack --param-probe <format> <id> [--set Name=Value]... [--sweep Name]"
+/** "StageRack --param-probe <format> <id> [--set Name=Value]... [--sweep Name] [--all]"
+    (--all: also the parameters a host may not automate, e.g. soothe3's latency mode)
     Lists the parameters (index, name, value, text, steps); --sweep writes 0..1 into one parameter
     like a fader would (processing a block after each write) and prints what the plugin reads back. */
 inline int runParamProbe (const juce::StringArray& args)
@@ -181,7 +185,7 @@ inline int runParamProbe (const juce::StringArray& args)
     auto list = [&]
     {
         for (auto* prm : p->getParameters())
-            if (prm->isAutomatable())
+            if (prm->isAutomatable() || args.contains ("--all"))
                 std::cout << "  [" << prm->getParameterIndex() << "] " << prm->getName (64) << " = " << prm->getValue()
                           << " '" << prm->getCurrentValueAsText() << "' steps " << prm->getNumSteps()
                           << (prm->isDiscrete() ? " discrete" : "") << (prm->isBoolean() ? " bool" : "")

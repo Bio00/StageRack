@@ -1,5 +1,7 @@
 #include <JuceHeader.h>
+#include "Engine/SystemHealth.h"
 #include "UI/MainComponent.h"
+#include "UI/Theme.h"
 #include "Bench.h"
 #include "PluginProbe.h"
 #include "TempoProbe.h"
@@ -101,6 +103,18 @@ public:
             const auto result = PluginManager::runLatencyProbeChild (args);
             std::fflush (nullptr);
             std::_Exit (result);
+        }
+
+        if (args.contains ("--mic-status"))
+        {
+            // Diagnostics: microphone access of THIS app bundle (launch it with
+            // open -W --stdout <file> <app> --args --mic-status: the permission belongs to the
+            // app, not to the terminal) 0 not asked, 1 restricted, 2 denied, 3 granted
+            juce::Process::setDockIconVisible (false);
+            const auto m = systemhealth::micAccess();
+            std::cout << "mic access: " << m << " (" << (m == 3 ? "granted" : m == 2 ? "denied" : m == 1 ? "restricted" : "not asked") << ")" << std::endl;
+            std::fflush (nullptr);
+            std::_Exit (0);
         }
 
         if (args.contains ("--whats-new") || args.contains ("--render-changelog"))
@@ -680,6 +694,43 @@ public:
             setApplicationReturnValue (runSpreadTest (args));
             quit();
             return;
+        }
+
+        if (args.contains ("--render-topbar"))
+        {
+            // --render-topbar <dir> [--multicore]: the top bar while BudgetAdvisor warns (De-Feedback
+            // + soothe3 at 16 samples), dark and light, no device: topbar-<dark|light>.png
+            juce::Process::setDockIconVisible (false);
+            const juce::File dir (args[args.indexOf ("--render-topbar") + 1]);
+            dir.createDirectory();
+
+            static AudioEngine engine;
+            static PluginManager pm;
+            static Session session (engine, pm);
+            const juce::Array<int> sizes { 16, 32, 64, 128 };
+            engine.budget.update (0.0, 16, 48000.0, sizes, 0.15);
+            for (int k = 0; k < 3; ++k)
+                engine.budget.event (1.0 + k, 0.36f, 0.35f, 0.333f, false, -1);
+            engine.budget.update (4.0, 16, 48000.0, sizes, 0.15);
+            engine.forceParallel = args.contains ("--multicore");   // the DSP block in its multicore state
+
+            for (bool light : { false, true })
+            {
+                theme::setLight (light);
+                theme::LookAndFeel lnf;
+                juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
+                TopBar bar (session);
+                bar.setBounds (0, 0, 1420, 106);
+                const auto img = bar.createComponentSnapshot (bar.getLocalBounds(), true, 1.0f);
+                juce::FileOutputStream out (dir.getChildFile (light ? "topbar-light.png" : "topbar-dark.png"));
+                out.setPosition (0); out.truncate();
+                juce::PNGImageFormat().writeImageToStream (img, out);
+                juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
+            }
+
+            std::cout << "budget active " << engine.budget.isActive() << " -> " << engine.budget.getRecommended() << std::endl;
+            std::fflush (nullptr);
+            std::_Exit (0);
         }
 
         if (args.contains ("--render-session"))

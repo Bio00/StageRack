@@ -1,3 +1,4 @@
+#include <map>
 #pragma once
 
 #include "Engine/AudioEngine.h"
@@ -7,6 +8,7 @@
 #include "Update/Updater.h"
 #include "PluginProbe.h"
 #include "TempoTest.h"
+#include "BudgetTest.h"
 #include "RoutingTest.h"
 #include "MidiTest.h"
 #include <chrono>
@@ -257,7 +259,42 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
             applySetArgs (*p, args);   // --set Name=Value (e.g. EverClean: --set Active=On)
             rack.setPlugin (s, std::move (p));
         }
+
+        // --then <format> <file>: one more plugin after them in each rack (a real chain,
+        // e.g. De-Feedback + soothe3 as in a live session)
+        if (const auto ti = args.indexOf ("--then"); ti >= 0)
+        {
+            juce::OwnedArray<juce::PluginDescription> thenDesc;
+            for (auto* f : fm.getFormats())
+                if (f->getName() == args[ti + 1])
+                    f->findAllTypesForFile (thenDesc, args[ti + 2]);
+
+            if (thenDesc.isEmpty()) { std::cout << "--then plugin not found" << std::endl; return 1; }
+
+            juce::String err;
+            auto p = fm.createPluginInstance (*thenDesc[0], sr, bs, err);
+            if (p == nullptr) { std::cout << "create failed: " << err << std::endl; return 1; }
+            Rack::configurePlugin (*p, sr, bs);
+
+            // --then-set Name=Value: like --set, for this plugin ("#1" = normalized value)
+            juce::StringArray thenSets;
+            for (int k = 0; k < args.size() - 1; ++k)
+                if (args[k] == "--then-set")
+                    thenSets.addArray ({ "--set", args[k + 1] });
+            applySetArgs (*p, thenSets);
+            p->prepareToPlay (sr, bs);   // a latency mode takes effect on prepare
+
+            rack.setPlugin (juce::jmin (perRack, Rack::maxSlots - 1), std::move (p));
+        }
     }
+
+    // --same-hop-only: phase costs count only instances with the same hop (up to 0.11.4)
+    AudioEngine::mixedHopCosts = ! args.contains ("--same-hop-only");
+
+    // --wake-probes N: slow unassisted probes in a row before a type needs CoreWakeAssist
+    // (1 = the behaviour up to 0.11.4)
+    if (const auto wi = args.indexOf ("--wake-probes"); wi >= 0)
+        Rack::wakeNeedProbes = juce::jmax (1, args[wi + 1].getIntValue());
 
     // --extra N <plugin file>: extra racks with another (light, continuous) plugin
     if (const auto ei = args.indexOf ("--extra"); ei >= 0)
@@ -502,6 +539,26 @@ inline int runDeviceBenchmark (const juce::StringArray& args)
                 std::cout << "      bus " << juce::String::charToString ((juce::juce_wchar) ('A' + k - 1)) << " input peak "
                           << juce::String (juce::Decibels::gainToDecibels (bus->inMeter[0].readAndReset()), 1) << " dBFS (stage "
                           << bus->stage << ")" << std::endl;
+        // --phases: per slot of rack 1, the hop phase the spread assigned and where the heavy
+        // calls really were (last heavyRing ones, modulo the hop)
+        if (args.contains ("--phases"))
+        {
+            auto& r0 = engine.getRack (0);
+            for (int i = 0; i < Rack::maxSlots; ++i)
+            {
+                auto& sl = r0.getSlot (i);
+                if (sl.plugin == nullptr) continue;
+                const int hop = sl.hopCalls.load();
+                juce::String seen;
+                const auto n = sl.heavyCount.load();
+                std::map<int, int> hist;
+                for (juce::uint32 k = 0; k < juce::jmin<juce::uint32> (n, Rack::Slot::heavyRing); ++k)
+                    if (hop > 1) ++hist[(int) (sl.heavyAt[k].load() % (juce::uint64) hop)];
+                for (auto& [ph, c] : hist) seen << ph << "x" << c << " ";
+                std::cout << "      slot " << i << ": hop " << hop << " phase " << sl.hopPhase.load() << "  heavy calls at " << seen << std::endl;
+            }
+        }
+
         if (args.contains ("--threads"))
             printThreads ("while running");
         dm.removeAudioCallback (&proxy);
@@ -1030,6 +1087,7 @@ inline int runSelfTest()
     }
 
     runTempoSelfTest (check);
+    runBudgetSelfTest (check);
     runRoutingSelfTest (check);
     runMidiSelfTest (check);
 
